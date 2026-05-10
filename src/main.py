@@ -77,6 +77,131 @@ def run() -> None:
     )
 
 
+@cli.command()
+@click.option(
+    "-s",
+    "--symbol",
+    "symbols",
+    multiple=True,
+    help="Symbol to evaluate. Repeat for multiple, e.g. -s AAPL -s MSFT. "
+    "Defaults to AAPL, MSFT, NVDA, SPY.",
+)
+@click.option("--lookback-days", default=60, show_default=True, help="OHLCV history window.")
+@click.option("--news-hours", default=48, show_default=True, help="News lookback window.")
+@click.option(
+    "--no-sentiment",
+    is_flag=True,
+    help="Skip FinBERT (no model download). Useful for smoke tests.",
+)
+def recommend(
+    symbols: tuple[str, ...],
+    lookback_days: int,
+    news_hours: int,
+    no_sentiment: bool,
+) -> None:
+    """Show BUY / HOLD / SELL recommendations for a watchlist.
+
+    Paper-trading only: this command never submits orders.
+    """
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from rich.text import Text
+
+    from src.data.market_data import MarketDataService
+    from src.data.models import TimeFrame
+    from src.data.news_ingestion import get_news_source
+    from src.strategy.recommendation import RecommendationEngine
+
+    settings = get_settings()
+    log = get_logger("recommend")
+
+    if not settings.is_paper_trading:
+        console.print(
+            "[red]refusing to run: ALPACA_BASE_URL is not a paper-trading URL[/red]"
+        )
+        raise click.exceptions.Exit(1)
+
+    watchlist = list(symbols) if symbols else ["AAPL", "MSFT", "NVDA", "SPY"]
+    end = datetime.now(UTC)
+    bars_start = end - timedelta(days=lookback_days)
+    news_start = end - timedelta(hours=news_hours)
+
+    market = MarketDataService()
+    news_source = get_news_source()
+    engine = RecommendationEngine()
+    if no_sentiment:
+        # Drive sentiment to 0 by routing through a neutral analyzer.
+        from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
+
+        class _Neutral(SentimentAnalyzer):
+            def __init__(self) -> None:
+                pass
+
+            def score_text(self, text: str) -> SentimentScore:  # type: ignore[override]
+                return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+            def score_article(self, article: object) -> SentimentScore:  # type: ignore[override]
+                return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+        engine.sentiment_analyzer = _Neutral()
+
+    async def _gather() -> list[tuple[str, object]]:
+        results: list[tuple[str, object]] = []
+        for sym in watchlist:
+            log.info("recommend.fetch", symbol=sym)
+            try:
+                bars = await market.get_bars([sym], TimeFrame.DAY_1, bars_start, end)
+                news = (
+                    [] if no_sentiment else await news_source.fetch([sym], news_start, end, limit=20)
+                )
+                df = market.to_dataframe(bars)
+                rec = engine.recommend(sym, df, news=news)
+                results.append((sym, rec))
+            except Exception as e:  # noqa: BLE001 — surface as a per-row error
+                log.warning("recommend.error", symbol=sym, error=str(e))
+                results.append((sym, e))
+        return results
+
+    rows = asyncio.run(_gather())
+
+    table = Table(
+        title=f"Esther — recommendations ({end.strftime('%Y-%m-%d %H:%M %Z')})",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("symbol")
+    table.add_column("action")
+    table.add_column("confidence", justify="right")
+    table.add_column("tech", justify="right")
+    table.add_column("sent", justify="right")
+    table.add_column("news", justify="right")
+    table.add_column("reasoning", overflow="fold")
+
+    action_style = {"buy": "green", "sell": "red", "hold": "yellow"}
+
+    for sym, item in rows:
+        if isinstance(item, Exception):
+            table.add_row(sym, "[red]ERROR[/red]", "-", "-", "-", "-", str(item))
+            continue
+        rec = item  # TradingRecommendation
+        style = action_style.get(rec.action.value, "white")
+        table.add_row(
+            sym,
+            Text(rec.action.value.upper(), style=f"bold {style}"),
+            f"{rec.confidence:.2f}",
+            f"{rec.technical_score:+.2f}",
+            f"{rec.sentiment_score:+.2f}",
+            str(rec.num_news_articles),
+            rec.reasoning,
+        )
+
+    console.print(table)
+    console.print(
+        "[dim]paper-trading only — recommendations are advisory; no orders submitted.[/dim]"
+    )
+
+
 def _print_banner(settings: object) -> None:
     body = (
         f"[bold]Esther[/bold] v{__version__}\n"
@@ -85,6 +210,7 @@ def _print_banner(settings: object) -> None:
         "Commands:\n"
         "  esther status     show effective config\n"
         "  esther initdb     create database tables\n"
+        "  esther recommend  show BUY/HOLD/SELL for a watchlist (paper)\n"
         "  esther run        start trading loop\n"
     )
     console.print(Panel(body, title="quant trading platform", border_style="cyan"))
