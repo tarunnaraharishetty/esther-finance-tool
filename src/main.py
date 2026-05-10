@@ -68,13 +68,109 @@ def initdb() -> None:
 
 
 @cli.command()
-def run() -> None:
-    """Start the main trading loop. (Stub — fill in once strategies land.)"""
+@click.option(
+    "-s",
+    "--symbol",
+    "symbols",
+    multiple=True,
+    help="Symbol to evaluate. Repeat for multiple, e.g. -s AAPL -s MSFT. "
+    "Defaults to AAPL, MSFT, NVDA, SPY.",
+)
+@click.option("--lookback-days", default=60, show_default=True, help="OHLCV history window.")
+@click.option("--news-hours", default=48, show_default=True, help="News lookback window.")
+@click.option(
+    "--interval",
+    "interval_seconds",
+    default=60.0,
+    show_default=True,
+    help="Seconds between ticks.",
+)
+@click.option(
+    "--max-iterations",
+    type=int,
+    default=None,
+    help="Stop after N ticks (omit to run until Ctrl-C).",
+)
+@click.option(
+    "--min-confidence",
+    default=0.3,
+    show_default=True,
+    help="Skip orders below this confidence even on BUY/SELL.",
+)
+@click.option(
+    "--execute",
+    is_flag=True,
+    default=False,
+    help="Actually submit paper orders. Default is dry-run (no orders).",
+)
+@click.option(
+    "--no-sentiment",
+    is_flag=True,
+    help="Skip FinBERT — sentiment score forced to zero (no model download).",
+)
+def run(
+    symbols: tuple[str, ...],
+    lookback_days: int,
+    news_hours: int,
+    interval_seconds: float,
+    max_iterations: int | None,
+    min_confidence: float,
+    execute: bool,
+    no_sentiment: bool,
+) -> None:
+    """Start the main trading loop: data → engine → risk → paper broker."""
+    import asyncio
+
+    from src.runner import TradingLoop, TradingLoopConfig
+    from src.strategy.recommendation import RecommendationEngine
+
+    settings = get_settings()
     log = get_logger("main")
-    log.info("esther.start", version=__version__)
-    console.print(
-        "[yellow]run loop not yet implemented — wire up data → strategy → execution here[/yellow]"
+
+    if not settings.is_paper_trading:
+        console.print(
+            "[red]refusing to run: ALPACA_BASE_URL is not a paper-trading URL[/red]"
+        )
+        raise click.exceptions.Exit(1)
+
+    watchlist = list(symbols) if symbols else ["AAPL", "MSFT", "NVDA", "SPY"]
+    cfg = TradingLoopConfig(
+        watchlist=watchlist,
+        lookback_days=lookback_days,
+        news_hours=news_hours,
+        interval_seconds=interval_seconds,
+        max_iterations=max_iterations,
+        min_confidence=min_confidence,
+        execute=execute,
     )
+    engine = RecommendationEngine()
+    if no_sentiment:
+        from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
+
+        class _Neutral(SentimentAnalyzer):
+            def __init__(self) -> None:
+                pass
+
+            def score_text(self, text: str) -> SentimentScore:  # type: ignore[override]
+                return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+            def score_article(self, article: object) -> SentimentScore:  # type: ignore[override]
+                return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+        engine.sentiment_analyzer = _Neutral()
+
+    loop = TradingLoop.build(cfg, engine=engine, settings=settings)
+    mode = "EXECUTE (paper orders)" if execute else "DRY-RUN (no orders)"
+    log.info("esther.run.start", version=__version__, watchlist=watchlist, mode=mode)
+    console.print(
+        f"[cyan]esther run[/cyan]  watchlist={watchlist}  interval={interval_seconds}s  "
+        f"min_conf={min_confidence}  mode=[bold]{mode}[/bold]\n"
+        f"[dim]Ctrl-C to stop[/dim]"
+    )
+    try:
+        asyncio.run(loop.run())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]stopped[/yellow]")
 
 
 @cli.command()
