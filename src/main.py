@@ -298,6 +298,137 @@ def recommend(
     )
 
 
+@cli.command()
+@click.option("--symbol", default="SPY", show_default=True, help="Symbol to backtest.")
+@click.option(
+    "--start",
+    "start_str",
+    default=None,
+    help="ISO date (YYYY-MM-DD). Defaults to 3 years ago.",
+)
+@click.option(
+    "--end",
+    "end_str",
+    default=None,
+    help="ISO date (YYYY-MM-DD). Defaults to today.",
+)
+@click.option("--lookback-bars", default=60, show_default=True)
+@click.option("--starting-cash", default=100_000.0, show_default=True)
+@click.option("--commission-pct", default=0.0005, show_default=True, help="Per-fill commission.")
+@click.option("--min-confidence", default=0.3, show_default=True)
+@click.option("--allow-short", is_flag=True, help="Allow short positions on SELL signals.")
+@click.option("--save-csv", type=click.Path(), default=None, help="Write equity curve CSV.")
+def backtest(
+    symbol: str,
+    start_str: str | None,
+    end_str: str | None,
+    lookback_bars: int,
+    starting_cash: float,
+    commission_pct: float,
+    min_confidence: float,
+    allow_short: bool,
+    save_csv: str | None,
+) -> None:
+    """Walk-forward backtest of the recommendation engine vs buy-and-hold.
+
+    Fetches daily bars from Alpaca (paper feed) for ``--symbol`` between
+    ``--start`` and ``--end``, runs the engine bar-by-bar with a rolling
+    window, then prints strategy stats and alpha vs buy-and-hold.
+    """
+    import asyncio
+    from datetime import UTC, date, datetime, timedelta
+
+    from src.backtesting.recommendation_backtest import (
+        BacktestRunConfig,
+        RecommendationBacktest,
+    )
+    from src.data.market_data import MarketDataService
+    from src.data.models import TimeFrame
+    from src.strategy.recommendation import RecommendationEngine
+
+    settings = get_settings()
+    log = get_logger("backtest")
+
+    if not settings.is_paper_trading:
+        console.print("[red]refusing to run: ALPACA_BASE_URL is not paper[/red]")
+        raise click.exceptions.Exit(1)
+
+    end_dt = (
+        datetime.combine(date.fromisoformat(end_str), datetime.min.time(), tzinfo=UTC)
+        if end_str
+        else datetime.now(UTC)
+    )
+    start_dt = (
+        datetime.combine(date.fromisoformat(start_str), datetime.min.time(), tzinfo=UTC)
+        if start_str
+        else end_dt - timedelta(days=365 * 3)
+    )
+
+    log.info("backtest.fetch", symbol=symbol, start=start_dt.isoformat(), end=end_dt.isoformat())
+    console.print(
+        f"[cyan]backtest[/cyan] {symbol}  "
+        f"{start_dt.date()} → {end_dt.date()}  "
+        f"lookback={lookback_bars}  min_conf={min_confidence}  "
+        f"commission={commission_pct * 100:.2f}%"
+    )
+
+    md = MarketDataService()
+    bars = asyncio.run(md.get_bars([symbol], TimeFrame.DAY_1, start_dt, end_dt))
+    df = md.to_dataframe(bars)
+    if df.empty or len(df) <= lookback_bars + 1:
+        console.print(
+            f"[red]not enough bars ({len(df)} rows) for lookback={lookback_bars}[/red]"
+        )
+        raise click.exceptions.Exit(2)
+
+    # Numeric columns from Bar.model_dump() will be Decimal — coerce for pandas.
+    for col in ("open", "high", "low", "close"):
+        df[col] = df[col].astype(float)
+    df["volume"] = df["volume"].astype(int)
+
+    engine = RecommendationEngine()  # sentiment off below via use_sentiment flag
+    cfg = BacktestRunConfig(
+        starting_cash=starting_cash,
+        lookback_bars=lookback_bars,
+        min_confidence=min_confidence,
+        commission_pct=commission_pct,
+        allow_short=allow_short,
+        use_sentiment=False,
+    )
+    bt = RecommendationBacktest(engine, cfg)
+    result = bt.run(df, symbol=symbol)
+
+    table = Table(title=f"Backtest — {symbol}", header_style="bold cyan")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    table.add_row("starting cash", f"${starting_cash:,.0f}")
+    table.add_row("final value", f"${result.final_value:,.0f}")
+    table.add_row("total return", f"{result.total_return_pct:+.2f}%")
+    table.add_row("buy & hold return", f"{result.buy_and_hold_return_pct:+.2f}%")
+    alpha_style = "green" if result.alpha_pct > 0 else "red"
+    table.add_row("alpha vs B&H", f"[{alpha_style}]{result.alpha_pct:+.2f}%[/]")
+    table.add_row("Sharpe (annualised)", f"{result.sharpe:.2f}")
+    table.add_row("max drawdown", f"{result.max_drawdown_pct:.2f}%")
+    table.add_row("trades", str(result.trades))
+    table.add_row("bars evaluated", str(len(df)))
+    console.print(table)
+
+    if save_csv:
+        import pandas as pd
+
+        out = pd.DataFrame(
+            {
+                "equity": result.equity_curve,
+                "returns": result.returns,
+                "action": result.actions,
+                "position": result.positions,
+                "confidence": result.confidence,
+            }
+        )
+        out.to_csv(save_csv)
+        console.print(f"[dim]equity curve written → {save_csv}[/dim]")
+
+
 def _print_banner(settings: object) -> None:
     body = (
         f"[bold]Esther[/bold] v{__version__}\n"
@@ -307,6 +438,7 @@ def _print_banner(settings: object) -> None:
         "  esther status     show effective config\n"
         "  esther initdb     create database tables\n"
         "  esther recommend  show BUY/HOLD/SELL for a watchlist (paper)\n"
+        "  esther backtest   walk-forward backtest vs buy-and-hold\n"
         "  esther run        start trading loop\n"
     )
     console.print(Panel(body, title="quant trading platform", border_style="cyan"))
