@@ -429,6 +429,93 @@ def backtest(
         console.print(f"[dim]equity curve written → {save_csv}[/dim]")
 
 
+def _render_preflight_report(report: object) -> None:
+    """Print a Rich table for a PreflightReport. Imported here to keep
+    the doctor / dashboard handlers thin."""
+    from src.utils.preflight import CheckStatus, PreflightReport
+
+    assert isinstance(report, PreflightReport)
+    table = Table(title="Esther — preflight", header_style="bold cyan")
+    table.add_column("check")
+    table.add_column("status")
+    table.add_column("detail", overflow="fold")
+    style_for = {
+        CheckStatus.OK: "green",
+        CheckStatus.WARN: "yellow",
+        CheckStatus.FAIL: "red",
+    }
+    for r in report.results:
+        style = style_for.get(r.status, "white")
+        table.add_row(
+            r.name,
+            f"[bold {style}]{r.status.value.upper()}[/]",
+            r.detail,
+        )
+    console.print(table)
+    # Print remediation hints separately so they don't clutter the table.
+    for r in report.results:
+        if r.hint and not r.ok:
+            console.print(f"  [dim]↳ {r.name}:[/dim] [yellow]{r.hint}[/yellow]")
+
+
+@cli.command()
+@click.option(
+    "--no-online",
+    is_flag=True,
+    help="Skip the network check that pings Alpaca /v2/clock.",
+)
+@click.option(
+    "--init-env",
+    is_flag=True,
+    help="Create .env from .env.example if it doesn't exist, then re-check.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="With --init-env, overwrite an existing .env (DESTRUCTIVE).",
+)
+def doctor(no_online: bool, init_env: bool, force: bool) -> None:
+    """Diagnose your local setup for live Alpaca paper usage.
+
+    Checks: .env presence, alpaca-py installed, API keys filled in,
+    paper URL configured, FinBERT deps installed, and an optional online
+    request to Alpaca /v2/clock to confirm the keys authenticate.
+    """
+    from src.utils.preflight import init_env_from_example, run_preflight
+
+    settings = get_settings()
+
+    if init_env:
+        try:
+            dst = init_env_from_example(settings.project_root, force=force)
+            console.print(f"[green]created {dst}[/green]")
+            console.print(
+                "[yellow]Edit it now: replace the placeholder Alpaca keys with your "
+                "paper keys from https://app.alpaca.markets/paper/dashboard/overview[/yellow]"
+            )
+        except FileExistsError as e:
+            console.print(f"[yellow]{e}[/yellow]")
+        except FileNotFoundError as e:
+            console.print(f"[red]{e}[/red]")
+            raise click.exceptions.Exit(1) from None
+        # Re-load settings now that .env may have changed.
+        from src.config import settings as settings_mod
+
+        settings_mod.get_settings.cache_clear()
+        settings = get_settings()
+
+    report = run_preflight(settings, online=not no_online)
+    _render_preflight_report(report)
+
+    if not report.ok:
+        console.print(
+            "\n[red bold]preflight failed[/red bold] — fix the items above before "
+            "running `esther dashboard` or `esther run`."
+        )
+        raise click.exceptions.Exit(2)
+    console.print("\n[green]all checks passed — ready to launch[/green]")
+
+
 @cli.command()
 @click.option(
     "-s",
@@ -465,6 +552,11 @@ def backtest(
     is_flag=True,
     help="Skip FinBERT — sentiment score forced to zero (no model download).",
 )
+@click.option(
+    "--skip-preflight",
+    is_flag=True,
+    help="Skip the preflight checks. Not recommended.",
+)
 def dashboard(
     symbols: tuple[str, ...],
     refresh_seconds: float,
@@ -472,10 +564,14 @@ def dashboard(
     news_hours: int,
     mock: bool,
     no_sentiment: bool,
+    skip_preflight: bool,
 ) -> None:
     """Launch the Textual dashboard: live watchlist + recommendations + events.
 
     Paper-only and observational — no orders are submitted from this UI.
+    With --mock you can run offline using synthetic data; without --mock
+    the dashboard fetches real Alpaca paper bars + news and (if sentiment
+    is enabled) scores headlines with FinBERT.
     """
     from src.dashboard.app import DashboardApp
     from src.dashboard.controller import (
@@ -492,9 +588,22 @@ def dashboard(
             watchlist=watchlist, use_sentiment=not no_sentiment
         )
     else:
-        if not settings.is_paper_trading:
-            console.print("[red]refusing to run: ALPACA_BASE_URL is not paper[/red]")
-            raise click.exceptions.Exit(1)
+        if not skip_preflight:
+            from src.utils.preflight import PreflightError, require_live_ok
+
+            try:
+                require_live_ok(settings, online=True)
+            except PreflightError as e:
+                console.print(
+                    "[red bold]Cannot launch live dashboard — preflight failed.[/red bold]"
+                )
+                _render_preflight_report(e.report)
+                console.print(
+                    "\n[dim]Run `esther doctor` for the same diagnostics, or "
+                    "pass `--mock` to run with synthetic data.[/dim]"
+                )
+                raise click.exceptions.Exit(2) from None
+
         engine = RecommendationEngine()
         if no_sentiment:
             from src.sentiment.analyzer import (
@@ -532,6 +641,7 @@ def _print_banner(settings: object) -> None:
         f"paper: {'yes' if getattr(settings, 'is_paper_trading') else 'NO'}\n\n"
         "Commands:\n"
         "  esther status      show effective config\n"
+        "  esther doctor      diagnose Alpaca + FinBERT setup\n"
         "  esther initdb      create database tables\n"
         "  esther recommend   show BUY/HOLD/SELL for a watchlist (paper)\n"
         "  esther dashboard   live Textual dashboard (use --mock for demo)\n"
