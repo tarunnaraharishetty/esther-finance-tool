@@ -1,0 +1,230 @@
+"""Tests for the dashboard controllers and a headless smoke test of the app."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from src.dashboard.controller import (
+    BaseController,
+    DashboardController,
+    MockDashboardController,
+)
+from src.dashboard.state import (
+    AccountSnapshot,
+    DashboardSnapshot,
+    EventBuffer,
+    RecommendationRow,
+)
+from src.data.models import NewsArticle, TimeFrame
+from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
+from src.strategy.base import SignalAction
+from src.strategy.recommendation import RecommendationEngine
+
+
+# ---------------------------------------------------------------------------
+# State plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_event_buffer_is_bounded() -> None:
+    buf = EventBuffer(capacity=3)
+    for i in range(5):
+        buf.info(f"msg-{i}")
+    snap = buf.snapshot()
+    assert len(snap) == 3
+    assert [e.message for e in snap] == ["msg-2", "msg-3", "msg-4"]
+
+
+def test_event_buffer_levels() -> None:
+    buf = EventBuffer()
+    buf.info("a")
+    buf.warn("b")
+    buf.error("c")
+    levels = [e.level for e in buf.snapshot()]
+    assert levels == ["info", "warn", "error"]
+
+
+# ---------------------------------------------------------------------------
+# MockDashboardController
+# ---------------------------------------------------------------------------
+
+
+def test_mock_controller_returns_full_snapshot() -> None:
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT", "NVDA"], seed=7)
+    snap = asyncio.run(ctrl.fetch_snapshot())
+    assert isinstance(snap, DashboardSnapshot)
+    assert snap.tick == 1
+    assert [r.symbol for r in snap.rows] == ["AAPL", "MSFT", "NVDA"]
+    assert snap.account is not None
+    assert snap.account.paper_trading is True
+    assert all(0.0 <= r.confidence <= 1.0 for r in snap.rows)
+    assert all(-1.0 <= r.combined_score <= 1.0 for r in snap.rows)
+
+
+def test_mock_controller_advances_tick_and_emits_events() -> None:
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=3)
+    s1 = asyncio.run(ctrl.fetch_snapshot())
+    s2 = asyncio.run(ctrl.fetch_snapshot())
+    assert s1.tick == 1 and s2.tick == 2
+    # Each tick should add at least one "tick start" event + per-symbol events.
+    assert len(s2.events) > len(s1.events)
+    levels = {e.level for e in s2.events}
+    assert "info" in levels
+
+
+def test_mock_controller_action_is_a_valid_signal() -> None:
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT"], seed=42)
+    snap = asyncio.run(ctrl.fetch_snapshot())
+    valid = {SignalAction.BUY, SignalAction.SELL, SignalAction.HOLD}
+    for r in snap.rows:
+        assert r.action in valid
+
+
+# ---------------------------------------------------------------------------
+# Live DashboardController — fully mocked deps so no Alpaca / network
+# ---------------------------------------------------------------------------
+
+
+class _Neut(SentimentAnalyzer):
+    def __init__(self) -> None:
+        pass
+
+    def score_text(self, _t: str) -> SentimentScore:  # type: ignore[override]
+        return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+    def score_article(self, _a: NewsArticle) -> SentimentScore:  # type: ignore[override]
+        return self.score_text("")
+
+
+def _df(n: int = 60, drift: float = 0.005) -> pd.DataFrame:
+    rng = np.random.default_rng(11)
+    rets = rng.normal(loc=drift, scale=0.01, size=n)
+    close = 100.0 * np.exp(np.cumsum(rets))
+    idx = pd.date_range(end=datetime.now(UTC), periods=n, freq="D")
+    return pd.DataFrame(
+        {
+            "open": close,
+            "high": close * 1.001,
+            "low": close * 0.999,
+            "close": close,
+            "volume": np.full(n, 1_000_000, dtype=int),
+        },
+        index=idx,
+    )
+
+
+def _build_live_controller(
+    *, equity: Decimal = Decimal("250000"), df: pd.DataFrame | None = None
+) -> DashboardController:
+    market = MagicMock()
+    market.get_bars = AsyncMock(return_value=["bar"])  # sentinel
+    market.to_dataframe = MagicMock(return_value=df if df is not None else _df())
+
+    news_source = MagicMock()
+    news_source.fetch = AsyncMock(return_value=[])
+
+    broker = MagicMock()
+    broker.get_account_equity = AsyncMock(return_value=equity)
+
+    engine = RecommendationEngine(sentiment_analyzer=_Neut())
+    return DashboardController(
+        watchlist=["AAPL"],
+        engine=engine,
+        market=market,
+        news_source=news_source,
+        broker=broker,
+    )
+
+
+def test_live_controller_returns_recommendation_and_equity() -> None:
+    ctrl = _build_live_controller(equity=Decimal("123456.78"))
+    snap = asyncio.run(ctrl.fetch_snapshot())
+    assert len(snap.rows) == 1
+    row = snap.rows[0]
+    assert row.symbol == "AAPL"
+    assert row.error is None
+    assert snap.account is not None
+    assert snap.account.equity == Decimal("123456.78")
+    assert snap.account.paper_trading is True
+
+
+def test_live_controller_handles_empty_bars() -> None:
+    ctrl = _build_live_controller(df=pd.DataFrame())
+    snap = asyncio.run(ctrl.fetch_snapshot())
+    assert snap.rows[0].error == "no bars"
+    assert snap.rows[0].action == SignalAction.HOLD
+
+
+def test_live_controller_handles_market_error() -> None:
+    ctrl = _build_live_controller()
+    ctrl.market.get_bars = AsyncMock(side_effect=RuntimeError("alpaca down"))  # type: ignore[method-assign]
+    snap = asyncio.run(ctrl.fetch_snapshot())
+    assert snap.rows[0].error is not None
+    assert "alpaca down" in snap.rows[0].error
+    # error-level event should be in the buffer
+    assert any(e.level == "error" for e in snap.events)
+
+
+def test_live_controller_handles_account_error() -> None:
+    ctrl = _build_live_controller()
+    ctrl.broker.get_account_equity = AsyncMock(side_effect=RuntimeError("403"))  # type: ignore[method-assign]
+    snap = asyncio.run(ctrl.fetch_snapshot())
+    assert snap.account is not None
+    assert "403" in snap.account.note
+
+
+def test_live_controller_refuses_non_paper_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
+    from src.config import settings as settings_mod
+
+    settings_mod.get_settings.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match="non-paper"):
+            DashboardController(
+                watchlist=["AAPL"],
+                engine=RecommendationEngine(sentiment_analyzer=_Neut()),
+                market=MagicMock(),
+                news_source=MagicMock(),
+                broker=MagicMock(),
+            )
+    finally:
+        settings_mod.get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Headless app smoke test — verifies the Textual layout + keybindings boot.
+# ---------------------------------------------------------------------------
+
+
+async def test_app_renders_and_responds_to_keys() -> None:
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT", "NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        table = app.query_one(DataTable)
+        assert table.row_count == 3
+        assert len(table.columns) == 11  # see compose()
+
+        # Pause / resume key toggles state
+        await pilot.press("p")
+        assert app.paused is True
+        await pilot.press("p")
+        assert app.paused is False
+
+        # Manual refresh leaves the table populated
+        await pilot.press("r")
+        await pilot.pause(0.2)
+        assert table.row_count == 3

@@ -414,7 +414,7 @@ def backtest(
     console.print(table)
 
     if save_csv:
-        import pandas as pd
+        import pandas as pd  # noqa: I001
 
         out = pd.DataFrame(
             {
@@ -429,17 +429,114 @@ def backtest(
         console.print(f"[dim]equity curve written → {save_csv}[/dim]")
 
 
+@cli.command()
+@click.option(
+    "-s",
+    "--symbol",
+    "symbols",
+    multiple=True,
+    help="Repeat for each ticker, e.g. -s AAPL -s MSFT. Defaults to AAPL MSFT NVDA TSLA SPY.",
+)
+@click.option(
+    "--refresh-seconds",
+    default=5.0,
+    show_default=True,
+    help="Seconds between dashboard refreshes.",
+)
+@click.option(
+    "--lookback-days",
+    default=60,
+    show_default=True,
+    help="OHLCV history window passed to the engine each tick.",
+)
+@click.option(
+    "--news-hours",
+    default=48,
+    show_default=True,
+    help="News lookback window per tick.",
+)
+@click.option(
+    "--mock",
+    is_flag=True,
+    help="Use synthetic data — no Alpaca credentials required.",
+)
+@click.option(
+    "--no-sentiment",
+    is_flag=True,
+    help="Skip FinBERT — sentiment score forced to zero (no model download).",
+)
+def dashboard(
+    symbols: tuple[str, ...],
+    refresh_seconds: float,
+    lookback_days: int,
+    news_hours: int,
+    mock: bool,
+    no_sentiment: bool,
+) -> None:
+    """Launch the Textual dashboard: live watchlist + recommendations + events.
+
+    Paper-only and observational — no orders are submitted from this UI.
+    """
+    from src.dashboard.app import DashboardApp
+    from src.dashboard.controller import (
+        DashboardController,
+        MockDashboardController,
+    )
+    from src.strategy.recommendation import RecommendationEngine
+
+    settings = get_settings()
+    watchlist = list(symbols) if symbols else ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
+
+    if mock:
+        controller = MockDashboardController(
+            watchlist=watchlist, use_sentiment=not no_sentiment
+        )
+    else:
+        if not settings.is_paper_trading:
+            console.print("[red]refusing to run: ALPACA_BASE_URL is not paper[/red]")
+            raise click.exceptions.Exit(1)
+        engine = RecommendationEngine()
+        if no_sentiment:
+            from src.sentiment.analyzer import (
+                SentimentAnalyzer,
+                SentimentLabel,
+                SentimentScore,
+            )
+
+            class _Neutral(SentimentAnalyzer):
+                def __init__(self) -> None:
+                    pass
+
+                def score_text(self, text: str) -> SentimentScore:  # type: ignore[override]
+                    return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+                def score_article(self, article: object) -> SentimentScore:  # type: ignore[override]
+                    return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+            engine.sentiment_analyzer = _Neutral()
+        controller = DashboardController(
+            watchlist=watchlist,
+            engine=engine,
+            settings=settings,
+            lookback_days=lookback_days,
+            news_hours=news_hours,
+        )
+
+    DashboardApp(controller, refresh_seconds=refresh_seconds).run()
+
+
 def _print_banner(settings: object) -> None:
     body = (
         f"[bold]Esther[/bold] v{__version__}\n"
         f"env: {getattr(settings, 'app_env').value}  "
         f"paper: {'yes' if getattr(settings, 'is_paper_trading') else 'NO'}\n\n"
         "Commands:\n"
-        "  esther status     show effective config\n"
-        "  esther initdb     create database tables\n"
-        "  esther recommend  show BUY/HOLD/SELL for a watchlist (paper)\n"
-        "  esther backtest   walk-forward backtest vs buy-and-hold\n"
-        "  esther run        start trading loop\n"
+        "  esther status      show effective config\n"
+        "  esther initdb      create database tables\n"
+        "  esther recommend   show BUY/HOLD/SELL for a watchlist (paper)\n"
+        "  esther dashboard   live Textual dashboard (use --mock for demo)\n"
+        "  esther backtest    walk-forward backtest vs buy-and-hold\n"
+        "  esther run         start trading loop\n"
     )
     console.print(Panel(body, title="quant trading platform", border_style="cyan"))
 
