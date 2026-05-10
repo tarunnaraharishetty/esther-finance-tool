@@ -1,6 +1,7 @@
-"""Persistent storage for OHLCV bars + news articles.
+"""Persistent storage: engine, session, schema bootstrap.
 
-Backed by SQLAlchemy. SQLite by default; switch via DATABASE_URL.
+Backed by SQLAlchemy. SQLite by default; switch via DATABASE_URL. ORM models
+live in :mod:`src.data.orm`; query/upsert helpers in :mod:`src.data.repositories`.
 """
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from src.config import get_settings
@@ -34,6 +35,14 @@ def get_engine() -> "Engine":
     if _engine is None:
         url = get_settings().database_url
         _engine = create_engine(url, future=True, echo=False)
+        if _engine.dialect.name == "sqlite":
+            # SQLite needs FK enforcement enabled per connection — ON DELETE
+            # CASCADE relies on this and it's off by default.
+            @event.listens_for(_engine, "connect")
+            def _enable_sqlite_fks(dbapi_conn: object, _record: object) -> None:
+                cursor = dbapi_conn.cursor()  # type: ignore[attr-defined]
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.close()
     return _engine
 
 
@@ -60,4 +69,20 @@ def session_scope() -> Iterator[Session]:
 
 def init_db() -> None:
     """Create tables. Replace with Alembic migrations in production."""
+    # Importing orm registers tables on Base.metadata.
+    from src.data import orm  # noqa: F401
+
     Base.metadata.create_all(bind=get_engine())
+
+
+def reset_engine() -> None:
+    """Drop the cached engine + session factory.
+
+    Tests that swap DATABASE_URL must call this so a fresh engine is built
+    against the new URL. Safe to call when no engine exists.
+    """
+    global _engine, _SessionLocal
+    if _engine is not None:
+        _engine.dispose()
+    _engine = None
+    _SessionLocal = None
