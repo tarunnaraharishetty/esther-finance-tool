@@ -1,0 +1,31 @@
+# Strategy configuration. Copy to strategies.yaml and customise.
+# Loaded by src/strategy at startup. Schema validated via Pydantic.
+
+universe:
+  symbols: [AAPL, MSFT, NVDA, SPY]
+  timeframe: 5Min
+
+signals:
+  weights:
+    sentiment: 1.5
+    rsi: 1.0
+    macd: 1.0
+    bollinger: 0.8
+  threshold: 0.25
+
+indicators:
+  rsi:
+    period: 14
+    oversold: 30
+    overbought: 70
+  macd:
+    fast: 12
+    slow: 26
+    signal: 9
+  bollinger:
+    period: 20
+    num_std: 2.0
+
+execution:
+  refresh_seconds: 30
+  market_hours_only: true

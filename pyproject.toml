@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esther"
+version = "0.1.0"
+description = "Production-grade terminal-based quantitative trading platform built on Alpaca."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "Esther Finance" }]
+keywords = ["trading", "quant", "alpaca", "sentiment", "backtesting"]
+
+dependencies = [
+    "alpaca-py>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "python-dotenv>=1.0",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "websockets>=12.0",
+    "httpx>=0.27",
+    "rich>=13.7",
+    "textual>=0.70",
+    "click>=8.1",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "transformers>=4.42",
+    "torch>=2.3",
+    "backtrader>=1.9.78",
+    "structlog>=24.1",
+    "tenacity>=8.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "pytest-mock>=3.14",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-requests",
+    "ipython>=8.25",
+]
+postgres = [
+    "psycopg[binary]>=3.2",
+]
+
+[project.scripts]
+esther = "src.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["data", "logs", "models"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pyflakes / pycodestyle
+    "I",             # isort
+    "B",             # bugbear
+    "UP",            # pyupgrade
+    "SIM",           # simplify
+    "RUF",
+    "ASYNC",
+    "PTH",           # use pathlib
+]
+ignore = ["E501"]    # handled by formatter
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+exclude = ["build/", "dist/", "data/", "logs/"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q --strict-markers --cov=src --cov-report=term-missing -m 'not integration and not slow'"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: hits real external services (run with `pytest -m integration`)",
+    "slow: downloads models or otherwise long-running (run with `pytest -m slow`)",
+]

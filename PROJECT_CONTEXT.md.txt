@@ -1,0 +1,118 @@
+Production-grade terminal-based quantitative trading platform built in Python using Alpaca API.
+
+Purpose:
+This project is an all-in-one algorithmic trading and financial intelligence platform designed for retail quant trading and research. The system combines real-time market data, AI-powered news sentiment analysis, technical indicators, risk management, and automated execution into a modular architecture.
+
+Target users:
+- Quantitative traders
+- Algorithmic trading researchers
+- Retail traders
+- Developers building systematic trading strategies
+
+Core problem solved:
+Most retail trading bots are fragmented and lack proper architecture, risk systems, and integrated alpha generation. This platform aims to centralize:
+- Real-time market/news ingestion
+- AI sentiment scoring
+- Technical analysis
+- Signal generation
+- Risk management
+- Backtesting
+- Paper/live trading
+
+Tech stack:
+- Python 3.12+
+- Alpaca-py
+- Flask (initial API/dashboard support)
+- WebSockets for live streaming
+- REST APIs for historical/account data
+- Pandas / NumPy
+- Transformers (FinBERT / RoBERTa)
+- Backtrader for backtesting
+- SQLite initially, PostgreSQL later
+- Rich/Textual for terminal UI
+- Pytest for testing
+- Docker later for deployment
+
+Architecture:
+The system should follow a modular architecture with separation of concerns.
+
+Main modules:
+1. Data ingestion layer
+   - Alpaca market data
+   - News API ingestion
+   - Historical OHLCV storage
+   - WebSocket streaming
+
+2. AI strategy engine
+   - News sentiment scoring
+   - Technical indicators (RSI, MACD, Bollinger Bands)
+   - Monte Carlo simulations
+   - Signal aggregation engine
+
+3. Execution engine
+   - Paper trading
+   - Bracket orders
+   - Position sizing
+   - Risk controls
+   - Stop loss / take profit
+
+4. Risk management
+   - Value at Risk (VaR)
+   - Sharpe ratio
+   - Drawdown tracking
+   - Exposure monitoring
+
+5. Backtesting system
+   - Backtrader integration
+   - Out-of-sample validation
+   - Benchmark comparison against SPY/S&P 500
+   - Performance analytics
+
+Key features planned:
+- Real-time news sentiment trading
+- Hybrid signal generation
+- Streaming market data
+- Rate-limit-aware API management
+- Shared market snapshots
+- Tiered refresh loops
+- Config-driven strategies
+- Structured logging
+- Production-grade error handling
+
+Development conventions:
+- Strong modularity
+- Type hints everywhere
+- Pydantic configs
+- Clean folder separation
+- OOP where appropriate
+- Avoid giant files
+- Keep functions small and reusable
+- Use async where beneficial
+- Use environment variables for secrets
+- Follow production-grade engineering practices
+
+Project structure goals:
+- src/
+- config/
+- data/
+- sentiment/
+- indicators/
+- strategy/
+- execution/
+- risk/
+- backtesting/
+- tests/
+- logs/
+
+Testing:
+- Pytest
+- Unit tests for indicators/signals
+- Mock Alpaca API responses
+- Backtesting validation before live execution
+
+Run instructions:
+Initial phase should run from terminal using:
+python src/main.py
+
+Current stage:
+The repository is empty and needs initial scaffolding, dependency setup, architecture planning, and base implementation.
