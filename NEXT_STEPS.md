@@ -1,261 +1,207 @@
 # NEXT_STEPS
 
-End-of-day snapshot for the Esther project. Read this first when picking the work back up.
+Pick-up notes for the next session. Read this before writing any code.
+
+*Last touched: 2026-05-12.*
 
 ---
 
-## 1. Simplified project vision
+## 1. What Esther is now
 
-The original `PROJECT_CONTEXT.md.txt` was very ambitious (full backtesting, Monte Carlo VaR, multi-broker abstraction, Docker, Postgres, the works). Scope is now narrowed to a focused MVP:
+An **AI-powered trading dashboard and research assistant** that helps a
+human trader understand what's happening in their watchlist — not an
+autonomous trader. The earlier ambitions (Backtrader cerebro,
+hedge-fund infrastructure, autonomous order submission, Monte Carlo VaR)
+have been deliberately cut. Anything in this doc that nudges back
+toward "beat SPY" or "submit orders for the user" is wrong.
 
-> **An AI-powered terminal trading assistant that watches a market watchlist, fuses technical signals with FinBERT news sentiment, and surfaces clear BUY / HOLD / SELL recommendations live in a Textual dashboard.**
+The product is built around four feature axes:
 
-Concretely, the MVP loop is:
-
-1. **Market tracking** — pull live OHLCV bars for a configurable watchlist (Alpaca paper account).
-2. **Sentiment analysis** — pull recent news for those symbols, score with FinBERT.
-3. **Recommendation** — combine technical indicators (RSI/MACD/Bollinger) with sentiment via the existing `SignalAggregator` to produce one BUY / HOLD / SELL per symbol with a confidence score and short rationale.
-4. **Terminal dashboard** — Textual TUI showing the watchlist, recommendations, last-updated timestamps, and most recent headlines per symbol.
-
-Order execution, full backtesting, deep risk management, and Monte Carlo VaR are **deferred** — they exist as scaffolding but are not on the critical path to shipping the assistant.
-
----
-
-## 2. Current completed features
-
-### Foundation (all green: 58 tests passing, 1 slow integration test deselected by default)
-
-- **Project scaffolding**: pyproject.toml (3.12+, ruff/mypy strict), virtualenv, requirements.txt, `.env.example`, `.gitignore`, CLAUDE.md (engineering + trading-safety rules).
-- **Config (`src/config/`)**: Pydantic `Settings` with `SecretStr` for Alpaca keys, paper-trading guard (`is_paper_trading`), enum-typed env loading, cached singleton via `get_settings()`.
-- **Logging + utilities (`src/utils/`)**: structlog-based structured logging, token-bucket rate limiter, sync + async tenacity retry decorators.
-
-### Data layer (real, not stubbed)
-
-- **`AlpacaClient`** (`src/data/alpaca_client.py`): lazy facade over alpaca-py's `TradingClient`, `StockHistoricalDataClient`, `NewsClient`, `StockDataStream`, `NewsDataStream`. Single auth point, single rate-limit bucket.
-- **`MarketDataService`** (`src/data/market_data.py`): async `get_bars()` / `get_latest_bar()`, sync SDK wrapped in `asyncio.to_thread`, retry-decorated, `TimeFrame` enum translation, Decimal precision.
-- **`AlpacaNewsSource`** (`src/data/news_ingestion.py`): provider-pluggable; Alpaca implementation maps to our `NewsArticle` model.
-- **`MarketStream`** (`src/data/streaming.py`): async wrapper over both stock and news WebSocket streams. Multi-handler fan-out per event type, domain-model conversion, error isolation (a raising handler doesn't kill the loop), `start()` / `stop()` / `run_forever()`.
-
-### Sentiment
-
-- **`SentimentAnalyzer`** (`src/sentiment/analyzer.py`): FinBERT pipeline lazy-loaded on first use. `score_text()` and `score_article()` return `SentimentScore` with a `signed` confidence value (positive ⇒ +conf, negative ⇒ –conf, neutral ⇒ 0). Verified end-to-end against a real headline.
-
-### Indicators + strategy
-
-- **Indicators** (`src/indicators/`): working `RSI`, `MACD`, `BollingerBands` with `Indicator` ABC.
-- **`SignalAggregator`** (`src/strategy/signal_aggregator.py`): weighted-vote combiner over per-source signals → single BUY / HOLD / SELL per symbol with confidence + threshold.
-- **`Signal` / `SignalAction`** dataclasses (`src/strategy/base.py`).
-
-### Risk + execution (scaffolded; mostly used for safety gates)
-
-- **`RiskGate`** (`src/risk/exposure.py`): pre-trade checks (positive equity, positive price, max position notional).
-- **`AlpacaBroker`** (`src/execution/broker.py`): real `submit()` (with `OrderClass.BRACKET` + `TakeProfitRequest`/`StopLossRequest`), `cancel()`, `get_account_equity()`.
-- **`OrderManager`** (`src/execution/order_manager.py`): `Signal` → risk-gated bracket order, `FixedFractionSizer` for position sizing.
-- **Risk metrics** (`src/risk/metrics.py`, `var.py`): Sharpe, Sortino, max-drawdown; historical / parametric / Monte Carlo VaR.
-
-### Storage
-
-- **ORM models** (`src/data/orm.py`): `BarORM`, `NewsArticleORM`, `NewsSymbolORM`, `SentimentScoreORM` (composite PK on bars; many-to-many news/symbol; sentiment keyed by `(news_id, model)` so re-scoring with the same model overwrites and a new model coexists).
-- **Repositories** (`src/data/repositories.py`): `BarRepository`, `NewsRepository`, `SentimentRepository`. SQLite + Postgres `ON CONFLICT` upsert, merge fallback elsewhere. UTC re-attached on read (SQLite is tz-naive).
-- **Engine + session** (`src/data/storage.py`): `get_engine()`, `session_scope()`, `init_db()`, `reset_engine()` (for tests). SQLite FK pragma enabled per connection so `ON DELETE CASCADE` fires.
-
-### CLI
-
-- **`src/main.py`** (Click + Rich): `esther status`, `esther initdb`, `esther run` (stub). Path bootstrap so `python src/main.py` works alongside `python -m src.main`. ASCII output (works in Windows cp1252 console).
-
-### Backtesting
-
-- **`BacktestEngine` + `compare_to_spy`** (`src/backtesting/`): scaffolded with `NotImplementedError` — Backtrader is installed but the cerebro wiring is intentionally deferred.
+1. **Market monitoring** — live Alpaca paper bars per watchlist symbol.
+2. **Sentiment analysis** — FinBERT scoring on recent news, surfaced
+   alongside technicals.
+3. **Decision support** — RSI / MACD / Bollinger + sentiment fed into a
+   `RecommendationEngine` that emits BUY / HOLD / SELL with confidence
+   and a structured explanation.
+4. **Explanation and alerts** — Claude-written prose briefs, rule-based
+   alerts (action change, confidence cross, sentiment shift) surfaced
+   in a dedicated dashboard pane with a terminal bell on critical.
 
 ---
 
-## 3. Current architecture
+## 2. What got done this session (PRs 1–4)
+
+Each is a single squashed commit on its own branch. None are pushed to
+a remote yet; merge them into `main` (or whatever your trunk is) when
+you're ready.
+
+| PR | Branch | Commit | Summary |
+|----|--------|--------|---------|
+| 1 | `refactor/decision-support-cut` | `e5abf0a` | Stripped autonomous-trading + backtesting scaffolding. Removed `src/execution/`, `src/runner.py`, `src/backtesting/`, `src/risk/exposure.py`, `src/risk/var.py`, `scripts/demo_run.py`, plus `esther run` + `esther backtest` commands and risk-related settings. Dropped `backtrader` dep. Reframed `CLAUDE.md` around decision support; added a safety rule banning order submission anywhere in the codebase. |
+| 2 | `feat/intelligence-scaffold` | `045f60e` | New `src/intelligence/` layer: `explain.py` (structured Explanation + Contributor types from raw scores), `summary.py` (`Summarizer` protocol + `TemplateSummarizer`), `alerts.py` (`Rule` protocol, `AlertEngine`, three concrete rules), `watchlist.py` (`diff_snapshots`, `top_movers`, `action_breakdown`). Dashboard `DetailPanel` now uses `explain()` to render bulleted contributor reasons. |
+| 3 | `feat/llm-summaries` | `f1b712c` | Anthropic-backed `LLMSummarizer` on `claude-opus-4-7`, effort=low, prompt-cache marker in place (cache prefix is still below Opus 4.7's 4K-token minimum — marker pays off as the system prompt grows). New `esther summarize SYMBOL` CLI command maps Anthropic SDK exceptions to clean CLI errors. `anthropic>=0.55` added. |
+| 4 | `feat/alerts-and-config` | `f400d4d` | `AlertEngine` wired into the dashboard — `BaseController` owns one, snapshot grows an `alerts` field. New dedicated alerts pane (color-coded by severity, terminal bell on critical). `config/alerts.yaml` YAML loader with strict validation. Latent `AlertEngine(rules=[])` falsy-default bug fixed. `pyyaml>=6.0` added. |
+
+Test counts grew 58 → 99 → 135 → 144 → 154 across PRs 1–4. Run `pytest`
+to confirm 154 pass and 1 slow/integration test is deselected.
+
+---
+
+## 3. Repo layout (as of this handoff)
+
+The detailed map lives in `CLAUDE.md`. Quick summary:
 
 ```
-                       ┌───────────────────┐
-                       │       CLI         │  src/main.py (Click + Rich)
-                       └─────────┬─────────┘
-                                 │
-                ┌────────────────┼────────────────┐
-                │                │                │
-                ▼                ▼                ▼
-       ┌──────────────┐ ┌──────────────┐ ┌────────────────┐
-       │   config     │ │    utils     │ │   storage      │
-       │   Settings   │ │ logging,     │ │ engine,        │
-       │   (Pydantic) │ │ rate_limiter │ │ session_scope  │
-       └──────────────┘ └──────────────┘ └────────┬───────┘
-                                                  │
-                                                  ▼
-                                        ┌─────────────────┐
-                                        │  ORM + repos    │
-                                        │  Bar / News /   │
-                                        │  Sentiment      │
-                                        └─────────────────┘
+src/
+├── main.py            # esther CLI: status / doctor / initdb / recommend / summarize / dashboard
+├── config/            # Pydantic Settings (Alpaca + Anthropic + sentiment)
+├── data/              # Alpaca client, market/news/streaming, ORM, repositories
+├── sentiment/         # FinBERT scorer
+├── indicators/        # RSI / MACD / Bollinger
+├── strategy/          # base Signal + SignalAction + RecommendationEngine + SignalAggregator
+├── risk/              # Sharpe + max-drawdown (for future watchlist intel)
+├── dashboard/         # Textual app + controller + snapshot state
+├── intelligence/      # explain / summary / llm_summary / alerts / watchlist  (NEW)
+└── utils/             # logging, rate limiter, preflight
 
-  ┌────────────────── data layer (alpaca-backed) ──────────────────┐
-  │                                                                │
-  │  AlpacaClient ── MarketDataService    AlpacaNewsSource         │
-  │       │                │                       │               │
-  │       │                ▼                       ▼               │
-  │       │            historical bars         historical news     │
-  │       │                                                        │
-  │       └─── MarketStream ── live bars / quotes / trades / news  │
-  └───────────────────────────┬────────────────────────────────────┘
-                              │
-                              ▼
-       ┌──────────────────────────────────────────────────┐
-       │                alpha pipeline                    │
-       │                                                  │
-       │  Indicators (RSI, MACD, Bollinger) ─┐            │
-       │  Sentiment (FinBERT)  ──────────────┤            │
-       │                                     ▼            │
-       │                          SignalAggregator        │
-       │                                     │            │
-       │                                     ▼            │
-       │                            BUY / HOLD / SELL     │
-       └─────────────────────────────────────┬────────────┘
-                                             │
-                                             ▼
-       ┌──────────────────────────────────────────────────┐
-       │  execution  (deferred for MVP — wired but unused)│
-       │  RiskGate ── OrderManager ── AlpacaBroker        │
-       └──────────────────────────────────────────────────┘
+config/
+├── strategies.example.yaml   # universe + signals + indicators
+└── alerts.example.yaml       # alert rules (NEW)
 ```
 
-**Layering rules** (enforced by code structure + CLAUDE.md):
-
-- `config` and `utils` have no other intra-project deps.
-- `data` depends only on `config`, `utils`.
-- `sentiment`, `indicators` depend only on `data`, `config`, `utils`.
-- `strategy` depends on `data`, `sentiment`, `indicators`.
-- `execution` depends on `strategy`, `risk`, `data`.
-- Nothing imports from `main` or test code.
-
-**Async boundary**: alpaca-py's SDK is sync; we wrap blocking calls in `asyncio.to_thread`. WebSocket streams run in a worker thread (alpaca-py's `run()` spins up its own asyncio loop).
+Layering still holds: `intelligence` depends on `strategy` + `data`; it
+does not import from `dashboard` or `main`. The `Summarizer` protocol
+lets the dashboard / CLI consume either `TemplateSummarizer` (offline
+deterministic) or `LLMSummarizer` (Claude-backed) without caring which.
 
 ---
 
-## 4. What still needs to be built
+## 4. Punch list for the next session
 
-### Critical path to MVP (the assistant)
+Ordered by impact. Stop and reprioritize after step 3 — at that point
+the product is genuinely usable end-to-end and the rest is polish.
 
-1. **`RecommendationService`** (`src/strategy/recommendation.py` — does not yet exist).
-   For each symbol in a watchlist: pull recent bars + news, compute indicator signals, score sentiment, feed everything into `SignalAggregator`, return a `Recommendation` (symbol, action, confidence, rationale, last-updated, contributing signals).
-2. **Textual dashboard** (`src/ui/dashboard.py` — does not yet exist).
-   Watchlist table with columns: symbol, last price, change %, recommendation (color-coded), confidence, latest headline, sentiment.
-3. **`esther watch` CLI command** that boots the dashboard with a configurable refresh cadence and watchlist (read from `config/strategies.yaml`).
-4. **Backfill command** (`esther backfill --symbols AAPL,MSFT --days 30`) to populate `bars` + `news_articles` so indicators have history on first run.
+### Critical path (do these first)
 
-### Useful but not on the MVP critical path
+1. **End-to-end smoke against real Alpaca paper.** This pipeline has
+   never been run live in one go. Set `ALPACA_API_KEY`,
+   `ALPACA_API_SECRET`, and `ANTHROPIC_API_KEY` in `.env`, then run:
 
-- WebSocket → recommendation pipeline so the dashboard updates on tick instead of polling.
-- News deduplication (Alpaca occasionally returns the same article id twice across pages).
-- Persistent watchlist (currently env/YAML; could be a `watchlist` table).
-- A `daily summary` command: top movers + sentiment shift over last N days.
+   ```
+   esther doctor             # all green?
+   esther recommend          # real bars + news, no orders
+   esther summarize AAPL     # Claude brief on a real symbol
+   esther dashboard          # live TUI with alerts pane
+   ```
 
-### Deferred from the original `PROJECT_CONTEXT.md`
+   *Done when:* every command completes without an unhandled exception
+   and the dashboard runs through three or four ticks cleanly.
 
-- Backtesting engine (Backtrader cerebro wiring) — needed only when we want to validate strategies historically.
-- Live order execution — `AlpacaBroker` + `OrderManager` are wired but have no caller in the MVP path. Keep them out until the assistant is solid.
-- Postgres migration — SQLite is fine for the local-terminal use case.
-- Monte Carlo VaR / Sharpe portfolio analytics — interesting but premature.
-- Multi-strategy framework — one good strategy first.
+2. **`esther backfill --symbols X,Y,Z --days N`.** Cold-start solution
+   so the indicators have history on the first dashboard tick. Pulls
+   bars + news from Alpaca for the requested window and writes them
+   into the SQLite cache via `BarRepository` / `NewsRepository` (both
+   already exist). About 30 lines of CLI + a small async fetch loop.
 
----
+   *Done when:* running it once then `esther dashboard` shows non-NaN
+   RSI/MACD/Bollinger on the very first tick.
 
-## 5. Exact next steps for tomorrow
+3. **Ruff + mypy cleanup.** Pre-existing caveat from PR 1 — ~50 ruff
+   findings and ~25 mypy errors that predate this session. Most are
+   `UP037` (quoted type annotations across `indicators/`,
+   `strategy/`, `risk/metrics.py`) and stale `# type: ignore`
+   comments. None block the product; cleaning them removes noise so
+   future lint runs surface real regressions.
 
-Do these in order. Each step has a clear definition-of-done.
+   *Done when:* `ruff check .` and `mypy src` are green or close to it
+   (the alpaca-py SDK has some genuinely opaque types — those errors
+   can stay if they're upstream).
 
-### Step 1 — `RecommendationService` (~1–2 hours)
+### Highest-leverage feature work
 
-Create `src/strategy/recommendation.py`:
+4. **Integrate `summarize` into the dashboard.** Bind `s` to
+   "summarize the currently-selected row." Open a modal or scrollable
+   pane with the LLM brief. Cache the brief on the row so repeated
+   presses don't re-bill Claude; invalidate when the recommendation
+   action changes. This is the feature that most directly delivers on
+   the "AI research assistant" framing.
 
-```python
-@dataclass(frozen=True)
-class Recommendation:
-    symbol: str
-    action: SignalAction       # BUY / HOLD / SELL
-    confidence: float          # 0..1
-    last_price: Decimal
-    rationale: str             # e.g. "RSI=72 (overbought), sentiment +0.7 over 12 articles"
-    components: list[Signal]   # per-source signals that fed the aggregator
-    generated_at: datetime
-```
+   *Done when:* selecting AAPL in the dashboard and pressing `s`
+   shows a Claude brief within ~3 seconds.
 
-Service responsibilities:
-- Inputs: `symbols: list[str]`, optional `lookback_days` (default 30), optional `news_lookback_hours` (default 24).
-- For each symbol:
-  - Fetch bars (`MarketDataService.get_bars`) + cache via `BarRepository.upsert`.
-  - Fetch news (`AlpacaNewsSource.fetch`) + cache via `NewsRepository.upsert`.
-  - Compute RSI, MACD, Bollinger → produce `Signal`s. (Encode the rules: RSI>70 → SELL, RSI<30 → BUY, MACD cross, BB break, etc.)
-  - Score each new article with `SentimentAnalyzer`, persist via `SentimentRepository.upsert`. Average signed sentiment → one `Signal`.
-  - Run all signals through `SignalAggregator`.
-- Tests: mock `MarketDataService` + `AlpacaNewsSource` + `SentimentAnalyzer`; assert correct aggregation under known inputs (RSI overbought + negative sentiment ⇒ SELL with high confidence; mixed inputs ⇒ HOLD; etc.).
+5. **Watchlist intelligence panel.** `src/intelligence/watchlist.py`
+   has `diff_snapshots`, `top_movers`, and `action_breakdown` written
+   and tested, but nothing in the UI uses them. A small panel above
+   the watchlist table — "Top movers: NVDA (+0.8), MSFT (-0.6)" and
+   "Since last refresh: AAPL flipped HOLD → BUY" — is high-signal and
+   low-effort.
 
-### Step 2 — `EstherDashboard` Textual app (~2–3 hours)
+6. **Pad the system prompt to hit prompt caching.** Currently the
+   `LLMSummarizer` system prompt is ~300 tokens; Opus 4.7's minimum
+   cacheable prefix is 4K. Add 2–3 worked examples of good summaries
+   in the system prompt (one per action: BUY / HOLD / SELL with
+   different signal mixes). This both anchors output quality *and*
+   makes the cache marker actually pay off.
 
-Create `src/ui/__init__.py` and `src/ui/dashboard.py`:
+### Small cleanups
 
-- Use `textual.app.App`, `textual.widgets.DataTable`, `Header`, `Footer`.
-- Columns: Symbol, Price, Δ%, Action (color: green/yellow/red), Confidence, Latest headline (truncated), Updated.
-- A `RefreshTimer` that calls `RecommendationService.recommend(watchlist)` every N seconds (default 60s; configurable in `config/strategies.yaml`).
-- Keybindings: `r` to refresh now, `q` to quit.
+7. **News dedup.** `AlpacaNewsSource.fetch` occasionally returns the
+   same article id across pages. Repository upsert masks the issue at
+   the storage layer, but in-memory dedup before scoring would cut
+   FinBERT inference cost. One `dict[id, NewsArticle]` pass.
 
-### Step 3 — Wire `esther watch` (~30 min)
+8. **Drop `alembic` from `pyproject.toml`** — was in for the Postgres
+   migration path, which is deferred. SQLite + SQLAlchemy is enough.
 
-Add to `src/main.py`:
+9. **Audit `# type: ignore` comments.** Several are dead post-PR-1
+   (e.g. in `main.py` around the recommend command). Easier to do
+   after step 3.
 
-```python
-@cli.command()
-@click.option("--symbols", default=None, help="Comma-separated; overrides config.")
-@click.option("--refresh", default=60, type=int, help="Refresh seconds.")
-def watch(symbols: str | None, refresh: int) -> None:
-    """Launch the live recommendation dashboard."""
-    from src.ui.dashboard import EstherDashboard
-    EstherDashboard(symbols=_resolve_watchlist(symbols), refresh_seconds=refresh).run()
-```
+### Deferred (do NOT start without discussion)
 
-Read default watchlist from `config/strategies.yaml` (the file already exists as `strategies.example.yaml`).
-
-### Step 4 — `esther backfill` (~30 min)
-
-```python
-@cli.command()
-@click.option("--symbols", required=True)
-@click.option("--days", default=30, type=int)
-def backfill(symbols: str, days: int) -> None:
-    """Fetch historical bars + news for symbols and store locally."""
-    # MarketDataService.get_bars + BarRepository.upsert
-    # AlpacaNewsSource.fetch + NewsRepository.upsert
-```
-
-Run once per session before `esther watch` so the indicators have history immediately.
-
-### Step 5 — End-to-end smoke test against paper Alpaca (~30 min)
-
-1. Copy `.env.example` → `.env`, fill in real Alpaca paper API keys.
-2. `python src/main.py initdb`
-3. `python src/main.py backfill --symbols AAPL,MSFT,NVDA,SPY --days 30`
-4. `python src/main.py watch --symbols AAPL,MSFT,NVDA,SPY`
-5. Verify the table renders, recommendations update on the timer, no API errors.
-
-### Files you'll touch tomorrow
-
-- **Create**: `src/strategy/recommendation.py`, `src/ui/__init__.py`, `src/ui/dashboard.py`, `tests/test_recommendation.py`, `tests/test_dashboard.py` (if Textual snapshot testing is reasonable).
-- **Modify**: `src/main.py` (`watch` and `backfill` subcommands), `src/strategy/__init__.py` (export `Recommendation` + `RecommendationService`).
-- **Read first**: `config/strategies.example.yaml` (you'll likely need to extend it with a `watchlist:` section).
-
-### Definition of done for the day
-
-`python src/main.py watch --symbols AAPL,MSFT,NVDA,SPY` opens a terminal dashboard, shows live prices, and emits sensible BUY/HOLD/SELL recommendations updated every minute, without hitting the network more than necessary.
+- Persistent alerts/events storage. The current in-process buffer is
+  fine for a session-scoped dashboard.
+- WebSocket streaming pipeline (replace polling). Real-time delivery
+  is nice but the current 5-second poll is responsive enough.
+- Multi-strategy framework. One good strategy first.
+- Postgres migration. SQLite is fine for a local terminal tool.
 
 ---
 
-## Repo state at handoff
+## 5. Day-one recipe for tomorrow
 
-- Branch: `feat/initial-scaffold`
-- Last commit: `f1bec12` — Implement alpaca client, streaming, and storage layers
-- Tests: 58 passing, 1 slow integration deselected by default. Run with `pytest`.
-- Lint/type: not yet run. Try `ruff check .` and `mypy src` in the morning before adding code.
-- All deps installed in `.venv/` (Python 3.14, torch CPU-only, transformers, alpaca-py, backtrader, etc.).
+If you only have one hour:
+
+```
+git checkout main             # or wherever you merged the PR train
+pip install -e ".[dev]"       # PR 3 added anthropic, PR 4 added pyyaml
+cp config/alerts.example.yaml config/alerts.yaml
+# (edit .env with real ALPACA paper keys + ANTHROPIC_API_KEY)
+esther doctor                 # confirm green
+esther summarize AAPL         # confirm the Claude path works
+esther dashboard              # confirm the full TUI loop works
+```
+
+That validates everything PRs 1–4 shipped. After that, work the punch
+list top-down.
+
+---
+
+## 6. Repo state at handoff
+
+- **Branches** (newest commit first):
+  - `docs/next-steps-rewrite` — this commit
+  - `feat/alerts-and-config` (`f400d4d`)
+  - `feat/llm-summaries` (`f1b712c`)
+  - `feat/intelligence-scaffold` (`045f60e`)
+  - `refactor/decision-support-cut` (`e5abf0a`)
+- **Tests:** 154 passing, 1 deselected (`slow`/`integration` mark).
+  Run with `pytest`.
+- **Lint/type:** ~50 ruff findings and ~25 mypy errors are
+  pre-existing — not introduced by this session. See punch-list item 3.
+- **Dependencies installed in `.venv/`** (Python 3.14): all of
+  `pyproject.toml`'s base set, plus `anthropic`, `pyyaml`, `textual`,
+  `ruff`, `mypy`, `pytest`.
+- **`.env` is not present.** `.env.example` documents the schema;
+  `esther doctor --init-env` scaffolds the file. Real keys live only
+  on disk, gitignored.

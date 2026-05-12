@@ -12,13 +12,23 @@ copy .env.example .env
 notepad .env
 ```
 
-Replace these two lines with the **paper** key and secret you generated at
-<https://app.alpaca.markets/paper/dashboard/overview>:
+Replace the placeholder Alpaca lines with the **paper** key and secret you
+generated at <https://app.alpaca.markets/paper/dashboard/overview>:
 
 ```
 ALPACA_API_KEY=PK_your_real_paper_key_here
 ALPACA_API_SECRET=your_real_paper_secret_here
 ```
+
+If you want the AI brief features (`esther summarize` and the dashboard's
+LLM-backed pane once it's wired in), also paste your Anthropic key:
+
+```
+ANTHROPIC_API_KEY=sk-ant-your_real_key_here
+```
+
+You can generate one at <https://console.anthropic.com>. The dashboard
+itself still works without it — only the LLM features will refuse.
 
 Leave everything else as-is. In particular:
 
@@ -28,7 +38,7 @@ ALPACA_BASE_URL=https://paper-api.alpaca.markets
 
 must stay pointed at the paper endpoint.
 
-## 2. Starting the live dashboard tomorrow
+## 2. Starting the live dashboard
 
 ```powershell
 cd "C:\Users\tarun\Downloads\esther finance tool"
@@ -61,14 +71,29 @@ esther                        # show the banner / command list
 esther status                 # print the active config (secrets masked)
 esther doctor                 # run all preflight checks
 esther doctor --init-env      # scaffold .env from .env.example
-esther recommend              # one-shot recommendations for the watchlist
-esther backtest --symbol SPY  # walk-forward backtest vs buy-and-hold
+esther recommend              # one-shot BUY/HOLD/SELL table for the watchlist
+esther summarize AAPL         # Claude-written brief for one symbol
 esther dashboard              # live Textual dashboard (paper, observational)
 ```
 
 Keyboard inside the dashboard: `q` quit · `r` refresh now · `p` pause/resume · `↑` `↓` select a row.
 
-## 4. Safety notes
+## 4. Alert configuration (optional)
+
+The dashboard ships with sensible default alert rules (action flip,
+confidence threshold cross, sentiment shift). To customise them — e.g.
+make a 0.85-confidence cross ring the terminal bell — copy the example
+config:
+
+```powershell
+copy config\alerts.example.yaml config\alerts.yaml
+notepad config\alerts.yaml
+```
+
+The dashboard auto-loads it on the next launch. Syntax errors fail loudly
+at startup with a line-by-line message.
+
+## 5. Safety notes
 
 - **Paper trading only.** Every live-data command refuses to start unless
   `ALPACA_BASE_URL` is the paper endpoint. Don't change it.
@@ -78,6 +103,6 @@ Keyboard inside the dashboard: `q` quit · `r` refresh now · `p` pause/resume �
   - Don't email it, screenshot it, or paste it into chats.
   - If the keys leak, regenerate them in the Alpaca dashboard
     (View → Generate New Key) — the old pair is invalidated instantly.
-- **The dashboard never submits orders.** It's read-only.
-- **`esther run` defaults to dry-run.** Order submission requires the
-  explicit `--execute` flag, and even then only against paper.
+- **No order submission anywhere in the codebase.** Esther is
+  decision-support only — the broker / order-manager scaffolding was
+  removed deliberately and should not be re-added.
