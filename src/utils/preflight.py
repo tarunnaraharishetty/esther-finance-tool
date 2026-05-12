@@ -95,7 +95,7 @@ def check_env_file(project_root: Path) -> CheckResult:
         status=CheckStatus.WARN,
         detail=f"no .env at {env_path}",
         hint=(
-            "Copy .env.example → .env and fill in your Alpaca paper keys. "
+            "Copy .env.example -> .env and fill in your Alpaca paper keys. "
             "(You can also export the env vars in your shell instead.)"
         ),
     )
@@ -113,7 +113,7 @@ def check_alpaca_credentials(settings: Settings) -> CheckResult:
             hint=(
                 "Generate paper-trading keys at "
                 "https://app.alpaca.markets/paper/dashboard/overview "
-                "→ 'View' next to 'Your API Keys' → 'Generate New Key'. "
+                "-> 'View' next to 'Your API Keys' -> 'Generate New Key'. "
                 "Paste both into .env."
             ),
         )
@@ -336,7 +336,7 @@ class PreflightError(RuntimeError):
 
 
 def init_env_from_example(project_root: Path, *, force: bool = False) -> Path:
-    """Copy .env.example → .env. Returns the destination path.
+    """Copy .env.example -> .env. Returns the destination path.
 
     Raises FileExistsError if .env exists and ``force`` is False.
     """

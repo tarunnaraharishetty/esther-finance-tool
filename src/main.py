@@ -337,7 +337,7 @@ def _render_preflight_report(report: object) -> None:
     # Print remediation hints separately so they don't clutter the table.
     for r in report.results:
         if r.hint and not r.ok:
-            console.print(f"  [dim]↳ {r.name}:[/dim] [yellow]{r.hint}[/yellow]")
+            console.print(f"  [dim]-> {r.name}:[/dim] [yellow]{r.hint}[/yellow]")
 
 
 @cli.command()
