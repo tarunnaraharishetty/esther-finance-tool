@@ -1,4 +1,4 @@
-"""Tests for the Alpaca data + broker layer.
+"""Tests for the Alpaca data layer.
 
 Mocks alpaca-py at the cached-property boundary on AlpacaClient so we never
 hit the network. Each test patches the relevant subclient via
@@ -18,13 +18,6 @@ from src.data.alpaca_client import AlpacaClient
 from src.data.market_data import MarketDataService
 from src.data.models import TimeFrame
 from src.data.news_ingestion import AlpacaNewsSource
-from src.execution.broker import (
-    AlpacaBroker,
-    OrderRequest,
-    OrderSide,
-    OrderType,
-    TimeInForce,
-)
 
 
 def _stub_client(monkeypatch: pytest.MonkeyPatch, **subclients: object) -> AlpacaClient:
@@ -111,106 +104,6 @@ def test_to_dataframe_handles_empty() -> None:
     df = svc.to_dataframe([])
     assert df.empty
     assert "close" in df.columns
-
-
-# ---------------------------------------------------------------------------
-# broker
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_get_account_equity(monkeypatch: pytest.MonkeyPatch) -> None:
-    trading_mock = MagicMock()
-    trading_mock.get_account.return_value = SimpleNamespace(
-        equity="125000.50", portfolio_value="125000.50"
-    )
-    client = _stub_client(monkeypatch, trading=trading_mock)
-
-    broker = AlpacaBroker(client=client)
-    equity = await broker.get_account_equity()
-    assert equity == Decimal("125000.50")
-    trading_mock.get_account.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_submit_market_order_no_brackets(monkeypatch: pytest.MonkeyPatch) -> None:
-    from alpaca.trading.requests import MarketOrderRequest
-
-    trading_mock = MagicMock()
-    trading_mock.submit_order.return_value = SimpleNamespace(
-        id="order-1", status="accepted", filled_qty="0", filled_avg_price=None
-    )
-    client = _stub_client(monkeypatch, trading=trading_mock)
-
-    broker = AlpacaBroker(client=client)
-    result = await broker.submit(
-        OrderRequest(
-            symbol="AAPL",
-            qty=Decimal("10"),
-            side=OrderSide.BUY,
-            type=OrderType.MARKET,
-            time_in_force=TimeInForce.DAY,
-        )
-    )
-
-    assert result.id == "order-1"
-    assert result.status == "accepted"
-    submitted = trading_mock.submit_order.call_args.args[0]
-    assert isinstance(submitted, MarketOrderRequest)
-    assert submitted.symbol == "AAPL"
-    assert submitted.qty == 10.0
-    # No bracket params -> order_class left unset (alpaca defaults to simple).
-    assert submitted.order_class in (None,) or submitted.order_class.value == "simple"
-    assert submitted.take_profit is None
-    assert submitted.stop_loss is None
-
-
-@pytest.mark.asyncio
-async def test_submit_market_order_with_bracket(monkeypatch: pytest.MonkeyPatch) -> None:
-    from alpaca.trading.enums import OrderClass
-
-    trading_mock = MagicMock()
-    trading_mock.submit_order.return_value = SimpleNamespace(
-        id="order-2", status="accepted", filled_qty="0", filled_avg_price=None
-    )
-    client = _stub_client(monkeypatch, trading=trading_mock)
-
-    broker = AlpacaBroker(client=client)
-    await broker.submit(
-        OrderRequest(
-            symbol="MSFT",
-            qty=Decimal("5"),
-            side=OrderSide.BUY,
-            take_profit=Decimal("450.00"),
-            stop_loss=Decimal("400.00"),
-        )
-    )
-    submitted = trading_mock.submit_order.call_args.args[0]
-    assert submitted.order_class == OrderClass.BRACKET
-    assert submitted.take_profit.limit_price == 450.0
-    assert submitted.stop_loss.stop_price == 400.0
-
-
-@pytest.mark.asyncio
-async def test_cancel_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    trading_mock = MagicMock()
-    client = _stub_client(monkeypatch, trading=trading_mock)
-    broker = AlpacaBroker(client=client)
-    await broker.cancel("abc-123")
-    trading_mock.cancel_order_by_id.assert_called_once_with("abc-123")
-
-
-def test_limit_order_requires_limit_price() -> None:
-    broker = AlpacaBroker(client=AlpacaClient())
-    with pytest.raises(ValueError, match="limit_price"):
-        broker._build_request(
-            OrderRequest(
-                symbol="AAPL",
-                qty=Decimal("1"),
-                side=OrderSide.BUY,
-                type=OrderType.LIMIT,
-            )
-        )
 
 
 # ---------------------------------------------------------------------------

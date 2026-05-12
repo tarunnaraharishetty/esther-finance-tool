@@ -1,14 +1,12 @@
-"""Terminal dashboard: live watchlist, recommendations, account, events."""
+"""Terminal dashboard: live watchlist, recommendations, events."""
 
 from src.dashboard.state import (
-    AccountSnapshot,
     DashboardSnapshot,
     EventEntry,
     RecommendationRow,
 )
 
 __all__ = [
-    "AccountSnapshot",
     "DashboardSnapshot",
     "EventEntry",
     "RecommendationRow",

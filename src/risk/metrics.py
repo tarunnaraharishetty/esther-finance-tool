@@ -26,15 +26,6 @@ def sharpe_ratio(returns: "pd.Series", risk_free_rate: float = 0.0) -> float:
     return float(np.sqrt(TRADING_DAYS_PER_YEAR) * excess.mean() / std)
 
 
-def sortino_ratio(returns: "pd.Series", risk_free_rate: float = 0.0) -> float:
-    excess = returns - risk_free_rate / TRADING_DAYS_PER_YEAR
-    downside = excess[excess < 0]
-    dd_std = downside.std()
-    if dd_std < _STD_EPS or np.isnan(dd_std):
-        return 0.0
-    return float(np.sqrt(TRADING_DAYS_PER_YEAR) * excess.mean() / dd_std)
-
-
 def max_drawdown(equity_curve: "pd.Series") -> float:
     """Maximum peak-to-trough drawdown as a positive fraction (0.2 == 20%)."""
     running_max = equity_curve.cummax()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
@@ -12,21 +11,17 @@ import pandas as pd
 import pytest
 
 from src.dashboard.controller import (
-    BaseController,
     DashboardController,
     MockDashboardController,
 )
 from src.dashboard.state import (
-    AccountSnapshot,
     DashboardSnapshot,
     EventBuffer,
-    RecommendationRow,
 )
-from src.data.models import NewsArticle, TimeFrame
+from src.data.models import NewsArticle
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import SignalAction
 from src.strategy.recommendation import RecommendationEngine
-
 
 # ---------------------------------------------------------------------------
 # State plumbing
@@ -62,8 +57,6 @@ def test_mock_controller_returns_full_snapshot() -> None:
     assert isinstance(snap, DashboardSnapshot)
     assert snap.tick == 1
     assert [r.symbol for r in snap.rows] == ["AAPL", "MSFT", "NVDA"]
-    assert snap.account is not None
-    assert snap.account.paper_trading is True
     assert all(0.0 <= r.confidence <= 1.0 for r in snap.rows)
     assert all(-1.0 <= r.combined_score <= 1.0 for r in snap.rows)
 
@@ -121,7 +114,7 @@ def _df(n: int = 60, drift: float = 0.005) -> pd.DataFrame:
 
 
 def _build_live_controller(
-    *, equity: Decimal = Decimal("250000"), df: pd.DataFrame | None = None
+    *, df: pd.DataFrame | None = None
 ) -> DashboardController:
     market = MagicMock()
     market.get_bars = AsyncMock(return_value=["bar"])  # sentinel
@@ -130,29 +123,22 @@ def _build_live_controller(
     news_source = MagicMock()
     news_source.fetch = AsyncMock(return_value=[])
 
-    broker = MagicMock()
-    broker.get_account_equity = AsyncMock(return_value=equity)
-
     engine = RecommendationEngine(sentiment_analyzer=_Neut())
     return DashboardController(
         watchlist=["AAPL"],
         engine=engine,
         market=market,
         news_source=news_source,
-        broker=broker,
     )
 
 
-def test_live_controller_returns_recommendation_and_equity() -> None:
-    ctrl = _build_live_controller(equity=Decimal("123456.78"))
+def test_live_controller_returns_recommendation() -> None:
+    ctrl = _build_live_controller()
     snap = asyncio.run(ctrl.fetch_snapshot())
     assert len(snap.rows) == 1
     row = snap.rows[0]
     assert row.symbol == "AAPL"
     assert row.error is None
-    assert snap.account is not None
-    assert snap.account.equity == Decimal("123456.78")
-    assert snap.account.paper_trading is True
 
 
 def test_live_controller_handles_empty_bars() -> None:
@@ -172,14 +158,6 @@ def test_live_controller_handles_market_error() -> None:
     assert any(e.level == "error" for e in snap.events)
 
 
-def test_live_controller_handles_account_error() -> None:
-    ctrl = _build_live_controller()
-    ctrl.broker.get_account_equity = AsyncMock(side_effect=RuntimeError("403"))  # type: ignore[method-assign]
-    snap = asyncio.run(ctrl.fetch_snapshot())
-    assert snap.account is not None
-    assert "403" in snap.account.note
-
-
 def test_live_controller_refuses_non_paper_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
     from src.config import settings as settings_mod
@@ -192,7 +170,6 @@ def test_live_controller_refuses_non_paper_url(monkeypatch: pytest.MonkeyPatch) 
                 engine=RecommendationEngine(sentiment_analyzer=_Neut()),
                 market=MagicMock(),
                 news_source=MagicMock(),
-                broker=MagicMock(),
             )
     finally:
         settings_mod.get_settings.cache_clear()

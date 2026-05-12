@@ -9,7 +9,6 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
 
 from src.strategy.base import SignalAction
 
@@ -35,16 +34,6 @@ class RecommendationRow:
 
 
 @dataclass(frozen=True)
-class AccountSnapshot:
-    """Account-side panel data."""
-
-    equity: Decimal
-    paper_trading: bool
-    timestamp: datetime
-    note: str = ""
-
-
-@dataclass(frozen=True)
 class EventEntry:
     """A single line in the events / log panel."""
 
@@ -59,7 +48,6 @@ class DashboardSnapshot:
 
     tick: int
     rows: list[RecommendationRow]
-    account: AccountSnapshot | None
     events: list[EventEntry] = field(default_factory=list)
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 

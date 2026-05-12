@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "esther"
 version = "0.1.0"
-description = "Production-grade terminal-based quantitative trading platform built on Alpaca."
+description = "Terminal-based AI trading dashboard and research assistant built on Alpaca."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
 authors = [{ name = "Esther Finance" }]
-keywords = ["trading", "quant", "alpaca", "sentiment", "backtesting"]
+keywords = ["trading", "alpaca", "sentiment", "dashboard", "research"]
 
 dependencies = [
     "alpaca-py>=0.30",
@@ -28,7 +28,6 @@ dependencies = [
     "alembic>=1.13",
     "transformers>=4.42",
     "torch>=2.3",
-    "backtrader>=1.9.78",
     "structlog>=24.1",
     "tenacity>=8.3",
 ]

@@ -10,7 +10,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -74,12 +74,6 @@ class Settings(BaseSettings):
     app_env: AppEnv = AppEnv.DEV
     log_level: LogLevel = LogLevel.INFO
     log_json: bool = False
-
-    # ---- Risk ----
-    max_position_pct: float = Field(0.05, gt=0, le=1)
-    max_daily_drawdown_pct: float = Field(0.03, gt=0, le=1)
-    default_stop_loss_pct: float = Field(0.02, gt=0, le=1)
-    default_take_profit_pct: float = Field(0.04, gt=0, le=1)
 
     # ---- Sentiment model ----
     sentiment_model: str = "ProsusAI/finbert"

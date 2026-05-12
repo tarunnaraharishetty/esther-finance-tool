@@ -3,10 +3,10 @@
 Layout::
 
     ┌─ Header (env, paper, tick clock) ──────────────────────────────┐
-    │ ┌─ Recommendations (DataTable) ──────────┐ ┌─ Account ───────┐ │
-    │ │ SYM  ACT  CONF  TECH  SENT  RSI ...    │ │ equity $...     │ │
-    │ │ ...                                    │ │ paper: yes      │ │
-    │ └────────────────────────────────────────┘ └─────────────────┘ │
+    │ ┌─ Recommendations (DataTable) ──────────────────────────────┐ │
+    │ │ SYM  ACT  CONF  TECH  SENT  RSI ...                        │ │
+    │ │ ...                                                        │ │
+    │ └────────────────────────────────────────────────────────────┘ │
     │ ┌─ Selected row detail ──────────────────────────────────────┐ │
     │ │ AAPL  reasoning: ...                                       │ │
     │ └────────────────────────────────────────────────────────────┘ │
@@ -25,7 +25,7 @@ from rich.markup import escape as rich_escape
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Vertical
 from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, RichLog, Static
 
@@ -66,29 +66,6 @@ def _confidence_bar(conf: float, width: int = 10) -> str:
     return "█" * filled + "·" * (width - filled)
 
 
-class AccountPanel(Static):
-    """Static panel showing equity, paper-trade status, latest tick."""
-
-    snapshot: reactive[DashboardSnapshot | None] = reactive(None)
-
-    def render(self) -> str:
-        snap = self.snapshot
-        if snap is None or snap.account is None:
-            return "[dim]account: loading…[/dim]"
-        acct = snap.account
-        paper = "[green]paper[/green]" if acct.paper_trading else "[red]LIVE[/red]"
-        equity_str = f"${float(acct.equity):,.2f}"
-        note = f"\n[dim]{rich_escape(acct.note)}[/dim]" if acct.note else ""
-        return (
-            f"[bold]ACCOUNT[/bold]\n"
-            f"equity:  [bold]{equity_str}[/bold]\n"
-            f"mode:    {paper}\n"
-            f"tick:    #{snap.tick}\n"
-            f"updated: {snap.timestamp.strftime('%H:%M:%S')} UTC"
-            f"{note}"
-        )
-
-
 class DetailPanel(Static):
     """Reasoning + indicator detail for the selected row."""
 
@@ -123,13 +100,9 @@ class DashboardApp(App[None]):
 
     CSS = """
     Screen { layout: vertical; }
-    #top { height: 1fr; }
-    #table_pane { width: 3fr; }
-    #side_pane { width: 1fr; padding: 0 1; }
     #detail { height: auto; padding: 0 1 1 1; border-top: solid $primary 30%; }
     #events { height: 12; border-top: solid $primary 30%; }
     DataTable { height: 1fr; }
-    AccountPanel { height: auto; padding: 0 1; border: round $primary; }
     """
 
     BINDINGS = [
@@ -153,16 +126,12 @@ class DashboardApp(App[None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Vertical():
-            with Horizontal(id="top"):
-                with Vertical(id="table_pane"):
-                    table = DataTable(zebra_stripes=True, cursor_type="row")
-                    table.add_columns(
-                        "SYM", "ACTION", "CONF", "BAR", "TECH", "SENT",
-                        "RSI", "MACD", "BBAND", "PRICE", "NEWS",
-                    )
-                    yield table
-                with Vertical(id="side_pane"):
-                    yield AccountPanel(id="account")
+            table = DataTable(zebra_stripes=True, cursor_type="row")
+            table.add_columns(
+                "SYM", "ACTION", "CONF", "BAR", "TECH", "SENT",
+                "RSI", "MACD", "BBAND", "PRICE", "NEWS",
+            )
+            yield table
             yield DetailPanel(id="detail")
             yield RichLog(id="events", highlight=True, markup=True, wrap=False)
         yield Footer()
@@ -233,7 +202,6 @@ class DashboardApp(App[None]):
             table.add_row(*row_cells, key=r.symbol)
 
     def _render_panels(self, snap: DashboardSnapshot) -> None:
-        self.query_one(AccountPanel).snapshot = snap
         detail = self.query_one(DetailPanel)
         detail.snapshot = snap
         # Sync with current cursor on the table.

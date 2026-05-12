@@ -2,13 +2,10 @@
 
 Two flavours:
 
-* :class:`DashboardController` — live: pulls bars + news from Alpaca,
-  scores with :class:`RecommendationEngine`, reads account equity from
-  the broker. Paper-only.
+* :class:`DashboardController` — live: pulls bars + news from Alpaca and
+  scores with :class:`RecommendationEngine`. Paper-feed only.
 * :class:`MockDashboardController` — synthetic OHLCV + news, no Alpaca
   required. Useful for local demos and tests.
-
-The controller never submits orders — the dashboard is observational.
 """
 
 from __future__ import annotations
@@ -18,15 +15,12 @@ import math
 import random
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
-from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
 from src.config import Settings, get_settings
 from src.dashboard.state import (
-    AccountSnapshot,
     DashboardSnapshot,
     EventBuffer,
     RecommendationRow,
@@ -35,14 +29,9 @@ from src.data.alpaca_client import AlpacaClient
 from src.data.market_data import MarketDataService
 from src.data.models import NewsArticle, TimeFrame
 from src.data.news_ingestion import NewsSource, get_news_source
-from src.execution.broker import AlpacaBroker, Broker
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import SignalAction
 from src.strategy.recommendation import RecommendationEngine
-
-if TYPE_CHECKING:
-    pass
-
 
 # ---------------------------------------------------------------------------
 # Base controller
@@ -75,7 +64,7 @@ class BaseController(ABC):
 
 
 class DashboardController(BaseController):
-    """Live data: Alpaca bars + news + account equity + engine recommendations."""
+    """Live data: Alpaca bars + news + engine recommendations."""
 
     def __init__(
         self,
@@ -84,7 +73,6 @@ class DashboardController(BaseController):
         engine: RecommendationEngine,
         market: MarketDataService | None = None,
         news_source: NewsSource | None = None,
-        broker: Broker | None = None,
         settings: Settings | None = None,
         lookback_days: int = 60,
         news_hours: int = 48,
@@ -100,7 +88,6 @@ class DashboardController(BaseController):
             )
         self.market = market or MarketDataService(client=AlpacaClient(self.settings))
         self.news_source = news_source or get_news_source()
-        self.broker = broker or AlpacaBroker(client=AlpacaClient(self.settings))
         self.lookback_days = lookback_days
         self.news_hours = news_hours
         self.timeframe = timeframe
@@ -113,11 +100,9 @@ class DashboardController(BaseController):
             *(self._row_for(sym, now) for sym in self.watchlist),
             return_exceptions=False,
         )
-        account = await self._account_snapshot(now)
         return DashboardSnapshot(
             tick=self._tick,
             rows=list(rows),
-            account=account,
             events=self.events.snapshot(),
             timestamp=now,
         )
@@ -141,26 +126,9 @@ class DashboardController(BaseController):
                 f"(conf {rec.confidence:.2f}, combined {rec.combined_score:+.2f})"
             )
             return _row_from_recommendation(rec, last_price=float(df["close"].iloc[-1]))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             self.events.error(f"{symbol}: {e}")
             return _empty_row(symbol, now, error=str(e))
-
-    async def _account_snapshot(self, now: datetime) -> AccountSnapshot | None:
-        try:
-            equity = await self.broker.get_account_equity()
-            return AccountSnapshot(
-                equity=equity,
-                paper_trading=self.settings.is_paper_trading,
-                timestamp=now,
-            )
-        except Exception as e:  # noqa: BLE001
-            self.events.warn(f"account fetch failed: {e}")
-            return AccountSnapshot(
-                equity=Decimal(0),
-                paper_trading=self.settings.is_paper_trading,
-                timestamp=now,
-                note=f"unavailable: {e}",
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +175,6 @@ class MockDashboardController(BaseController):
         *,
         watchlist: list[str] | None = None,
         seed: int = 7,
-        starting_equity: float = 100_000.0,
         use_sentiment: bool = True,
         events: EventBuffer | None = None,
     ) -> None:
@@ -218,30 +185,19 @@ class MockDashboardController(BaseController):
         super().__init__(watchlist=watchlist, engine=engine, events=events)
         self._rng = rng
         self._np_rng = np.random.default_rng(seed)
-        self._starting_equity = starting_equity
         # Per-symbol drift/noise — gives BUYs/SELLs different reasons across rows.
         self._sym_profiles = {
             s: {"drift": rng.uniform(-0.005, 0.015), "noise": rng.uniform(0.008, 0.02)}
             for s in watchlist
         }
-        self._equity = Decimal(str(starting_equity))
 
     async def fetch_snapshot(self) -> DashboardSnapshot:
         self._tick += 1
         now = datetime.now(UTC)
         self.events.info(f"mock tick {self._tick} ({len(self.watchlist)} symbols)")
         rows = [self._mock_row(sym, now) for sym in self.watchlist]
-        # Drift mock equity a little so the panel updates visually.
-        delta = Decimal(str(self._rng.uniform(-200.0, 250.0)))
-        self._equity += delta
-        account = AccountSnapshot(
-            equity=self._equity.quantize(Decimal("0.01")),
-            paper_trading=True,
-            timestamp=now,
-            note="mock data — not real Alpaca",
-        )
         return DashboardSnapshot(
-            tick=self._tick, rows=rows, account=account, events=self.events.snapshot(), timestamp=now
+            tick=self._tick, rows=rows, events=self.events.snapshot(), timestamp=now
         )
 
     def _mock_row(self, symbol: str, now: datetime) -> RecommendationRow:
