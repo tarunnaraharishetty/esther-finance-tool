@@ -460,14 +460,33 @@ def dashboard(
         DashboardController,
         MockDashboardController,
     )
+    from src.intelligence.alerts import AlertEngine, load_rules_from_yaml
     from src.strategy.recommendation import RecommendationEngine
 
     settings = get_settings()
     watchlist = list(symbols) if symbols else ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
 
+    # Load user-defined alert rules from config/alerts.yaml if present;
+    # otherwise the AlertEngine uses its built-in defaults.
+    alerts_path = settings.config_dir / "alerts.yaml"
+    if alerts_path.exists():
+        try:
+            rules = load_rules_from_yaml(alerts_path)
+            alert_engine = AlertEngine(rules=rules)
+            console.print(
+                f"[dim]loaded {len(rules)} alert rule(s) from {alerts_path}[/dim]"
+            )
+        except ValueError as e:
+            console.print(f"[red]invalid {alerts_path}: {e}[/red]")
+            raise click.exceptions.Exit(2) from None
+    else:
+        alert_engine = AlertEngine()
+
     if mock:
         controller = MockDashboardController(
-            watchlist=watchlist, use_sentiment=not no_sentiment
+            watchlist=watchlist,
+            use_sentiment=not no_sentiment,
+            alert_engine=alert_engine,
         )
     else:
         if not skip_preflight:
@@ -511,6 +530,7 @@ def dashboard(
             settings=settings,
             lookback_days=lookback_days,
             news_hours=news_hours,
+            alert_engine=alert_engine,
         )
 
     DashboardApp(controller, refresh_seconds=refresh_seconds).run()

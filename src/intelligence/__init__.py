@@ -12,6 +12,7 @@ from src.intelligence.alerts import (
     ConfidenceThresholdRule,
     Rule,
     SentimentShiftRule,
+    load_rules_from_yaml,
 )
 from src.intelligence.explain import Contributor, Explanation, explain
 from src.intelligence.llm_summary import LLMSummarizer
@@ -39,5 +40,6 @@ __all__ = [
     "action_breakdown",
     "diff_snapshots",
     "explain",
+    "load_rules_from_yaml",
     "top_movers",
 ]

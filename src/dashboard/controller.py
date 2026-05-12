@@ -29,6 +29,7 @@ from src.data.alpaca_client import AlpacaClient
 from src.data.market_data import MarketDataService
 from src.data.models import NewsArticle, TimeFrame
 from src.data.news_ingestion import NewsSource, get_news_source
+from src.intelligence.alerts import AlertEngine
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import SignalAction
 from src.strategy.recommendation import RecommendationEngine
@@ -39,7 +40,7 @@ from src.strategy.recommendation import RecommendationEngine
 
 
 class BaseController(ABC):
-    """Common state — tick counter, event buffer, watchlist."""
+    """Common state — tick counter, event buffer, watchlist, alert engine."""
 
     def __init__(
         self,
@@ -47,10 +48,12 @@ class BaseController(ABC):
         watchlist: list[str],
         engine: RecommendationEngine,
         events: EventBuffer | None = None,
+        alert_engine: AlertEngine | None = None,
     ) -> None:
         self.watchlist = list(watchlist)
         self.engine = engine
         self.events = events or EventBuffer()
+        self.alert_engine = alert_engine or AlertEngine()
         self._tick = 0
 
     @abstractmethod
@@ -78,8 +81,11 @@ class DashboardController(BaseController):
         news_hours: int = 48,
         timeframe: TimeFrame = TimeFrame.DAY_1,
         events: EventBuffer | None = None,
+        alert_engine: AlertEngine | None = None,
     ) -> None:
-        super().__init__(watchlist=watchlist, engine=engine, events=events)
+        super().__init__(
+            watchlist=watchlist, engine=engine, events=events, alert_engine=alert_engine
+        )
         self.settings = settings or get_settings()
         if not self.settings.is_paper_trading:
             raise RuntimeError(
@@ -100,10 +106,12 @@ class DashboardController(BaseController):
             *(self._row_for(sym, now) for sym in self.watchlist),
             return_exceptions=False,
         )
+        alerts = self.alert_engine.evaluate(list(rows))
         return DashboardSnapshot(
             tick=self._tick,
             rows=list(rows),
             events=self.events.snapshot(),
+            alerts=alerts,
             timestamp=now,
         )
 
@@ -177,12 +185,18 @@ class MockDashboardController(BaseController):
         seed: int = 7,
         use_sentiment: bool = True,
         events: EventBuffer | None = None,
+        alert_engine: AlertEngine | None = None,
     ) -> None:
         watchlist = watchlist or ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
         rng = random.Random(seed)
         analyzer = _RandomSentiment(rng) if use_sentiment else _NeutralAnalyzer()
         engine = RecommendationEngine(sentiment_analyzer=analyzer)
-        super().__init__(watchlist=watchlist, engine=engine, events=events)
+        super().__init__(
+            watchlist=watchlist,
+            engine=engine,
+            events=events,
+            alert_engine=alert_engine,
+        )
         self._rng = rng
         self._np_rng = np.random.default_rng(seed)
         # Per-symbol drift/noise — gives BUYs/SELLs different reasons across rows.
@@ -196,8 +210,13 @@ class MockDashboardController(BaseController):
         now = datetime.now(UTC)
         self.events.info(f"mock tick {self._tick} ({len(self.watchlist)} symbols)")
         rows = [self._mock_row(sym, now) for sym in self.watchlist]
+        alerts = self.alert_engine.evaluate(rows)
         return DashboardSnapshot(
-            tick=self._tick, rows=rows, events=self.events.snapshot(), timestamp=now
+            tick=self._tick,
+            rows=rows,
+            events=self.events.snapshot(),
+            alerts=alerts,
+            timestamp=now,
         )
 
     def _mock_row(self, symbol: str, now: datetime) -> RecommendationRow:

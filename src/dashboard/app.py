@@ -137,7 +137,8 @@ class DashboardApp(App[None]):
     CSS = """
     Screen { layout: vertical; }
     #detail { height: auto; padding: 0 1 1 1; border-top: solid $primary 30%; }
-    #events { height: 12; border-top: solid $primary 30%; }
+    #alerts { height: 6; border-top: solid $warning 50%; }
+    #events { height: 10; border-top: solid $primary 30%; }
     DataTable { height: 1fr; }
     """
 
@@ -169,6 +170,7 @@ class DashboardApp(App[None]):
             )
             yield table
             yield DetailPanel(id="detail")
+            yield RichLog(id="alerts", highlight=False, markup=True, wrap=False)
             yield RichLog(id="events", highlight=True, markup=True, wrap=False)
         yield Footer()
 
@@ -214,6 +216,7 @@ class DashboardApp(App[None]):
         self._snapshot = snap
         self._render_table(snap)
         self._render_panels(snap)
+        self._render_alerts(snap)
         self._render_events(snap)
 
     def _render_table(self, snap: DashboardSnapshot) -> None:
@@ -243,6 +246,28 @@ class DashboardApp(App[None]):
         # Sync with current cursor on the table.
         table = self.query_one(DataTable)
         detail.row_index = table.cursor_row if table.row_count else 0
+
+    def _render_alerts(self, snap: DashboardSnapshot) -> None:
+        if not snap.alerts:
+            return
+        log = self.query_one("#alerts", RichLog)
+        ring_bell = False
+        for alert in snap.alerts:
+            style = {
+                "info": "cyan",
+                "warn": "yellow",
+                "critical": "bold red",
+            }.get(alert.severity, "white")
+            log.write(
+                f"[dim]{alert.fired_at.strftime('%H:%M:%S')}[/] "
+                f"[{style}]{alert.severity.upper():8}[/] "
+                f"[bold]{alert.symbol}[/] · "
+                f"[dim]{alert.rule}[/] · {rich_escape(alert.message)}"
+            )
+            if alert.severity == "critical":
+                ring_bell = True
+        if ring_bell:
+            self.bell()
 
     def _render_events(self, snap: DashboardSnapshot) -> None:
         log = self.query_one("#events", RichLog)

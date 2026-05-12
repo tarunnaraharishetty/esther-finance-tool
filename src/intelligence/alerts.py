@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
+
+import yaml
 
 if TYPE_CHECKING:
     from src.dashboard.state import RecommendationRow
@@ -143,7 +146,9 @@ class AlertEngine:
     """Holds last-seen state per symbol and applies a rule set per tick."""
 
     def __init__(self, rules: list[Rule] | None = None) -> None:
-        self.rules: list[Rule] = list(rules) if rules else _default_rules()
+        # `rules is None` means "use defaults"; an explicit empty list means
+        # "no rules" (useful for tests and for users who want a silent dashboard).
+        self.rules: list[Rule] = _default_rules() if rules is None else list(rules)
         self._previous: dict[str, RecommendationRow] = {}
 
     def evaluate(self, rows: list[RecommendationRow]) -> list[Alert]:
@@ -168,3 +173,66 @@ def _default_rules() -> list[Rule]:
         ConfidenceThresholdRule(),
         SentimentShiftRule(),
     ]
+
+
+# ---------------------------------------------------------------------------
+# YAML configuration
+# ---------------------------------------------------------------------------
+
+
+_RULE_REGISTRY: dict[str, type[Rule]] = {
+    "action_changed": ActionChangedRule,
+    "confidence_threshold": ConfidenceThresholdRule,
+    "sentiment_shift": SentimentShiftRule,
+}
+
+_VALID_SEVERITIES = {"info", "warn", "critical"}
+
+
+def load_rules_from_yaml(path: Path) -> list[Rule]:
+    """Parse ``config/alerts.yaml`` into a list of Rule instances.
+
+    Expected schema::
+
+        rules:
+          - type: action_changed
+            severity: warn
+          - type: confidence_threshold
+            threshold: 0.6
+            severity: critical
+
+    Unknown rule types and unknown rule kwargs raise ``ValueError`` so a
+    typo in the user's config fails loudly at startup, not silently
+    later.
+    """
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"alerts config must be a mapping, got {type(raw).__name__}")
+    rules_raw = raw.get("rules", [])
+    if not isinstance(rules_raw, list):
+        raise ValueError("alerts config: 'rules' must be a list")
+
+    out: list[Rule] = []
+    for i, entry in enumerate(rules_raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f"rules[{i}] must be a mapping")
+        kwargs = dict(entry)
+        rtype = kwargs.pop("type", None)
+        if rtype is None:
+            raise ValueError(f"rules[{i}] is missing 'type'")
+        rule_cls = _RULE_REGISTRY.get(rtype)
+        if rule_cls is None:
+            valid = sorted(_RULE_REGISTRY.keys())
+            raise ValueError(
+                f"rules[{i}]: unknown rule type {rtype!r} (valid: {valid})"
+            )
+        if "severity" in kwargs and kwargs["severity"] not in _VALID_SEVERITIES:
+            raise ValueError(
+                f"rules[{i}]: severity must be one of "
+                f"{sorted(_VALID_SEVERITIES)}, got {kwargs['severity']!r}"
+            )
+        try:
+            out.append(rule_cls(**kwargs))  # type: ignore[call-arg]
+        except TypeError as e:
+            raise ValueError(f"rules[{i}] ({rtype}): {e}") from e
+    return out

@@ -1,0 +1,42 @@
+# Alert rules for the Esther dashboard. Copy to alerts.yaml and customise.
+# Loaded by `esther dashboard` at startup. Missing file = use built-in defaults.
+#
+# Each entry is a rule object. `type` is required; remaining keys are passed
+# to the rule constructor verbatim. Severity controls dashboard styling
+# (info=cyan, warn=yellow, critical=red+bell).
+#
+# Available rule types:
+#
+#   action_changed         Fires when BUY/HOLD/SELL flips between ticks.
+#                          severity (default: warn)
+#
+#   confidence_threshold   Fires when confidence crosses `threshold` in
+#                          either direction since the last tick.
+#                          threshold (default: 0.6)
+#                          severity  (default: info)
+#
+#   sentiment_shift        Fires when avg news sentiment moves by at least
+#                          `delta` since the last tick.
+#                          delta    (default: 0.4)
+#                          severity (default: info)
+
+rules:
+  # Any recommendation flip — most actionable signal for a discretionary trader.
+  - type: action_changed
+    severity: warn
+
+  # Confidence pushing through the action threshold — usually arrives just
+  # before / after a flip.
+  - type: confidence_threshold
+    threshold: 0.6
+    severity: info
+
+  # Hard threshold — ring the bell.
+  - type: confidence_threshold
+    threshold: 0.85
+    severity: critical
+
+  # Big swings in news sentiment regardless of price movement.
+  - type: sentiment_shift
+    delta: 0.4
+    severity: info

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
 
 from src.dashboard.state import RecommendationRow
 from src.intelligence.alerts import (
@@ -11,6 +14,7 @@ from src.intelligence.alerts import (
     AlertEngine,
     ConfidenceThresholdRule,
     SentimentShiftRule,
+    load_rules_from_yaml,
 )
 from src.strategy.base import SignalAction
 
@@ -109,6 +113,130 @@ def test_engine_collects_alerts_from_all_rules() -> None:
     assert "action_changed" in rule_names
     assert "confidence_threshold" in rule_names
     assert "sentiment_shift" in rule_names
+
+
+# ---------------------------------------------------------------------------
+# YAML loader
+# ---------------------------------------------------------------------------
+
+
+def _write_yaml(tmp_path: Path, content: str) -> Path:
+    path = tmp_path / "alerts.yaml"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def test_load_rules_returns_default_severities(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+rules:
+  - type: action_changed
+  - type: confidence_threshold
+  - type: sentiment_shift
+""",
+    )
+    rules = load_rules_from_yaml(path)
+    assert [type(r).__name__ for r in rules] == [
+        "ActionChangedRule",
+        "ConfidenceThresholdRule",
+        "SentimentShiftRule",
+    ]
+
+
+def test_load_rules_passes_kwargs_through(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+rules:
+  - type: confidence_threshold
+    threshold: 0.85
+    severity: critical
+  - type: sentiment_shift
+    delta: 0.6
+""",
+    )
+    rules = load_rules_from_yaml(path)
+    assert isinstance(rules[0], ConfidenceThresholdRule)
+    assert rules[0].threshold == 0.85
+    assert rules[0].severity == "critical"
+    assert isinstance(rules[1], SentimentShiftRule)
+    assert rules[1].delta == 0.6
+
+
+def test_load_rules_empty_file_yields_empty_list(tmp_path: Path) -> None:
+    path = _write_yaml(tmp_path, "")
+    assert load_rules_from_yaml(path) == []
+
+
+def test_load_rules_unknown_type_raises(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+rules:
+  - type: not_a_real_rule
+""",
+    )
+    with pytest.raises(ValueError, match="unknown rule type"):
+        load_rules_from_yaml(path)
+
+
+def test_load_rules_invalid_severity_raises(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+rules:
+  - type: action_changed
+    severity: HUGE
+""",
+    )
+    with pytest.raises(ValueError, match="severity must be one of"):
+        load_rules_from_yaml(path)
+
+
+def test_load_rules_missing_type_raises(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+rules:
+  - threshold: 0.5
+""",
+    )
+    with pytest.raises(ValueError, match="missing 'type'"):
+        load_rules_from_yaml(path)
+
+
+def test_load_rules_unknown_kwarg_raises(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+rules:
+  - type: action_changed
+    nonsense_field: yes
+""",
+    )
+    with pytest.raises(ValueError, match="action_changed"):
+        load_rules_from_yaml(path)
+
+
+def test_example_yaml_in_repo_parses() -> None:
+    path = Path(__file__).resolve().parents[1] / "config" / "alerts.example.yaml"
+    if not path.exists():
+        pytest.skip(f"{path} not present")
+    rules = load_rules_from_yaml(path)
+    assert len(rules) > 0
+    # Should round-trip to the right concrete classes
+    type_names = {type(r).__name__ for r in rules}
+    assert type_names <= {
+        "ActionChangedRule",
+        "ConfidenceThresholdRule",
+        "SentimentShiftRule",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Engine error-row handling
+# ---------------------------------------------------------------------------
 
 
 def test_engine_ignores_error_rows_for_baseline() -> None:

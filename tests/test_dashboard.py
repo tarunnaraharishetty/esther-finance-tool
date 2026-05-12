@@ -19,6 +19,7 @@ from src.dashboard.state import (
     EventBuffer,
 )
 from src.data.models import NewsArticle
+from src.intelligence.alerts import AlertEngine
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import SignalAction
 from src.strategy.recommendation import RecommendationEngine
@@ -78,6 +79,31 @@ def test_mock_controller_action_is_a_valid_signal() -> None:
     valid = {SignalAction.BUY, SignalAction.SELL, SignalAction.HOLD}
     for r in snap.rows:
         assert r.action in valid
+
+
+def test_mock_controller_surfaces_alerts_across_ticks() -> None:
+    """First tick has no baseline so produces no alerts; second tick has
+    the chance to fire if any rule's condition is met."""
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT"], seed=42)
+    s1 = asyncio.run(ctrl.fetch_snapshot())
+    # First tick: no previous row → no alert can fire.
+    assert s1.alerts == []
+    s2 = asyncio.run(ctrl.fetch_snapshot())
+    # Alerts are a list — may be empty, but the field must exist and the
+    # second snapshot must have run the engine (baseline now populated).
+    assert isinstance(s2.alerts, list)
+
+
+def test_controller_uses_injected_alert_engine() -> None:
+    """The controller should hand rows to whatever AlertEngine was injected."""
+    engine = AlertEngine(rules=[])  # zero rules → never any alerts
+    ctrl = MockDashboardController(
+        watchlist=["AAPL", "MSFT"], seed=7, alert_engine=engine
+    )
+    s1 = asyncio.run(ctrl.fetch_snapshot())
+    s2 = asyncio.run(ctrl.fetch_snapshot())
+    assert s1.alerts == []
+    assert s2.alerts == []
 
 
 # ---------------------------------------------------------------------------

@@ -9,8 +9,12 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from src.strategy.base import SignalAction
+
+if TYPE_CHECKING:
+    from src.intelligence.alerts import Alert
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,7 @@ class DashboardSnapshot:
     tick: int
     rows: list[RecommendationRow]
     events: list[EventEntry] = field(default_factory=list)
+    alerts: list[Alert] = field(default_factory=list)
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
