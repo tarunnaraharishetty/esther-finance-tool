@@ -190,6 +190,127 @@ def recommend(
     )
 
 
+@cli.command()
+@click.argument("symbol")
+@click.option("--lookback-days", default=60, show_default=True, help="OHLCV history window.")
+@click.option("--news-hours", default=48, show_default=True, help="News lookback window.")
+@click.option(
+    "--no-sentiment",
+    is_flag=True,
+    help="Skip FinBERT (sentiment forced to zero). Doesn't affect the LLM brief itself.",
+)
+def summarize(symbol: str, lookback_days: int, news_hours: int, no_sentiment: bool) -> None:
+    """Generate a plain-English AI brief for one SYMBOL.
+
+    Fetches bars + news, runs the recommendation engine, then asks Claude
+    to write a 2-4 sentence research brief. Requires ANTHROPIC_API_KEY.
+    """
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    import anthropic
+
+    from src.data.market_data import MarketDataService
+    from src.data.models import TimeFrame
+    from src.data.news_ingestion import get_news_source
+    from src.intelligence.explain import explain
+    from src.intelligence.llm_summary import LLMSummarizer
+    from src.strategy.recommendation import RecommendationEngine
+
+    settings = get_settings()
+    log = get_logger("summarize")
+
+    if not settings.is_paper_trading:
+        console.print("[red]refusing to run: ALPACA_BASE_URL is not paper[/red]")
+        raise click.exceptions.Exit(1)
+
+    try:
+        summarizer = LLMSummarizer(settings=settings)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise click.exceptions.Exit(2) from None
+
+    sym = symbol.upper()
+    end = datetime.now(UTC)
+    bars_start = end - timedelta(days=lookback_days)
+    news_start = end - timedelta(hours=news_hours)
+
+    market = MarketDataService()
+    news_source = get_news_source()
+    engine = RecommendationEngine()
+    if no_sentiment:
+        from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
+
+        class _Neutral(SentimentAnalyzer):
+            def __init__(self) -> None:
+                pass
+
+            def score_text(self, text: str) -> SentimentScore:  # type: ignore[override]
+                return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+            def score_article(self, article: object) -> SentimentScore:  # type: ignore[override]
+                return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+        engine.sentiment_analyzer = _Neutral()
+
+    async def _gather() -> tuple[object, list[object]]:
+        bars = await market.get_bars([sym], TimeFrame.DAY_1, bars_start, end)
+        df = market.to_dataframe(bars)
+        if df.empty:
+            raise RuntimeError(f"no bars returned for {sym}")
+        news = (
+            []
+            if no_sentiment
+            else await news_source.fetch([sym], news_start, end, limit=20)
+        )
+        rec = engine.recommend(sym, df, news=news)
+        return rec, list(news)
+
+    try:
+        rec, news = asyncio.run(_gather())
+    except Exception as e:  # noqa: BLE001 — top-level CLI error surface
+        log.warning("summarize.fetch_failed", symbol=sym, error=str(e))
+        console.print(f"[red]failed to fetch data for {sym}: {e}[/red]")
+        raise click.exceptions.Exit(3) from None
+
+    explanation = explain(
+        symbol=rec.symbol,  # type: ignore[attr-defined]
+        action=rec.action,  # type: ignore[attr-defined]
+        confidence=rec.confidence,  # type: ignore[attr-defined]
+        combined_score=rec.combined_score,  # type: ignore[attr-defined]
+        indicator_scores=rec.indicator_scores,  # type: ignore[attr-defined]
+        sentiment_score=rec.sentiment_score,  # type: ignore[attr-defined]
+        num_news_articles=rec.num_news_articles,  # type: ignore[attr-defined]
+    )
+
+    try:
+        brief = summarizer.summarize(explanation, headlines=news)
+    except anthropic.AuthenticationError:
+        console.print(
+            "[red]Anthropic auth failed — check ANTHROPIC_API_KEY in .env.[/red]"
+        )
+        raise click.exceptions.Exit(2) from None
+    except anthropic.RateLimitError:
+        console.print(
+            "[yellow]Anthropic rate-limited — try again in a minute.[/yellow]"
+        )
+        raise click.exceptions.Exit(4) from None
+    except anthropic.APIStatusError as e:
+        console.print(f"[red]Anthropic API error ({e.status_code}): {e.message}[/red]")
+        raise click.exceptions.Exit(5) from None
+
+    console.print(
+        Panel(
+            brief,
+            title=f"{sym} — AI brief ({end.strftime('%Y-%m-%d %H:%M %Z')})",
+            border_style="cyan",
+        )
+    )
+    console.print(
+        "[dim]decision support — research only, not execution advice.[/dim]"
+    )
+
+
 def _render_preflight_report(report: object) -> None:
     """Print a Rich table for a PreflightReport. Imported here to keep
     the doctor / dashboard handlers thin."""
@@ -405,6 +526,7 @@ def _print_banner(settings: object) -> None:
         "  esther doctor      diagnose Alpaca + FinBERT setup\n"
         "  esther initdb      create database tables\n"
         "  esther recommend   show BUY/HOLD/SELL for a watchlist\n"
+        "  esther summarize   AI-written brief for one symbol (needs ANTHROPIC_API_KEY)\n"
         "  esther dashboard   live Textual dashboard (use --mock for demo)\n"
     )
     console.print(Panel(body, title="market intelligence + decision support", border_style="cyan"))

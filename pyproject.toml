@@ -28,6 +28,7 @@ dependencies = [
     "alembic>=1.13",
     "transformers>=4.42",
     "torch>=2.3",
+    "anthropic>=0.55",
     "structlog>=24.1",
     "tenacity>=8.3",
 ]

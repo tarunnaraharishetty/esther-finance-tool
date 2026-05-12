@@ -14,6 +14,7 @@ from src.intelligence.alerts import (
     SentimentShiftRule,
 )
 from src.intelligence.explain import Contributor, Explanation, explain
+from src.intelligence.llm_summary import LLMSummarizer
 from src.intelligence.summary import Summarizer, TemplateSummarizer
 from src.intelligence.watchlist import (
     WatchlistChange,
@@ -29,6 +30,7 @@ __all__ = [
     "ConfidenceThresholdRule",
     "Contributor",
     "Explanation",
+    "LLMSummarizer",
     "Rule",
     "SentimentShiftRule",
     "Summarizer",

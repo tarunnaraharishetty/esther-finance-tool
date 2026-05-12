@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     sentiment_model: str = "ProsusAI/finbert"
     sentiment_device: SentimentDevice = SentimentDevice.CPU
 
+    # ---- AI summaries (Anthropic) ----
+    anthropic_api_key: SecretStr | None = None
+    llm_model: str = "claude-opus-4-7"
+    llm_max_tokens: int = 1024
+
     # ---- Paths ----
     project_root: Path = PROJECT_ROOT
     data_dir: Path = PROJECT_ROOT / "data"

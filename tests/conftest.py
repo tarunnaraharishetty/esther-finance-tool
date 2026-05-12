@@ -24,6 +24,10 @@ def _safe_test_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
     monkeypatch.setenv("APP_ENV", "dev")
     monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    # Neutralize any real Anthropic key from the developer's local .env so
+    # tests that assert "no key configured" stay deterministic. Tests that
+    # need a key should setenv explicitly.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     # Bust the lru_cache on Settings between tests
     from src.config import settings as settings_mod
 
