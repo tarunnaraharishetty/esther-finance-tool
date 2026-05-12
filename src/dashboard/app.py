@@ -29,7 +29,8 @@ from textual.containers import Vertical
 from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, RichLog, Static
 
-from src.dashboard.state import DashboardSnapshot
+from src.dashboard.state import DashboardSnapshot, RecommendationRow
+from src.intelligence.explain import Explanation, explain
 from src.strategy.base import SignalAction
 
 if TYPE_CHECKING:
@@ -80,19 +81,54 @@ class DetailPanel(Static):
         r = snap.rows[idx]
         if r.error:
             return f"[bold]{r.symbol}[/bold] — [red]error:[/red] {rich_escape(r.error)}"
-        return (
+        explanation = _explain_row(r)
+        header = (
             f"[bold]{r.symbol}[/bold]  →  {_action_text(r.action)}  "
             f"(combined [bold]{r.combined_score:+.2f}[/bold], "
-            f"confidence [bold]{r.confidence:.2f}[/bold])\n"
-            f"[dim]technical[/dim] {r.technical_score:+.2f}  "
-            f"[dim]sentiment[/dim] {r.sentiment_score:+.2f}  "
-            f"[dim]news[/dim] {r.num_news_articles}\n"
+            f"confidence [bold]{r.confidence:.2f}[/bold] "
+            f"[dim]{explanation.confidence_label}[/dim])"
+        )
+        metrics = (
             f"[dim]rsi[/dim] {_fmt_signed(r.rsi)}  "
             f"[dim]macd[/dim] {_fmt_signed(r.macd)}  "
             f"[dim]bollinger[/dim] {_fmt_signed(r.bollinger)}  "
-            f"[dim]last[/dim] {_fmt_price(r.last_price)}\n"
-            f"[italic]{rich_escape(r.reasoning)}[/italic]"
+            f"[dim]news[/dim] {r.num_news_articles}  "
+            f"[dim]last[/dim] {_fmt_price(r.last_price)}"
         )
+        why = "\n".join(
+            f"  • [bold]{c.name}[/bold] ({c.score:+.2f}): {rich_escape(c.note)}"
+            for c in explanation.contributors
+        )
+        if not why:
+            why = "  [dim]no contributing signals[/dim]"
+        return (
+            f"{header}\n"
+            f"{metrics}\n"
+            f"[italic]{rich_escape(explanation.headline)}[/italic]\n"
+            f"{why}"
+        )
+
+
+def _explain_row(r: RecommendationRow) -> Explanation:
+    """Build an Explanation from a dashboard row.
+
+    Reconstructs the indicator-score dict from the per-column NaN-safe
+    fields on the row (NaN means the indicator wasn't computed and
+    should be omitted from the contributor list).
+    """
+    indicator_scores: dict[str, float] = {}
+    for key, value in (("rsi", r.rsi), ("macd", r.macd), ("bollinger", r.bollinger)):
+        if value == value:  # filter NaN
+            indicator_scores[key] = float(value)
+    return explain(
+        symbol=r.symbol,
+        action=r.action,
+        confidence=r.confidence,
+        combined_score=r.combined_score,
+        indicator_scores=indicator_scores,
+        sentiment_score=r.sentiment_score,
+        num_news_articles=r.num_news_articles,
+    )
 
 
 class DashboardApp(App[None]):
