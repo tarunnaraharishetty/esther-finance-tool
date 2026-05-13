@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     news_recency_half_life_hours: float = 24.0
     news_recency_floor_weight: float = 0.05
 
+    # ---- Session persistence ----
+    # JSON snapshot of intelligence-layer trackers (signal history,
+    # OPP membership, pulse history, alert state). Written atomically
+    # at the end of each tick and read at controller startup so the
+    # dashboard resumes mid-day instead of starting cold.
+    session_state_path: Path = PROJECT_ROOT / "data" / "session_state.json"
+
     # ---- AI summaries (Anthropic) ----
     anthropic_api_key: SecretStr | None = None
     llm_model: str = "claude-opus-4-7"

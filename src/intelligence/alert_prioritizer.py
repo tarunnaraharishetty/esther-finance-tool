@@ -51,6 +51,11 @@ class AlertState:
     is tiny in practice).
     """
 
+    _LAST_FIRED_DELIM = "||"
+    """Delimiter joining ``(symbol, rule)`` for JSON serialization.
+    Neither symbols (alphanumeric + ``.`` / ``/``) nor rule names
+    (snake_case internal identifiers) contain pipes."""
+
     def __init__(self, max_history: int = 200) -> None:
         self._log: deque[Alert] = deque(maxlen=max_history)
         self._last_fired: dict[tuple[str, str], datetime] = {}
@@ -70,6 +75,42 @@ class AlertState:
 
     def __len__(self) -> int:
         return len(self._log)
+
+    # -- persistence -------------------------------------------------------
+
+    def to_snapshot(self) -> tuple[list[Alert], dict[str, datetime]]:
+        """Return ``(log, last_fired_serialized)`` for the session store.
+
+        ``_last_fired`` is keyed by ``(symbol, rule)`` tuples in
+        memory; JSON dict keys must be strings, so we join with
+        ``||``. The same key is re-split on :meth:`apply_snapshot`.
+        """
+        last_fired_serialized = {
+            f"{symbol}{self._LAST_FIRED_DELIM}{rule}": when
+            for (symbol, rule), when in self._last_fired.items()
+        }
+        return list(self._log), last_fired_serialized
+
+    def apply_snapshot(
+        self,
+        log: list[Alert],
+        last_fired_serialized: dict[str, datetime],
+    ) -> None:
+        """Replace state with ``log`` + serialized last-fired map.
+
+        Log entries past ``self._log.maxlen`` are dropped (oldest
+        first). Last-fired keys that can't be split cleanly are
+        skipped — defensive against a tampered snapshot file.
+        """
+        self._log.clear()
+        for alert in log:
+            self._log.append(alert)
+        self._last_fired.clear()
+        for key, when in last_fired_serialized.items():
+            symbol, sep, rule = key.partition(self._LAST_FIRED_DELIM)
+            if not sep or not symbol or not rule:
+                continue
+            self._last_fired[(symbol, rule)] = when
 
 
 # ---------------------------------------------------------------------------
@@ -162,9 +203,7 @@ class AlertPrioritizer:
 
     # -- stages ----------------------------------------------------------
 
-    def _apply_cooldown(
-        self, fresh: list[Alert], state: AlertState, now: datetime
-    ) -> list[Alert]:
+    def _apply_cooldown(self, fresh: list[Alert], state: AlertState, now: datetime) -> list[Alert]:
         kept: list[Alert] = []
         cooldowns = self.config.cooldowns
         for alert in fresh:
@@ -185,9 +224,7 @@ class AlertPrioritizer:
                 )
         return kept
 
-    def _detect_composites(
-        self, kept: list[Alert], now: datetime
-    ) -> list[Alert]:
+    def _detect_composites(self, kept: list[Alert], now: datetime) -> list[Alert]:
         if not self.config.composites:
             return list(kept)
 

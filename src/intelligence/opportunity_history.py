@@ -109,5 +109,29 @@ class OpportunityMembershipTracker:
         """All symbols currently tracked (have non-fully-absent history)."""
         return tuple(self._membership)
 
+    # -- persistence -------------------------------------------------------
+
+    def to_snapshot(self) -> dict[str, list[bool]]:
+        """Return per-symbol membership buffers as plain lists."""
+        return {sym: list(buf) for sym, buf in self._membership.items()}
+
+    def apply_snapshot(self, membership: dict[str, list[bool]]) -> None:
+        """Replace tracker state with ``membership``.
+
+        Each per-symbol list is loaded into a fresh deque capped at
+        ``self.window``; entries beyond the cap are dropped (oldest
+        first) so a smaller window than the prior session still works
+        cleanly. Symbols whose restored buffer is fully ``False`` are
+        pruned (matches :meth:`record`'s behavior).
+        """
+        self._membership.clear()
+        for symbol, buf in membership.items():
+            trimmed = buf[-self.window :]
+            if not trimmed or not any(trimmed):
+                continue
+            new_buf: deque[bool] = deque(maxlen=self.window)
+            new_buf.extend(trimmed)
+            self._membership[symbol] = new_buf
+
 
 __all__ = ["OpportunityHistory", "OpportunityMembershipTracker"]

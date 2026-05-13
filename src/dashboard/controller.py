@@ -41,6 +41,7 @@ from src.intelligence.opportunity_history import (
 from src.intelligence.pulse import compute_pulse
 from src.intelligence.pulse_history import PulseHistoryTracker
 from src.intelligence.tier import promote_to_tier
+from src.persistence.session_store import SessionSnapshot, SessionStore
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import SignalAction
 from src.strategy.recommendation import RecommendationEngine
@@ -73,6 +74,7 @@ class BaseController(ABC):
         signal_history: SignalHistory | None = None,
         opp_tracker: OpportunityMembershipTracker | None = None,
         pulse_tracker: PulseHistoryTracker | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         self.watchlist = list(watchlist)
         self.engine = engine
@@ -83,7 +85,13 @@ class BaseController(ABC):
         self.signal_history = signal_history or SignalHistory()
         self.opp_tracker = opp_tracker or OpportunityMembershipTracker()
         self.pulse_tracker = pulse_tracker or PulseHistoryTracker()
+        self.session_store = session_store
         self._tick = 0
+        # If a SessionStore is wired up, hydrate the trackers + tick
+        # counter from the saved snapshot. Missing or corrupt file →
+        # cold start; logged at the store layer.
+        if self.session_store is not None:
+            self._hydrate_from_store()
 
     @abstractmethod
     async def fetch_snapshot(self) -> DashboardSnapshot:
@@ -139,9 +147,7 @@ class BaseController(ABC):
         snap.pulse = pulse
         snap.pulse_history = self.pulse_tracker.summary()
 
-    def _record_opp_history(
-        self, snap: DashboardSnapshot
-    ) -> dict[str, OpportunityHistory]:
+    def _record_opp_history(self, snap: DashboardSnapshot) -> dict[str, OpportunityHistory]:
         """Update the membership tracker for this tick + return per-symbol
         summaries for the symbols currently in top-N.
 
@@ -179,6 +185,47 @@ class BaseController(ABC):
                 summaries[row.symbol] = summary
         return summaries
 
+    def _hydrate_from_store(self) -> None:
+        """Replace tracker state with the saved snapshot if one exists.
+
+        Called once from ``__init__`` when a ``SessionStore`` is
+        wired up. Missing / corrupt / schema-mismatched snapshots
+        return ``None`` from the store and we leave the freshly-
+        constructed trackers in place — i.e. a cold start.
+        """
+        assert self.session_store is not None
+        snapshot = self.session_store.load()
+        if snapshot is None:
+            return
+        self.signal_history.apply_snapshot(snapshot.signal_episodes)
+        self.opp_tracker.apply_snapshot(snapshot.opp_membership)
+        self.pulse_tracker.apply_snapshot(snapshot.pulse_records)
+        self.alert_state.apply_snapshot(snapshot.alert_log, snapshot.alert_last_fired)
+        self._tick = snapshot.tick
+        self.events.info(
+            f"session restored from {self.session_store.path.name} (tick {snapshot.tick})"
+        )
+
+    def _persist_if_enabled(self) -> None:
+        """Write the current tracker state to the session store.
+
+        No-op when no store is wired up. Called at the end of each
+        ``fetch_snapshot`` in the concrete controllers.
+        """
+        if self.session_store is None:
+            return
+        alert_log, alert_last_fired = self.alert_state.to_snapshot()
+        snapshot = SessionSnapshot(
+            saved_at=datetime.now(UTC),
+            tick=self._tick,
+            signal_episodes=self.signal_history.to_snapshot(),
+            opp_membership=self.opp_tracker.to_snapshot(),
+            pulse_records=self.pulse_tracker.to_snapshot(),
+            alert_log=alert_log,
+            alert_last_fired=alert_last_fired,
+        )
+        self.session_store.save(snapshot)
+
 
 # ---------------------------------------------------------------------------
 # Live controller
@@ -203,6 +250,7 @@ class DashboardController(BaseController):
         alert_engine: AlertEngine | None = None,
         alert_prioritizer: AlertPrioritizer | None = None,
         alert_state: AlertState | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         super().__init__(
             watchlist=watchlist,
@@ -211,12 +259,12 @@ class DashboardController(BaseController):
             alert_engine=alert_engine,
             alert_prioritizer=alert_prioritizer,
             alert_state=alert_state,
+            session_store=session_store,
         )
         self.settings = settings or get_settings()
         if not self.settings.is_paper_trading:
             raise RuntimeError(
-                "Dashboard refuses non-paper Alpaca URL "
-                f"(got {self.settings.alpaca_base_url!r})"
+                f"Dashboard refuses non-paper Alpaca URL (got {self.settings.alpaca_base_url!r})"
             )
         self.market = market or MarketDataService(client=AlpacaClient(self.settings))
         self.news_source = news_source or get_news_source()
@@ -248,11 +296,10 @@ class DashboardController(BaseController):
         snap.opp_history = self._record_opp_history(snap)
         fresh_alerts = self.alert_engine.evaluate(rows_list)
         fresh_alerts.extend(self.alert_engine.evaluate_snapshot(snap))
-        snap.alerts = self.alert_prioritizer.prioritize(
-            fresh_alerts, self.alert_state, now=now
-        )
+        snap.alerts = self.alert_prioritizer.prioritize(fresh_alerts, self.alert_state, now=now)
         self.alert_state.record(snap.alerts)
         snap.recent_alerts = self.alert_state.recent(20)
+        self._persist_if_enabled()
         return snap
 
     async def _row_for(self, symbol: str, now: datetime) -> RecommendationRow:
@@ -280,8 +327,7 @@ class DashboardController(BaseController):
                 f"(conf {rec.confidence:.2f}, combined {rec.combined_score:+.2f})"
             )
             top_headlines = tuple(
-                a.headline
-                for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
+                a.headline for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
             )
             return _row_from_recommendation(
                 rec,
@@ -342,6 +388,7 @@ class MockDashboardController(BaseController):
         alert_engine: AlertEngine | None = None,
         alert_prioritizer: AlertPrioritizer | None = None,
         alert_state: AlertState | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         watchlist = watchlist or ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
         rng = random.Random(seed)
@@ -354,6 +401,7 @@ class MockDashboardController(BaseController):
             alert_engine=alert_engine,
             alert_prioritizer=alert_prioritizer,
             alert_state=alert_state,
+            session_store=session_store,
         )
         self._rng = rng
         self._np_rng = np.random.default_rng(seed)
@@ -380,11 +428,10 @@ class MockDashboardController(BaseController):
         snap.opp_history = self._record_opp_history(snap)
         fresh_alerts = self.alert_engine.evaluate(rows)
         fresh_alerts.extend(self.alert_engine.evaluate_snapshot(snap))
-        snap.alerts = self.alert_prioritizer.prioritize(
-            fresh_alerts, self.alert_state, now=now
-        )
+        snap.alerts = self.alert_prioritizer.prioritize(fresh_alerts, self.alert_state, now=now)
         self.alert_state.record(snap.alerts)
         snap.recent_alerts = self.alert_state.recent(20)
+        self._persist_if_enabled()
         return snap
 
     def _mock_row(self, symbol: str, now: datetime) -> RecommendationRow:
@@ -433,12 +480,9 @@ class MockDashboardController(BaseController):
         rec = self.engine.recommend(symbol, df, news=news, now=now)
         history = self.signal_history.summary_for(symbol)
         rec = promote_to_tier(rec, history)
-        self.events.info(
-            f"{symbol} → {rec.tier.display} (conf {rec.confidence:.2f})"
-        )
+        self.events.info(f"{symbol} → {rec.tier.display} (conf {rec.confidence:.2f})")
         top_headlines = tuple(
-            a.headline
-            for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
+            a.headline for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
         )
         return _row_from_recommendation(
             rec,

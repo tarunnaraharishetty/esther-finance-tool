@@ -123,6 +123,30 @@ class SignalHistory:
         prior = episodes[:-1][-recent:][::-1]
         return SignalHistorySummary(current=current, recent=tuple(prior))
 
+    # -- persistence -------------------------------------------------------
+
+    def to_snapshot(self) -> dict[str, list[SignalEpisode]]:
+        """Return a plain dict of per-symbol episode lists.
+
+        Snapshot format matches :class:`~src.persistence.SessionSnapshot.signal_episodes`
+        directly so the session store can stash it without further
+        conversion. Empty-episode symbols are omitted.
+        """
+        return {sym: list(eps) for sym, eps in self._by_symbol.items() if eps}
+
+    def apply_snapshot(self, episodes_by_symbol: dict[str, list[SignalEpisode]]) -> None:
+        """Replace in-memory state with ``episodes_by_symbol``.
+
+        Caps each per-symbol list at ``self._max`` — restored sessions
+        respect the current cap even if a prior session ran with a
+        larger one.
+        """
+        self._by_symbol.clear()
+        for symbol, episodes in episodes_by_symbol.items():
+            capped = list(episodes[-self._max :])
+            if capped:
+                self._by_symbol[symbol] = capped
+
 
 __all__ = [
     "DEFAULT_MAX_EPISODES",

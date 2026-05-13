@@ -20,8 +20,10 @@ from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from src.intelligence.pulse import MarketPulse
+
 if TYPE_CHECKING:
-    from src.intelligence.pulse import MarketPulse
+    from src.persistence.session_store import PulseRecord
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,62 @@ class PulseHistoryTracker:
 
     def __len__(self) -> int:
         return len(self._buf)
+
+    # -- persistence -------------------------------------------------------
+
+    def to_snapshot(self) -> list[PulseRecord]:
+        """Return each buffered pulse as a serialization-friendly record."""
+        from src.persistence.session_store import PulseRecord
+
+        return [
+            PulseRecord(
+                sentiment=p.sentiment,
+                conviction=p.conviction,
+                activity=p.activity,
+                summary=p.summary,
+                bullish_count=p.bullish_count,
+                bearish_count=p.bearish_count,
+                healthy_count=p.healthy_count,
+                momentum_breadth=p.momentum_breadth,
+                sentiment_breadth=p.sentiment_breadth,
+                reversal_intensity=p.reversal_intensity,
+                alert_intensity=p.alert_intensity,
+                strongest_symbols=[list(t) for t in p.strongest_symbols],  # type: ignore[misc]
+            )
+            for p in self._buf
+        ]
+
+    def apply_snapshot(self, records: list[PulseRecord]) -> None:
+        """Rehydrate the rolling buffer from ``records``.
+
+        Records beyond the current ``self.window`` are dropped
+        (oldest first) — restored sessions respect the current window
+        even if the prior run had a larger one. Empty pulses are kept
+        as-is here (unlike :meth:`record`) because the snapshot only
+        contains non-empty pulses by construction.
+        """
+        trimmed = records[-self.window :]
+        new_buf: deque[MarketPulse] = deque(maxlen=self.window)
+        for rec in trimmed:
+            new_buf.append(
+                MarketPulse(
+                    sentiment=rec.sentiment,
+                    conviction=rec.conviction,
+                    activity=rec.activity,
+                    summary=rec.summary,
+                    bullish_count=rec.bullish_count,
+                    bearish_count=rec.bearish_count,
+                    healthy_count=rec.healthy_count,
+                    momentum_breadth=rec.momentum_breadth,
+                    sentiment_breadth=rec.sentiment_breadth,
+                    reversal_intensity=rec.reversal_intensity,
+                    alert_intensity=rec.alert_intensity,
+                    strongest_symbols=tuple(
+                        (sym, display) for sym, display in rec.strongest_symbols
+                    ),
+                )
+            )
+        self._buf = new_buf
 
 
 __all__ = ["PulseHistory", "PulseHistoryTracker"]
