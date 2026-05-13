@@ -42,6 +42,7 @@ from src.intelligence.opportunity_history import (
     OpportunityMembershipTracker,
 )
 from src.intelligence.pulse import MarketPulse, compute_pulse
+from src.intelligence.pulse_history import PulseHistory, PulseHistoryTracker
 from src.intelligence.signal_profile import SignalProfile, compute_signal_profile
 from src.intelligence.recap import LLMRecapGenerator, RecapContext
 from src.intelligence.summary import Summarizer, TemplateSummarizer
@@ -73,6 +74,8 @@ __all__ = [
     "OpportunityHistory",
     "OpportunityMembershipTracker",
     "PrioritizerConfig",
+    "PulseHistory",
+    "PulseHistoryTracker",
     "RankedOpportunity",
     "RecapContext",
     "Rule",

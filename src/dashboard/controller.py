@@ -38,6 +38,8 @@ from src.intelligence.opportunity_history import (
     OpportunityHistory,
     OpportunityMembershipTracker,
 )
+from src.intelligence.pulse import compute_pulse
+from src.intelligence.pulse_history import PulseHistoryTracker
 from src.intelligence.tier import promote_to_tier
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import SignalAction
@@ -70,6 +72,7 @@ class BaseController(ABC):
         alert_state: AlertState | None = None,
         signal_history: SignalHistory | None = None,
         opp_tracker: OpportunityMembershipTracker | None = None,
+        pulse_tracker: PulseHistoryTracker | None = None,
     ) -> None:
         self.watchlist = list(watchlist)
         self.engine = engine
@@ -79,11 +82,27 @@ class BaseController(ABC):
         self.alert_state = alert_state or AlertState()
         self.signal_history = signal_history or SignalHistory()
         self.opp_tracker = opp_tracker or OpportunityMembershipTracker()
+        self.pulse_tracker = pulse_tracker or PulseHistoryTracker()
         self._tick = 0
 
     @abstractmethod
     async def fetch_snapshot(self) -> DashboardSnapshot:
         """Produce one frame of dashboard state."""
+
+    def _record_pulse(self, snap: DashboardSnapshot) -> None:
+        """Compute the pulse once + record it into the rolling-window
+        tracker, then attach both ``snap.pulse`` and ``snap.pulse_history``.
+
+        Computing in the controller (rather than re-computing in every
+        renderer that needs it) means the WatchlistHeader, StatusLine,
+        and the header signature cache all see the same value — and the
+        rolling history reflects the *rendered* pulse, not a slightly
+        different recomputation.
+        """
+        pulse = compute_pulse(snap)
+        self.pulse_tracker.record(pulse)
+        snap.pulse = pulse
+        snap.pulse_history = self.pulse_tracker.summary()
 
     def _record_opp_history(
         self, snap: DashboardSnapshot
@@ -183,6 +202,7 @@ class DashboardController(BaseController):
             signal_history=history,
             timestamp=now,
         )
+        self._record_pulse(snap)
         snap.opp_history = self._record_opp_history(snap)
         fresh_alerts = self.alert_engine.evaluate(rows_list)
         fresh_alerts.extend(self.alert_engine.evaluate_snapshot(snap))
@@ -314,6 +334,7 @@ class MockDashboardController(BaseController):
             signal_history=history,
             timestamp=now,
         )
+        self._record_pulse(snap)
         snap.opp_history = self._record_opp_history(snap)
         fresh_alerts = self.alert_engine.evaluate(rows)
         fresh_alerts.extend(self.alert_engine.evaluate_snapshot(snap))

@@ -173,6 +173,28 @@ def test_mock_controller_signal_history_grows_across_ticks() -> None:
         assert total_ticks == 2
 
 
+def test_mock_controller_populates_pulse_and_pulse_history() -> None:
+    """The controller computes pulse once + records into the rolling
+    tracker, attaching both to the snapshot. Subsequent ticks extend
+    the pulse_history series."""
+    ctrl = MockDashboardController(
+        watchlist=["AAPL", "MSFT", "NVDA"], seed=7
+    )
+    s1 = asyncio.run(ctrl.fetch_snapshot())
+    assert s1.pulse is not None
+    assert s1.pulse_history is not None
+    # First useful tick → exactly one entry.
+    assert s1.pulse_history.length == 1
+    assert s1.pulse_history.momentum_breadth[-1] == s1.pulse.momentum_breadth
+
+    s2 = asyncio.run(ctrl.fetch_snapshot())
+    assert s2.pulse_history is not None
+    # History extends with each tick (assuming the pulse isn't empty).
+    assert s2.pulse_history.length == 2
+    # Most-recent value matches this tick's pulse.
+    assert s2.pulse_history.momentum_breadth[-1] == s2.pulse.momentum_breadth
+
+
 def test_mock_controller_populates_opp_history_for_top_n() -> None:
     """The controller should fill snap.opp_history for symbols currently
     in top-N. Streaks should accumulate across ticks for symbols that
@@ -1848,3 +1870,104 @@ async def test_app_b_keypress_caches_brief_by_composite_bucket() -> None:
         detail = app.query_one(DetailPanel)
         assert detail.brief_state == "ready"
         assert detail.brief_text == "cached brief"
+
+
+# ---------------------------------------------------------------------------
+# Pulse history: HIST line + sparkline helpers
+# ---------------------------------------------------------------------------
+
+
+def test_sparkline_normalized_uses_full_range_for_zero_to_one() -> None:
+    from src.dashboard.app import _SPARKLINE_CHARS, _sparkline_normalized
+
+    spark = _sparkline_normalized((0.0, 1.0))
+    assert spark[0] == _SPARKLINE_CHARS[0]   # lowest char
+    assert spark[1] == _SPARKLINE_CHARS[-1]  # highest char
+
+
+def test_sparkline_normalized_clamps_out_of_range_values() -> None:
+    """Values outside [0, 1] clamp rather than crash. Defensive for any
+    future caller that passes a relative score by mistake."""
+    from src.dashboard.app import _SPARKLINE_CHARS, _sparkline_normalized
+
+    spark = _sparkline_normalized((-0.5, 1.5))
+    assert spark[0] == _SPARKLINE_CHARS[0]
+    assert spark[-1] == _SPARKLINE_CHARS[-1]
+
+
+def test_sparkline_normalized_empty_renders_empty() -> None:
+    from src.dashboard.app import _sparkline_normalized
+
+    assert _sparkline_normalized(()) == ""
+
+
+def test_sparkline_relative_autoscales_to_observed_range() -> None:
+    """Counts have no natural upper bound — relative scale ensures the
+    sparkline shows trajectory regardless of magnitude."""
+    from src.dashboard.app import _SPARKLINE_CHARS, _sparkline_relative
+
+    spark = _sparkline_relative((1, 5, 10))
+    # Lowest value maps to lowest char, highest to highest.
+    assert spark[0] == _SPARKLINE_CHARS[0]
+    assert spark[-1] == _SPARKLINE_CHARS[-1]
+
+
+def test_sparkline_relative_flat_series_renders_low_chars() -> None:
+    """A flat series should read visually quiet rather than mid-height —
+    a quiet stretch of activity shouldn't look like a busy one."""
+    from src.dashboard.app import _SPARKLINE_CHARS, _sparkline_relative
+
+    spark = _sparkline_relative((3, 3, 3, 3))
+    assert spark == _SPARKLINE_CHARS[0] * 4
+
+
+async def test_hist_line_appears_after_two_ticks() -> None:
+    """The HIST line is suppressed on tick 1 (no trend yet), surfaces
+    from tick 2 onward."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT", "NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        # Tick 1 happens on mount.
+        await pilot.pause(0.3)
+        header = app.query_one(WatchlistHeader)
+        text = header.render()
+        # No HIST after one tick — pulse history.has_trend is False.
+        assert "HIST" not in text
+
+        # Force a second refresh.
+        await pilot.press("r")
+        await pilot.pause(0.3)
+        text = header.render()
+        # HIST should be present once we have >=2 pulse readings (assuming
+        # the mock controller produced healthy rows on both ticks — which
+        # it does for this watchlist).
+        assert "HIST" in text
+
+
+async def test_hist_line_includes_sparkline_chars_when_signal_present() -> None:
+    """When numeric series have non-zero values, the HIST line includes
+    sparkline characters from the block-element set."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader, _SPARKLINE_CHARS
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        # Several ticks to build a meaningful series.
+        for _ in range(4):
+            await pilot.press("r")
+            await pilot.pause(0.15)
+        header = app.query_one(WatchlistHeader)
+        text = header.render()
+        # If HIST appears AND momentum/sentiment breadth > 0 in any tick,
+        # at least one block-element char shows up. We check the broader
+        # set rather than a specific char so test stays robust to seed
+        # variation.
+        if "HIST" in text:
+            assert any(c in text for c in _SPARKLINE_CHARS)

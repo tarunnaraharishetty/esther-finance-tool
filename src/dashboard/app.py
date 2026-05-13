@@ -39,6 +39,7 @@ from src.intelligence.opportunities import (
     rank_opportunities,
 )
 from src.intelligence.opportunity_history import OpportunityHistory
+from src.intelligence.pulse_history import PulseHistory
 from src.intelligence.pulse import MarketPulse, compute_pulse
 from src.intelligence.signal_profile import SignalProfile
 from src.intelligence.rankings import Rankings
@@ -166,12 +167,18 @@ class WatchlistHeader(Static):
             return "[dim]watchlist intel: loading…[/dim]"
 
         rankings = compute_rankings(snap, n=3)
-        pulse = compute_pulse(snap)
+        pulse = snap.pulse if snap.pulse is not None else compute_pulse(snap)
         lines: list[str] = []
 
         # --- Pulse line (skip when no healthy rows) --------------------
         if not pulse.is_empty:
             lines.append(f"{_section_label('PULSE')}{_format_pulse(pulse)}")
+
+        # --- HIST line (sparklines of recent pulses; needs >=2 ticks) --
+        if snap.pulse_history is not None and snap.pulse_history.has_trend:
+            lines.append(
+                f"{_section_label('HIST')}{_format_pulse_history(snap.pulse_history)}"
+            )
 
         # --- Status line: action mix + changes since last refresh -------
         counts = action_breakdown(snap)
@@ -323,9 +330,36 @@ def _header_signature(
          round(r.sentiment_score, 3), r.num_news_articles)
         for r in snap.rows
     )
-    # Pulse output drives the PULSE line.
-    pulse = compute_pulse(snap)
-    pulse_sig = (pulse.sentiment, pulse.conviction, pulse.activity)
+    # Pulse output drives the PULSE line. Capture the full set of fields
+    # the renderer surfaces — sentiment/conviction/activity AND breadth,
+    # intensity, strong-symbol counts — so a breadth shift invalidates
+    # the cache even when the categorical tier hasn't moved.
+    pulse = snap.pulse if snap.pulse is not None else compute_pulse(snap)
+    pulse_sig = (
+        pulse.sentiment,
+        pulse.conviction,
+        pulse.activity,
+        pulse.bullish_count,
+        pulse.bearish_count,
+        pulse.healthy_count,
+        round(pulse.momentum_breadth, 3),
+        round(pulse.sentiment_breadth, 3),
+        pulse.reversal_intensity,
+        pulse.alert_intensity,
+        pulse.strongest_symbols,
+    )
+    # History drives the HIST line — last value per series suffices for
+    # the cache key since adding a new tick is the only way the series
+    # advances.
+    hist_sig: tuple = ()
+    if snap.pulse_history is not None and snap.pulse_history.has_trend:
+        hist_sig = (
+            snap.pulse_history.length,
+            round(snap.pulse_history.momentum_breadth[-1], 3),
+            round(snap.pulse_history.sentiment_breadth[-1], 3),
+            snap.pulse_history.reversal_intensity[-1],
+            snap.pulse_history.alert_intensity[-1],
+        )
     # Opportunities + their history badges drive the OPP lines.
     opp_sig = tuple(
         (
@@ -349,6 +383,7 @@ def _header_signature(
         tuple(sorted(severity_counts.items())),
         indicators_sig,
         pulse_sig,
+        hist_sig,
         opp_sig,
     )
 
@@ -526,6 +561,109 @@ def _breadth_style(fraction: float) -> str:
     if fraction >= 0.50:
         return "yellow"
     return "dim"
+
+
+# ---------------------------------------------------------------------------
+# Pulse history (HIST line)
+# ---------------------------------------------------------------------------
+
+
+_SPARKLINE_CHARS = "▁▂▃▄▅▆▇█"
+"""Eight Unicode block-element heights, low to high. Index by
+``round(value * 7)`` for a normalized [0, 1] series."""
+
+
+def _sparkline_normalized(
+    values: tuple[float, ...], *, lo: float = 0.0, hi: float = 1.0
+) -> str:
+    """Sparkline with a fixed value range — best for breadth fractions
+    where the absolute level matters (50% should look mid-height
+    regardless of whether the series ever hit 80%).
+
+    Empty series renders empty. Out-of-range values clamp.
+    """
+    if not values:
+        return ""
+    span = hi - lo
+    if span <= 0:
+        return _SPARKLINE_CHARS[0] * len(values)
+    n = len(_SPARKLINE_CHARS) - 1
+    return "".join(
+        _SPARKLINE_CHARS[max(0, min(n, round((v - lo) / span * n)))]
+        for v in values
+    )
+
+
+def _sparkline_relative(values: tuple[int, ...] | tuple[float, ...]) -> str:
+    """Sparkline auto-scaled to the observed min/max — best for counts
+    (reversal_intensity, alert_intensity) where there's no natural
+    upper bound and what matters is the trajectory.
+
+    Flat series renders as the lowest character so a quiet stretch
+    reads visually quiet rather than mid-height.
+    """
+    if not values:
+        return ""
+    lo = min(values)
+    hi = max(values)
+    if hi == lo:
+        return _SPARKLINE_CHARS[0] * len(values)
+    span = hi - lo
+    n = len(_SPARKLINE_CHARS) - 1
+    return "".join(
+        _SPARKLINE_CHARS[round((v - lo) / span * n)] for v in values
+    )
+
+
+def _format_pulse_history(history: PulseHistory) -> str:
+    """One dense HIST line: sparkline + current value for each numeric
+    pulse series. Each chunk omitted when its series carries no signal
+    (all zeros) so quiet sessions stay tight.
+    """
+    chunks: list[str] = []
+
+    # Momentum breadth — fixed [0, 1] scale.
+    mom_curr = history.momentum_breadth[-1]
+    if any(v > 0 for v in history.momentum_breadth):
+        spark = _sparkline_normalized(history.momentum_breadth)
+        style = _breadth_style(mom_curr)
+        chunks.append(
+            f"[dim]mom[/dim] [{style}]{spark}[/] [{style}]"
+            f"{int(round(mom_curr * 100))}%[/]"
+        )
+
+    # Sentiment breadth — fixed [0, 1] scale.
+    sent_curr = history.sentiment_breadth[-1]
+    if any(v > 0 for v in history.sentiment_breadth):
+        spark = _sparkline_normalized(history.sentiment_breadth)
+        style = _breadth_style(sent_curr)
+        chunks.append(
+            f"[dim]sent[/dim] [{style}]{spark}[/] [{style}]"
+            f"{int(round(sent_curr * 100))}%[/]"
+        )
+
+    # Reversal intensity — relative scale (no natural upper bound).
+    if any(v > 0 for v in history.reversal_intensity):
+        spark = _sparkline_relative(history.reversal_intensity)
+        chunks.append(
+            f"[dim]revs[/dim] [yellow]{spark}[/yellow] "
+            f"[yellow]{history.reversal_intensity[-1]}[/yellow]"
+        )
+
+    # Alert intensity — relative scale.
+    if any(v > 0 for v in history.alert_intensity):
+        spark = _sparkline_relative(history.alert_intensity)
+        chunks.append(
+            f"[dim]alerts[/dim] [bold red]{spark}[/] "
+            f"[bold red]{history.alert_intensity[-1]}[/]"
+        )
+
+    if not chunks:
+        # All-zero history — every series carries no signal. Render a
+        # quiet placeholder so the HIST label doesn't visually orphan.
+        return f"[dim]({history.length} ticks of quiet)[/dim]"
+
+    return "  [dim]·[/]  ".join(chunks)
 
 
 def _format_alert_counts(alerts: tuple[object, ...]) -> str:
@@ -812,7 +950,7 @@ class StatusLine(Static):
         snap = self.snapshot
         if snap is None or not snap.rows:
             return "[dim]status: idle[/dim]"
-        pulse = compute_pulse(snap)
+        pulse = snap.pulse if snap.pulse is not None else compute_pulse(snap)
 
         chunks: list[str] = []
 
