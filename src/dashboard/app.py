@@ -25,9 +25,10 @@ from rich.markup import escape as rich_escape
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Container, Vertical
 from textual.reactive import reactive
-from textual.widgets import DataTable, Footer, Header, RichLog, Static
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 
 from src.dashboard.state import DashboardSnapshot, RecommendationRow
 from src.intelligence.explain import Explanation, explain
@@ -986,6 +987,39 @@ class StatusLine(Static):
         return "  ·  ".join(chunks)
 
 
+class AddSymbolModal(ModalScreen[str | None]):
+    """Modal prompting for a symbol to add to the watchlist.
+
+    Returns the entered symbol (uppercased + stripped) on Enter, or
+    ``None`` on Escape / empty input. The caller is responsible for
+    duplicate / format validation — this modal just collects text.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "cancel", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Container(id="add_symbol_modal"):
+            yield Static(
+                "[bold]Add symbol to watchlist[/bold]\n"
+                "[dim]e.g. NVDA · Esc to cancel[/dim]"
+            )
+            yield Input(placeholder="symbol", id="add_symbol_input")
+
+    def on_mount(self) -> None:
+        # Move focus to the input so the user can start typing immediately.
+        self.query_one(Input).focus()
+
+    @on(Input.Submitted)
+    def _on_submit(self, event: Input.Submitted) -> None:
+        value = event.value.strip().upper()
+        self.dismiss(value or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class DashboardApp(App[None]):
     """Esther terminal dashboard — observational, no order submission."""
 
@@ -997,6 +1031,16 @@ class DashboardApp(App[None]):
     #events { height: 10; border-top: solid $primary 30%; }
     #status { height: 1; padding: 0 1; background: $primary 8%; }
     DataTable { height: 1fr; }
+
+    AddSymbolModal { align: center middle; }
+    AddSymbolModal #add_symbol_modal {
+        width: 50;
+        height: 7;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    AddSymbolModal Static { margin-bottom: 1; }
     """
 
     BINDINGS = [
@@ -1006,6 +1050,8 @@ class DashboardApp(App[None]):
         Binding("s", "summarize_selected", "AI brief"),
         Binding("o", "cycle_opportunity", "next OPP"),
         Binding("b", "brief_opportunity", "OPP brief"),
+        Binding("a", "add_symbol", "add symbol"),
+        Binding("x", "remove_selected", "remove symbol"),
         Binding("up,down", "noop", "select", show=False),
     ]
 
@@ -1063,10 +1109,22 @@ class DashboardApp(App[None]):
 
     async def on_mount(self) -> None:
         self.title = "Esther — quant dashboard"
-        self.sub_title = f"watchlist: {', '.join(self.controller.watchlist)}"
+        self._update_sub_title()
         # First refresh immediately; then schedule recurring.
         await self._refresh_snapshot()
         self._tick_handle = self.set_interval(self.refresh_seconds, self._tick)
+
+    def _update_sub_title(self) -> None:
+        """Reflect the current watchlist in the dashboard sub-title.
+
+        Called on mount and after any mutation so the header always
+        matches reality.
+        """
+        watchlist = self.controller.watchlist
+        if watchlist:
+            self.sub_title = f"watchlist: {', '.join(watchlist)}"
+        else:
+            self.sub_title = "watchlist: (empty — press `a` to add)"
 
     # -- actions ----------------------------------------------------------
 
@@ -1082,6 +1140,54 @@ class DashboardApp(App[None]):
 
     def action_noop(self) -> None:  # bound for footer hint only
         pass
+
+    def action_add_symbol(self) -> None:
+        """`a`: open the AddSymbolModal and append the entered symbol.
+
+        Duplicates are silently rejected (no flash); empty / cancelled
+        input is a no-op. After a successful add, kick a refresh worker
+        so the new row appears immediately rather than on the next
+        scheduled tick.
+        """
+
+        def on_dismiss(symbol: str | None) -> None:
+            if symbol is None:
+                return
+            if not self.controller.add_symbol(symbol):
+                # Already present or invalid — nothing more to do.
+                return
+            self._update_sub_title()
+            self.query_one("#events", RichLog).write(
+                f"[bold green]+[/] watchlist: added [bold]{symbol}[/]"
+            )
+            self.run_worker(self._refresh_snapshot, exclusive=True)
+
+        self.push_screen(AddSymbolModal(), on_dismiss)
+
+    def action_remove_selected(self) -> None:
+        """`x`: drop the currently-selected row's symbol from the watchlist.
+
+        No confirmation — easily reversible via `a`. No-op when no row
+        is selected or the watchlist is already empty.
+        """
+        row = self._selected_row()
+        if row is None:
+            return
+        if not self.controller.remove_symbol(row.symbol):
+            return
+        self._update_sub_title()
+        self.query_one("#events", RichLog).write(
+            f"[bold red]−[/] watchlist: removed [bold]{row.symbol}[/]"
+        )
+        # Wipe brief caches keyed on this symbol so a re-add doesn't
+        # show a stale brief from the prior session.
+        self._brief_cache = {
+            k: v for k, v in self._brief_cache.items() if k[0] != row.symbol
+        }
+        self._opp_brief_cache = {
+            k: v for k, v in self._opp_brief_cache.items() if k[0] != row.symbol
+        }
+        self.run_worker(self._refresh_snapshot, exclusive=True)
 
     def action_brief_opportunity(self) -> None:
         """`b`: generate or show an AI brief for one ranked opportunity.

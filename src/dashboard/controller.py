@@ -89,6 +89,41 @@ class BaseController(ABC):
     async def fetch_snapshot(self) -> DashboardSnapshot:
         """Produce one frame of dashboard state."""
 
+    def add_symbol(self, symbol: str) -> bool:
+        """Append ``symbol`` to the watchlist for the next tick onward.
+
+        Returns ``True`` if added, ``False`` if it was already present
+        (no duplicate insert). The symbol is uppercased and stripped
+        before comparison; downstream fetches will surface a friendly
+        error row for any symbol the data layer can't resolve.
+
+        Cold-start indicators may be NaN on the first tick — the
+        controller's per-symbol fetch path warms up naturally as bars
+        accumulate, but pre-populating via ``esther backfill`` is the
+        cleaner path.
+        """
+        sym = symbol.strip().upper()
+        if not sym or sym in self.watchlist:
+            return False
+        self.watchlist.append(sym)
+        return True
+
+    def remove_symbol(self, symbol: str) -> bool:
+        """Drop ``symbol`` from the watchlist for the next tick onward.
+
+        Returns ``True`` if removed, ``False`` if it wasn't present.
+        Per-symbol session state (signal_history, opp tracker membership,
+        alert engine baselines) is intentionally left in place — if the
+        symbol gets re-added later the historical context resumes; if
+        not, the orphaned state costs nothing and the trackers
+        self-prune over their windows.
+        """
+        sym = symbol.strip().upper()
+        if sym not in self.watchlist:
+            return False
+        self.watchlist.remove(sym)
+        return True
+
     def _record_pulse(self, snap: DashboardSnapshot) -> None:
         """Compute the pulse once + record it into the rolling-window
         tracker, then attach both ``snap.pulse`` and ``snap.pulse_history``.

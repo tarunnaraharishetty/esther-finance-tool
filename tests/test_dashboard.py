@@ -173,6 +173,167 @@ def test_mock_controller_signal_history_grows_across_ticks() -> None:
         assert total_ticks == 2
 
 
+# ---------------------------------------------------------------------------
+# Watchlist mutation: add_symbol / remove_symbol
+# ---------------------------------------------------------------------------
+
+
+def test_controller_add_symbol_appends_uppercase_unique() -> None:
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=7)
+    assert ctrl.add_symbol("nvda") is True  # lowercase normalized
+    assert ctrl.watchlist == ["AAPL", "NVDA"]
+
+
+def test_controller_add_symbol_rejects_duplicates() -> None:
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=7)
+    assert ctrl.add_symbol("AAPL") is False
+    assert ctrl.add_symbol("aapl") is False  # case-insensitive dedup
+    assert ctrl.watchlist == ["AAPL"]
+
+
+def test_controller_add_symbol_rejects_empty_input() -> None:
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=7)
+    assert ctrl.add_symbol("") is False
+    assert ctrl.add_symbol("   ") is False
+    assert ctrl.watchlist == ["AAPL"]
+
+
+def test_controller_remove_symbol_drops_present_symbol() -> None:
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT"], seed=7)
+    assert ctrl.remove_symbol("MSFT") is True
+    assert ctrl.watchlist == ["AAPL"]
+
+
+def test_controller_remove_symbol_no_op_when_absent() -> None:
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=7)
+    assert ctrl.remove_symbol("MSFT") is False
+    assert ctrl.watchlist == ["AAPL"]
+
+
+def test_controller_remove_symbol_can_empty_the_watchlist() -> None:
+    """Removing the last symbol is allowed — UX choice. Empty watchlist
+    fetch should still produce a valid snapshot with zero rows."""
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=7)
+    assert ctrl.remove_symbol("AAPL") is True
+    assert ctrl.watchlist == []
+    snap = asyncio.run(ctrl.fetch_snapshot())
+    assert snap.rows == []
+
+
+async def test_app_a_keypress_opens_add_symbol_modal() -> None:
+    """`a` pushes the modal screen; the screen carries an Input widget
+    pre-focused so the user can type immediately."""
+    from src.dashboard.app import AddSymbolModal, DashboardApp
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("a")
+        await pilot.pause(0.2)
+        # Modal screen is on top of the screen stack.
+        assert isinstance(app.screen, AddSymbolModal)
+
+
+async def test_app_a_keypress_then_submit_adds_to_watchlist() -> None:
+    """End-to-end: press `a`, type a symbol, hit Enter → controller
+    watchlist grows AND a refresh worker fires so the table picks up
+    the new row."""
+    from textual.widgets import Input
+
+    from src.dashboard.app import DashboardApp
+
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = DashboardApp(ctrl, refresh_seconds=999.0)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("a")
+        await pilot.pause(0.2)
+        # Modal is the active screen; query its Input directly.
+        modal_input = app.screen.query_one(Input)
+        modal_input.value = "nvda"
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+        assert ctrl.watchlist == ["AAPL", "NVDA"]
+        # Sub-title should reflect the new watchlist.
+        assert "NVDA" in app.sub_title
+
+
+async def test_app_a_keypress_then_escape_cancels() -> None:
+    """Esc dismisses the modal without mutating the watchlist."""
+    from src.dashboard.app import DashboardApp
+
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = DashboardApp(ctrl, refresh_seconds=999.0)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("a")
+        await pilot.pause(0.2)
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert ctrl.watchlist == ["AAPL"]
+
+
+async def test_app_x_keypress_removes_cursor_row_symbol() -> None:
+    """`x` removes whatever symbol the cursor sits on."""
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT", "NVDA"], seed=7)
+    app = DashboardApp(ctrl, refresh_seconds=999.0)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        # Park cursor on row 1 (MSFT given watchlist order).
+        app.query_one(DataTable).move_cursor(row=1)
+        await pilot.pause(0.1)
+        assert ctrl.watchlist == ["AAPL", "MSFT", "NVDA"]
+        await pilot.press("x")
+        await pilot.pause(0.3)
+        assert "MSFT" not in ctrl.watchlist
+        assert ctrl.watchlist == ["AAPL", "NVDA"]
+
+
+async def test_app_x_keypress_clears_brief_caches_for_removed_symbol() -> None:
+    """Per-row brief cache for a removed symbol must be wiped — re-adding
+    the symbol later should fetch a fresh brief, not a stale one from
+    the prior life of that row."""
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT"], seed=7)
+    app = DashboardApp(ctrl, refresh_seconds=999.0)
+    # Pre-seed the cache as if the user had pressed `s` earlier.
+    app._brief_cache[("MSFT", "buy")] = "stale brief"
+    app._opp_brief_cache[("MSFT", 70)] = "stale opp brief"
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        # Park cursor on MSFT (row 1) and remove.
+        app.query_one(DataTable).move_cursor(row=1)
+        await pilot.pause(0.1)
+        await pilot.press("x")
+        await pilot.pause(0.3)
+        assert all(k[0] != "MSFT" for k in app._brief_cache)
+        assert all(k[0] != "MSFT" for k in app._opp_brief_cache)
+
+
+def test_update_sub_title_handles_empty_watchlist_gracefully() -> None:
+    """Sub-title formatter should not produce a dangling 'watchlist: '
+    when the user has removed every symbol."""
+    from src.dashboard.app import DashboardApp
+
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=7)
+    ctrl.remove_symbol("AAPL")
+    app = DashboardApp(ctrl, refresh_seconds=999.0)
+    # Direct call — no full mount needed.
+    app._update_sub_title()
+    assert "empty" in app.sub_title.lower()
+
+
 def test_mock_controller_populates_pulse_and_pulse_history() -> None:
     """The controller computes pulse once + records into the rolling
     tracker, attaching both to the snapshot. Subsequent ticks extend
