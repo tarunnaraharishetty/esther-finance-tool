@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Protocol
 from src.strategy.base import SignalAction
 
 if TYPE_CHECKING:
-    from src.intelligence.explain import Explanation
+    from src.intelligence.explain import Contributor, Explanation
 
 
 class Summarizer(Protocol):
@@ -66,7 +66,7 @@ class TemplateSummarizer:
         return " ".join(parts)
 
 
-def _join_names(contributors: list) -> str:
+def _join_names(contributors: list[Contributor]) -> str:
     names = [c.name for c in contributors]
     if len(names) == 1:
         return names[0]

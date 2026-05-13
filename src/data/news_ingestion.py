@@ -32,8 +32,11 @@ class AlpacaNewsSource(NewsSource):
     def __init__(self, client: AlpacaClient | None = None) -> None:
         self.client = client or AlpacaClient()
 
+    # `with_async_retry` rewrites the coroutine wrapper which mypy flags
+    # as a return-type mismatch against the abstract base — runtime
+    # behavior is unchanged.
     @with_async_retry(attempts=3, min_wait=1.0, max_wait=10.0)
-    async def fetch(
+    async def fetch(  # type: ignore[override]
         self,
         symbols: list[str],
         start: datetime,

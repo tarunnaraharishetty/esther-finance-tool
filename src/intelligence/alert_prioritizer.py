@@ -198,7 +198,10 @@ class AlertPrioritizer:
         out: list[Alert] = []
         for symbol, sym_alerts in by_symbol.items():
             fired_rules = {a.rule for a in sym_alerts}
-            consumed: set[Alert] = set()
+            # Track consumed alerts by their object id() — Alert is frozen
+            # but the dataclass eq compares by value, and two alerts can
+            # share fields. id() gives us identity-based exclusion.
+            consumed: set[int] = set()
             for composite in self.config.composites:
                 required = set(composite.requires)
                 if required.issubset(fired_rules):

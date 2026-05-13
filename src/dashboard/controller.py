@@ -201,9 +201,16 @@ class DashboardController(BaseController):
         timeframe: TimeFrame = TimeFrame.DAY_1,
         events: EventBuffer | None = None,
         alert_engine: AlertEngine | None = None,
+        alert_prioritizer: AlertPrioritizer | None = None,
+        alert_state: AlertState | None = None,
     ) -> None:
         super().__init__(
-            watchlist=watchlist, engine=engine, events=events, alert_engine=alert_engine
+            watchlist=watchlist,
+            engine=engine,
+            events=events,
+            alert_engine=alert_engine,
+            alert_prioritizer=alert_prioritizer,
+            alert_state=alert_state,
         )
         self.settings = settings or get_settings()
         if not self.settings.is_paper_trading:
@@ -297,10 +304,10 @@ class _NeutralAnalyzer(SentimentAnalyzer):
     def __init__(self) -> None:
         pass
 
-    def score_text(self, _t: str) -> SentimentScore:  # type: ignore[override]
+    def score_text(self, _t: str) -> SentimentScore:
         return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
 
-    def score_article(self, _a: NewsArticle) -> SentimentScore:  # type: ignore[override]
+    def score_article(self, _a: NewsArticle) -> SentimentScore:
         return self.score_text("")
 
 
@@ -310,7 +317,7 @@ class _RandomSentiment(SentimentAnalyzer):
     def __init__(self, rng: random.Random) -> None:
         self._rng = rng
 
-    def score_text(self, _t: str) -> SentimentScore:  # type: ignore[override]
+    def score_text(self, _t: str) -> SentimentScore:
         roll = self._rng.random()
         if roll < 0.4:
             return SentimentScore(SentimentLabel.POSITIVE, 0.6 + self._rng.random() * 0.3)
@@ -318,7 +325,7 @@ class _RandomSentiment(SentimentAnalyzer):
             return SentimentScore(SentimentLabel.NEGATIVE, 0.5 + self._rng.random() * 0.3)
         return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
 
-    def score_article(self, article: NewsArticle) -> SentimentScore:  # type: ignore[override]
+    def score_article(self, article: NewsArticle) -> SentimentScore:
         return self.score_text(article.headline)
 
 

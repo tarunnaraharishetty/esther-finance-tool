@@ -58,13 +58,15 @@ class MarketDataService:
         from alpaca.data.requests import StockBarsRequest
 
         feed_value = get_settings().alpaca_data_feed.value
+        # alpaca-py's StockBarsRequest is typed as `DataFeed | None` for
+        # `feed`, but accepts the raw enum string at runtime.
         request = StockBarsRequest(
             symbol_or_symbols=symbols,
             timeframe=_to_alpaca_timeframe(timeframe),
             start=start,
             end=end,
             limit=limit,
-            feed=feed_value,
+            feed=feed_value,  # type: ignore[arg-type]
         )
         bar_set = await asyncio.to_thread(self.client.market_data.get_stock_bars, request)
         return self._convert_bars(bar_set, timeframe)
@@ -77,19 +79,25 @@ class MarketDataService:
         from alpaca.data.requests import StockLatestBarRequest
 
         feed_value = get_settings().alpaca_data_feed.value
-        request = StockLatestBarRequest(symbol_or_symbols=symbol, feed=feed_value)
+        # See note on `get_bars`: SDK's `feed` typing is narrower than runtime.
+        request = StockLatestBarRequest(
+            symbol_or_symbols=symbol, feed=feed_value  # type: ignore[arg-type]
+        )
         result = await asyncio.to_thread(self.client.market_data.get_stock_latest_bar, request)
 
         # Response is a dict-like keyed by symbol with a single Bar object.
-        raw = result[symbol] if hasattr(result, "__getitem__") else result.data[symbol]
+        # alpaca-py's return type is unioned over a couple of shapes; the
+        # hasattr branch covers both at runtime.
+        raw = result[symbol] if hasattr(result, "__getitem__") else result.data[symbol]  # type: ignore[union-attr]
         return _bar_from_alpaca(symbol, raw, TimeFrame.MIN_1)
 
     def _convert_bars(self, bar_set: object, timeframe: TimeFrame) -> list[Bar]:
         """Flatten alpaca-py BarSet (dict[symbol, list[Bar]]) into our Bar list."""
-        # alpaca-py returns a BarSet where .data is dict[str, list[AlpacaBar]]
+        # alpaca-py returns a BarSet where .data is dict[str, list[AlpacaBar]];
+        # mypy can't follow the duck-typed fallback through getattr.
         data = getattr(bar_set, "data", bar_set)
         out: list[Bar] = []
-        for symbol, raw_bars in data.items():
+        for symbol, raw_bars in data.items():  # type: ignore[attr-defined]
             for raw in raw_bars:
                 out.append(_bar_from_alpaca(symbol, raw, timeframe))
         return out

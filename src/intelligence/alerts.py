@@ -393,7 +393,7 @@ def load_rules_from_yaml(path: Path) -> list[Rule]:
                 f"{sorted(_VALID_SEVERITIES)}, got {kwargs['severity']!r}"
             )
         try:
-            out.append(rule_cls(**kwargs))  # type: ignore[call-arg]
+            out.append(rule_cls(**kwargs))
         except TypeError as e:
             raise ValueError(f"rules[{i}] ({rtype}): {e}") from e
     return out
@@ -442,7 +442,7 @@ def load_snapshot_rules_from_yaml(path: Path) -> list[SnapshotRule]:
                 f"{sorted(_VALID_SEVERITIES)}, got {kwargs['severity']!r}"
             )
         try:
-            out.append(rule_cls(**kwargs))  # type: ignore[call-arg]
+            out.append(rule_cls(**kwargs))
         except TypeError as e:
             raise ValueError(f"snapshot_rules[{i}] ({rtype}): {e}") from e
     return out

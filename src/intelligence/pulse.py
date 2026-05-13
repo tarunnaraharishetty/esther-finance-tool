@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from src.strategy.base import SignalAction
 
 if TYPE_CHECKING:
-    from src.dashboard.state import DashboardSnapshot
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
 
 
 # Thresholds — kept inline so the calibration is visible at the
@@ -141,7 +141,7 @@ def compute_pulse(snapshot: DashboardSnapshot) -> MarketPulse:
 # ---------------------------------------------------------------------------
 
 
-def _classify_sentiment(healthy: list) -> str:
+def _classify_sentiment(healthy: list[RecommendationRow]) -> str:
     """Combine action mix bias with average news sentiment.
 
     Both must agree (within tolerance) for a directional read. Mixed
@@ -173,7 +173,7 @@ def _classify_sentiment(healthy: list) -> str:
     return "neutral"
 
 
-def _classify_conviction(healthy: list) -> str:
+def _classify_conviction(healthy: list[RecommendationRow]) -> str:
     avg_conf = sum(r.confidence for r in healthy) / len(healthy)
     if avg_conf >= _CONVICTION_HIGH:
         return "strong"
@@ -182,7 +182,7 @@ def _classify_conviction(healthy: list) -> str:
     return "weak"
 
 
-def _classify_activity(snapshot: DashboardSnapshot, healthy: list) -> str:
+def _classify_activity(snapshot: DashboardSnapshot, healthy: list[RecommendationRow]) -> str:
     """Combine total episode count (across history) + recent alert
     count. More episodes = more flips = more activity."""
     total_episodes = 0
@@ -201,7 +201,7 @@ def _classify_activity(snapshot: DashboardSnapshot, healthy: list) -> str:
 
 
 def _build_summary(
-    sentiment: str, conviction: str, activity: str, healthy: list
+    sentiment: str, conviction: str, activity: str, healthy: list[RecommendationRow]
 ) -> str:
     """One-sentence English read.
 
@@ -253,7 +253,7 @@ def _is_finite(x: float) -> bool:
     return x == x  # NaN != NaN; finite numerics return True
 
 
-def _compute_momentum_breadth(healthy: list) -> float:
+def _compute_momentum_breadth(healthy: list[RecommendationRow]) -> float:
     """Fraction of directional rows whose MACD aligns with action.
 
     Returns 0.0 when no directional rows exist.
@@ -270,7 +270,7 @@ def _compute_momentum_breadth(healthy: list) -> float:
     return aligned / len(directional)
 
 
-def _compute_sentiment_breadth(healthy: list) -> float:
+def _compute_sentiment_breadth(healthy: list[RecommendationRow]) -> float:
     """Fraction of news-bearing directional rows whose sentiment aligns
     with action. Returns 0.0 when no qualifying rows exist."""
     candidates = [
@@ -301,7 +301,7 @@ def _compute_reversal_intensity(snapshot: DashboardSnapshot) -> int:
 
 
 def _compute_strongest_symbols(
-    healthy: list,
+    healthy: list[RecommendationRow],
 ) -> tuple[tuple[str, str], ...]:
     """Top STRONG-tier rows by confidence (descending), capped at the
     module limit. Returns empty when no row qualifies — render layer

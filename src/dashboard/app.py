@@ -28,6 +28,7 @@ from textual.binding import Binding, BindingType
 from textual.containers import Container, Vertical
 from textual.reactive import reactive
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 
 from src.dashboard.state import DashboardSnapshot, RecommendationRow
@@ -51,7 +52,11 @@ from src.strategy.base import RecommendationTier, SignalAction
 
 if TYPE_CHECKING:
     from src.dashboard.controller import BaseController
-    from src.intelligence.opportunity_brief import LLMOpportunityBriefer
+    from src.intelligence.alerts import Alert
+    from src.intelligence.opportunity_brief import (
+        LLMOpportunityBriefer,
+        OpportunityBriefContext,
+    )
     from src.intelligence.summary import Summarizer
 
 
@@ -140,7 +145,7 @@ class WatchlistHeader(Static):
     def __init__(self, **kwargs: object) -> None:
         super().__init__(**kwargs)  # type: ignore[arg-type]
         self._prev_snapshot: DashboardSnapshot | None = None
-        self._last_signature: tuple | None = None
+        self._last_signature: tuple[object, ...] | None = None
 
     def watch_snapshot(self, _old: object, new: object) -> None:
         """When a new snapshot arrives, render against the previous one,
@@ -248,14 +253,14 @@ def _detail_signature(
     brief_state: str,
     brief_text: str,
     brief_kind: str = "row",
-) -> tuple:
+) -> tuple[object, ...]:
     """Stable signature of what DetailPanel.render() would produce.
 
     Captures every input the render path reads. Rounded floats so
     pandas-level float jitter doesn't bust the cache.
     """
     history = (snap.signal_history or {}).get(row.symbol)
-    hist_sig: tuple = ()
+    hist_sig: tuple[object, ...] = ()
     if history is not None:
         hist_sig = (
             history.current.action.value,
@@ -300,7 +305,7 @@ def _detail_signature(
 def _header_signature(
     snap: DashboardSnapshot,
     prev_snap: DashboardSnapshot | None,
-) -> tuple:
+) -> tuple[object, ...]:
     """Stable signature of what the WatchlistHeader would render.
 
     Two snapshots that produce the same signature would render byte-
@@ -350,7 +355,7 @@ def _header_signature(
     # History drives the HIST line — last value per series suffices for
     # the cache key since adding a new tick is the only way the series
     # advances.
-    hist_sig: tuple = ()
+    hist_sig: tuple[object, ...] = ()
     if snap.pulse_history is not None and snap.pulse_history.has_trend:
         hist_sig = (
             snap.pulse_history.length,
@@ -727,7 +732,7 @@ class DetailPanel(Static):
     # short-circuit and return the cached string. Saves a full Rich
     # markup build (header / metrics / signals / history / alerts /
     # brief) on every tick where the selected row hasn't changed.
-    _last_signature: tuple | None = None
+    _last_signature: tuple[object, ...] | None = None
     _last_rendered: str = ""
 
     def render(self) -> str:
@@ -855,7 +860,7 @@ def _format_event_line(ev: object) -> str:
     )
 
 
-def _render_symbol_alerts(alerts: list[object], *, limit: int = 4) -> str:
+def _render_symbol_alerts(alerts: list[Alert], *, limit: int = 4) -> str:
     """Render up to ``limit`` recent alerts for one symbol, newest-first.
 
     Caller pre-filters by symbol; we just render. Each line is
@@ -1074,8 +1079,8 @@ class DashboardApp(App[None]):
         self.summarizer = summarizer
         self.opportunity_briefer = opportunity_briefer
         self._snapshot: DashboardSnapshot | None = None
-        self._tick_handle = None
-        self._tick_burst_handle = None
+        self._tick_handle: Timer | None = None
+        self._tick_burst_handle: Timer | None = None
         # Per-symbol last-seen action; drives burst detection.
         self._previous_actions: dict[str, SignalAction] = {}
         # Brief cache keyed by (symbol, action_str). Action change invalidates.
@@ -1091,7 +1096,7 @@ class DashboardApp(App[None]):
         yield Header(show_clock=True)
         with Vertical():
             yield WatchlistHeader(id="watchlist_header")
-            table = DataTable(zebra_stripes=True, cursor_type="row")
+            table: DataTable[object] = DataTable(zebra_stripes=True, cursor_type="row")
             table.add_columns(
                 "SYM", "ACTION", "CONF", "BAR", "TECH", "SENT",
                 "RSI", "MACD", "BBAND", "PRICE", "NEWS",
@@ -1127,7 +1132,10 @@ class DashboardApp(App[None]):
     # -- actions ----------------------------------------------------------
 
     def action_refresh_now(self) -> None:
-        self.run_worker(self._refresh_snapshot, exclusive=True)
+        # Textual's run_worker is typed as Callable[..., Never] upstream, but
+        # accepts any coroutine at runtime — the ignore is for the upstream
+        # type signature, not a runtime concern.
+        self.run_worker(self._refresh_snapshot, exclusive=True)  # type: ignore[arg-type]
 
     def action_toggle_pause(self) -> None:
         self.paused = not self.paused
@@ -1158,7 +1166,10 @@ class DashboardApp(App[None]):
             self.query_one("#events", RichLog).write(
                 f"[bold green]+[/] watchlist: added [bold]{symbol}[/]"
             )
-            self.run_worker(self._refresh_snapshot, exclusive=True)
+            # Textual's run_worker is typed as Callable[..., Never] upstream, but
+        # accepts any coroutine at runtime — the ignore is for the upstream
+        # type signature, not a runtime concern.
+        self.run_worker(self._refresh_snapshot, exclusive=True)  # type: ignore[arg-type]
 
         self.push_screen(AddSymbolModal(), on_dismiss)
 
@@ -1185,7 +1196,10 @@ class DashboardApp(App[None]):
         self._opp_brief_cache = {
             k: v for k, v in self._opp_brief_cache.items() if k[0] != row.symbol
         }
-        self.run_worker(self._refresh_snapshot, exclusive=True)
+        # Textual's run_worker is typed as Callable[..., Never] upstream, but
+        # accepts any coroutine at runtime — the ignore is for the upstream
+        # type signature, not a runtime concern.
+        self.run_worker(self._refresh_snapshot, exclusive=True)  # type: ignore[arg-type]
 
     def action_brief_opportunity(self) -> None:
         """`b`: generate or show an AI brief for one ranked opportunity.
@@ -1257,7 +1271,7 @@ class DashboardApp(App[None]):
 
     async def _fetch_opp_brief(
         self,
-        context: OpportunityBriefContext,  # noqa: F821 — quoted for forward ref
+        context: OpportunityBriefContext,
         cache_key: tuple[str, int],
     ) -> None:
         """Compute the OPP brief off the UI thread, then push to DetailPanel."""

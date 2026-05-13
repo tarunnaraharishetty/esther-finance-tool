@@ -19,7 +19,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from src import __version__
-from src.config import get_settings
+from src.config import Settings, get_settings
 from src.utils.logging import configure_logging, get_logger
 
 console = Console()
@@ -236,16 +236,18 @@ def recommend(
             def __init__(self) -> None:
                 pass
 
-            def score_text(self, text: str) -> SentimentScore:  # type: ignore[override]
+            def score_text(self, text: str) -> SentimentScore:
                 return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
 
-            def score_article(self, article: object) -> SentimentScore:  # type: ignore[override]
+            def score_article(self, article: object) -> SentimentScore:
                 return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
 
         engine.sentiment_analyzer = _Neutral()
 
-    async def _gather() -> list[tuple[str, object]]:
-        results: list[tuple[str, object]] = []
+    from src.strategy.recommendation import TradingRecommendation
+
+    async def _gather() -> list[tuple[str, TradingRecommendation | Exception]]:
+        results: list[tuple[str, TradingRecommendation | Exception]] = []
         for sym in watchlist:
             log.info("recommend.fetch", symbol=sym)
             try:
@@ -282,7 +284,7 @@ def recommend(
         if isinstance(item, Exception):
             table.add_row(sym, "[red]ERROR[/red]", "-", "-", "-", "-", str(item))
             continue
-        rec = item  # TradingRecommendation
+        rec = item
         style = action_style.get(rec.action.value, "white")
         table.add_row(
             sym,
@@ -355,15 +357,18 @@ def summarize(symbol: str, lookback_days: int, news_hours: int, no_sentiment: bo
             def __init__(self) -> None:
                 pass
 
-            def score_text(self, text: str) -> SentimentScore:  # type: ignore[override]
+            def score_text(self, text: str) -> SentimentScore:
                 return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
 
-            def score_article(self, article: object) -> SentimentScore:  # type: ignore[override]
+            def score_article(self, article: object) -> SentimentScore:
                 return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
 
         engine.sentiment_analyzer = _Neutral()
 
-    async def _gather() -> tuple[object, list[object]]:
+    from src.data.models import NewsArticle as _NewsArticle
+    from src.strategy.recommendation import TradingRecommendation as _TradingRec
+
+    async def _gather() -> tuple[_TradingRec, list[_NewsArticle]]:
         bars = await market.get_bars([sym], TimeFrame.DAY_1, bars_start, end)
         df = market.to_dataframe(bars)
         if df.empty:
@@ -384,13 +389,13 @@ def summarize(symbol: str, lookback_days: int, news_hours: int, no_sentiment: bo
         raise click.exceptions.Exit(3) from None
 
     explanation = explain(
-        symbol=rec.symbol,  # type: ignore[attr-defined]
-        action=rec.action,  # type: ignore[attr-defined]
-        confidence=rec.confidence,  # type: ignore[attr-defined]
-        combined_score=rec.combined_score,  # type: ignore[attr-defined]
-        indicator_scores=rec.indicator_scores,  # type: ignore[attr-defined]
-        sentiment_score=rec.sentiment_score,  # type: ignore[attr-defined]
-        num_news_articles=rec.num_news_articles,  # type: ignore[attr-defined]
+        symbol=rec.symbol,
+        action=rec.action,
+        confidence=rec.confidence,
+        combined_score=rec.combined_score,
+        indicator_scores=rec.indicator_scores,
+        sentiment_score=rec.sentiment_score,
+        num_news_articles=rec.num_news_articles,
     )
 
     try:
@@ -492,10 +497,10 @@ def recap(
             def __init__(self) -> None:
                 pass
 
-            def score_text(self, text: str) -> SentimentScore:  # type: ignore[override]
+            def score_text(self, text: str) -> SentimentScore:
                 return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
 
-            def score_article(self, article: object) -> SentimentScore:  # type: ignore[override]
+            def score_article(self, article: object) -> SentimentScore:
                 return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
 
         engine.sentiment_analyzer = _Neutral()
@@ -716,6 +721,7 @@ def dashboard(
     """
     from src.dashboard.app import DashboardApp
     from src.dashboard.controller import (
+        BaseController,
         DashboardController,
         MockDashboardController,
     )
@@ -758,6 +764,7 @@ def dashboard(
         alert_engine = AlertEngine()
         alert_prioritizer = AlertPrioritizer()
 
+    controller: BaseController
     if mock:
         controller = MockDashboardController(
             watchlist=watchlist,
@@ -794,10 +801,10 @@ def dashboard(
                 def __init__(self) -> None:
                     pass
 
-                def score_text(self, text: str) -> SentimentScore:  # type: ignore[override]
+                def score_text(self, text: str) -> SentimentScore:
                     return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
 
-                def score_article(self, article: object) -> SentimentScore:  # type: ignore[override]
+                def score_article(self, article: object) -> SentimentScore:
                     return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
 
             engine.sentiment_analyzer = _Neutral()
@@ -833,12 +840,12 @@ def dashboard(
     DashboardApp(
         controller,
         refresh_seconds=refresh_seconds,
-        summarizer=summarizer,  # type: ignore[arg-type]
-        opportunity_briefer=opportunity_briefer,  # type: ignore[arg-type]
+        summarizer=summarizer,
+        opportunity_briefer=opportunity_briefer,
     ).run()
 
 
-def _print_banner(settings: object) -> None:
+def _print_banner(settings: Settings) -> None:
     body = (
         f"[bold]Esther[/bold] v{__version__}\n"
         f"env: {settings.app_env.value}  "

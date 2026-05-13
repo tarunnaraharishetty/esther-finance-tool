@@ -12,6 +12,7 @@ everywhere — they can't be ranked meaningfully.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -186,7 +187,7 @@ def _action_direction(action: object) -> int:
 
 
 def _top_n(
-    items: object,
+    items: Iterable[tuple[str, float]],
     *,
     n: int,
     key_abs: bool,
@@ -198,7 +199,7 @@ def _top_n(
     for signed scores. ``False`` sorts by raw value (largest-first) —
     used for non-negative scores like confidence.
     """
-    materialized = list(items)  # type: ignore[arg-type]
+    materialized = list(items)
     key = (lambda kv: abs(kv[1])) if key_abs else (lambda kv: kv[1])
     materialized.sort(key=key, reverse=True)
     return tuple(materialized[:n])

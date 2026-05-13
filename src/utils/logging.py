@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from structlog.types import Processor
@@ -57,4 +57,7 @@ def _open_log_sink(logs_dir: Path) -> Any:
 def get_logger(name: str | None = None, **initial_context: Any) -> structlog.stdlib.BoundLogger:
     """Get a logger, optionally bound with starting context."""
     logger = structlog.get_logger(name)
-    return logger.bind(**initial_context) if initial_context else logger
+    bound = logger.bind(**initial_context) if initial_context else logger
+    # structlog.get_logger returns a bound proxy whose static type is too
+    # loose; the runtime object IS a BoundLogger.
+    return cast(structlog.stdlib.BoundLogger, bound)
