@@ -424,6 +424,152 @@ def summarize(symbol: str, lookback_days: int, news_hours: int, no_sentiment: bo
     )
 
 
+@cli.command()
+@click.option(
+    "-s",
+    "--symbol",
+    "symbols",
+    multiple=True,
+    help="Symbol to include. Repeat for each ticker. Defaults to AAPL, MSFT, NVDA, SPY.",
+)
+@click.option("--lookback-days", default=60, show_default=True, help="OHLCV history window.")
+@click.option("--news-hours", default=48, show_default=True, help="News lookback window.")
+@click.option(
+    "--no-sentiment",
+    is_flag=True,
+    help="Skip FinBERT (sentiment forced to zero). News headlines still go into the recap.",
+)
+def recap(
+    symbols: tuple[str, ...],
+    lookback_days: int,
+    news_hours: int,
+    no_sentiment: bool,
+) -> None:
+    """Generate a session recap across the watchlist.
+
+    One-shot: fetches bars + news for each symbol, runs the
+    recommendation engine, computes the ranked sections, then asks
+    Claude for a 4-8 sentence brief grounded in the structured data.
+    Requires ANTHROPIC_API_KEY.
+    """
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    import anthropic
+
+    from src.dashboard.state import DashboardSnapshot
+    from src.data.market_data import MarketDataService
+    from src.data.models import TimeFrame
+    from src.data.news_ingestion import get_news_source
+    from src.intelligence.recap import LLMRecapGenerator, RecapContext
+    from src.strategy.recommendation import RecommendationEngine
+
+    settings = get_settings()
+    log = get_logger("recap")
+
+    if not settings.is_paper_trading:
+        console.print("[red]refusing to run: ALPACA_BASE_URL is not paper[/red]")
+        raise click.exceptions.Exit(1)
+
+    try:
+        generator = LLMRecapGenerator(settings=settings)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise click.exceptions.Exit(2) from None
+
+    watchlist = [s.upper() for s in symbols] if symbols else ["AAPL", "MSFT", "NVDA", "SPY"]
+    end = datetime.now(UTC)
+    bars_start = end - timedelta(days=lookback_days)
+    news_start = end - timedelta(hours=news_hours)
+
+    market = MarketDataService()
+    news_source = get_news_source()
+    engine = RecommendationEngine()
+    if no_sentiment:
+        from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
+
+        class _Neutral(SentimentAnalyzer):
+            def __init__(self) -> None:
+                pass
+
+            def score_text(self, text: str) -> SentimentScore:  # type: ignore[override]
+                return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+            def score_article(self, article: object) -> SentimentScore:  # type: ignore[override]
+                return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+        engine.sentiment_analyzer = _Neutral()
+
+    async def _build_rows() -> list[object]:
+        from src.dashboard.controller import _row_from_recommendation
+
+        rows: list[object] = []
+        for sym in watchlist:
+            log.info("recap.fetch", symbol=sym)
+            try:
+                bars = await market.get_bars([sym], TimeFrame.DAY_1, bars_start, end)
+                df = market.to_dataframe(bars)
+                if df.empty:
+                    continue
+                for col in ("open", "high", "low", "close"):
+                    df[col] = df[col].astype(float)
+                df["volume"] = df["volume"].astype(int)
+                news = await news_source.fetch([sym], news_start, end, limit=20)
+                rec = engine.recommend(sym, df, news=news, now=end)
+                top_headlines = tuple(
+                    a.headline
+                    for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
+                )
+                rows.append(
+                    _row_from_recommendation(
+                        rec,
+                        last_price=float(df["close"].iloc[-1]),
+                        headlines=top_headlines,
+                    )
+                )
+            except Exception as e:  # noqa: BLE001 — recap is best-effort per symbol
+                log.warning("recap.error", symbol=sym, error=str(e))
+        return rows
+
+    rows = asyncio.run(_build_rows())
+    if not rows:
+        console.print("[red]no rows could be built — Alpaca returned empty for all symbols[/red]")
+        raise click.exceptions.Exit(3)
+
+    snapshot = DashboardSnapshot(
+        tick=1,
+        rows=rows,  # type: ignore[arg-type]
+        events=[],
+        alerts=[],
+        signal_history={},
+        timestamp=end,
+    )
+    context = RecapContext.from_snapshot(snapshot)
+
+    try:
+        text = generator.generate(context)
+    except anthropic.AuthenticationError:
+        console.print("[red]Anthropic auth failed — check ANTHROPIC_API_KEY in .env.[/red]")
+        raise click.exceptions.Exit(2) from None
+    except anthropic.RateLimitError:
+        console.print("[yellow]Anthropic rate-limited — try again in a minute.[/yellow]")
+        raise click.exceptions.Exit(4) from None
+    except anthropic.APIStatusError as e:
+        console.print(f"[red]Anthropic API error ({e.status_code}): {e.message}[/red]")
+        raise click.exceptions.Exit(5) from None
+
+    console.print(
+        Panel(
+            text,
+            title=f"Watchlist recap ({end.strftime('%Y-%m-%d %H:%M %Z')})",
+            border_style="cyan",
+        )
+    )
+    console.print(
+        "[dim]decision support — research only, not execution advice.[/dim]"
+    )
+
+
 def _render_preflight_report(report: object) -> None:
     """Print a Rich table for a PreflightReport. Imported here to keep
     the doctor / dashboard handlers thin."""
@@ -679,6 +825,7 @@ def _print_banner(settings: object) -> None:
         "  esther backfill    cache historical bars + news to data/cache/\n"
         "  esther recommend   show BUY/HOLD/SELL for a watchlist\n"
         "  esther summarize   AI-written brief for one symbol (needs ANTHROPIC_API_KEY)\n"
+        "  esther recap       AI-written brief across the whole watchlist\n"
         "  esther dashboard   live Textual dashboard (use --mock for demo)\n"
     )
     console.print(Panel(body, title="market intelligence + decision support", border_style="cyan"))

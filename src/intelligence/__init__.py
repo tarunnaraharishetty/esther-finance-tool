@@ -17,6 +17,7 @@ from src.intelligence.alerts import (
 from src.intelligence.explain import Contributor, Explanation, explain
 from src.intelligence.history import SignalEpisode, SignalHistory, SignalHistorySummary
 from src.intelligence.llm_summary import LLMSummarizer
+from src.intelligence.recap import LLMRecapGenerator, RecapContext
 from src.intelligence.summary import Summarizer, TemplateSummarizer
 from src.intelligence.watchlist import (
     WatchlistChange,
@@ -32,7 +33,9 @@ __all__ = [
     "ConfidenceThresholdRule",
     "Contributor",
     "Explanation",
+    "LLMRecapGenerator",
     "LLMSummarizer",
+    "RecapContext",
     "Rule",
     "SentimentShiftRule",
     "SignalEpisode",
