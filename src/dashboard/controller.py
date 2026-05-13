@@ -33,6 +33,7 @@ from src.data.news_ingestion import NewsSource, get_news_source
 from src.intelligence.alert_prioritizer import AlertPrioritizer, AlertState
 from src.intelligence.alerts import AlertEngine
 from src.intelligence.history import SignalHistory, SignalHistorySummary
+from src.intelligence.tier import promote_to_tier
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import SignalAction
 from src.strategy.recommendation import RecommendationEngine
@@ -168,8 +169,11 @@ class DashboardController(BaseController):
                 return _empty_row(symbol, now, error="no bars")
             news = await self.news_source.fetch([symbol], news_start, now, limit=20)
             rec = self.engine.recommend(symbol, df, news=news, now=now)
+            # Promote using the session history we'll record below.
+            history = self.signal_history.summary_for(symbol)
+            rec = promote_to_tier(rec, history)
             self.events.info(
-                f"{symbol} → {rec.action.value.upper()} "
+                f"{symbol} → {rec.tier.display} "
                 f"(conf {rec.confidence:.2f}, combined {rec.combined_score:+.2f})"
             )
             top_headlines = tuple(
@@ -321,8 +325,10 @@ class MockDashboardController(BaseController):
             for i in range(self._rng.randint(0, 4))
         ]
         rec = self.engine.recommend(symbol, df, news=news, now=now)
+        history = self.signal_history.summary_for(symbol)
+        rec = promote_to_tier(rec, history)
         self.events.info(
-            f"{symbol} → {rec.action.value.upper()} (conf {rec.confidence:.2f})"
+            f"{symbol} → {rec.tier.display} (conf {rec.confidence:.2f})"
         )
         top_headlines = tuple(
             a.headline
@@ -360,6 +366,10 @@ def _row_from_recommendation(
         reasoning=str(rec.reasoning),  # type: ignore[attr-defined]
         timestamp=rec.timestamp,  # type: ignore[attr-defined]
         headlines=headlines,
+        tier=rec.tier,  # type: ignore[attr-defined]
+        signal_quality=str(rec.signal_quality),  # type: ignore[attr-defined]
+        stability=str(rec.stability),  # type: ignore[attr-defined]
+        quality_reasons=tuple(rec.quality_reasons),  # type: ignore[attr-defined]
     )
 
 

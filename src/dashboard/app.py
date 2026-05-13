@@ -40,7 +40,7 @@ from src.intelligence.watchlist import (
     action_breakdown,
     diff_snapshots,
 )
-from src.strategy.base import SignalAction
+from src.strategy.base import RecommendationTier, SignalAction
 
 if TYPE_CHECKING:
     from src.dashboard.controller import BaseController
@@ -74,6 +74,40 @@ def _fmt_price(x: float) -> str:
 def _action_text(action: SignalAction) -> str:
     style = _ACTION_STYLES.get(action, "")
     return f"[{style}]{action.value.upper():4}[/{style}]"
+
+
+_TIER_STYLES: dict[RecommendationTier, str] = {
+    RecommendationTier.STRONG_BUY: "bold green on grey15",
+    RecommendationTier.BUY: "bold green",
+    RecommendationTier.HOLD: "yellow",
+    RecommendationTier.SELL: "bold red",
+    RecommendationTier.STRONG_SELL: "bold red on grey15",
+}
+
+
+def _tier_text(tier: RecommendationTier) -> str:
+    """Render a tier cell. STRONG variants get a subtle background tint
+    so they pop against BUY/SELL without screaming."""
+    style = _TIER_STYLES.get(tier, "")
+    return f"[{style}]{tier.display:<11}[/]"
+
+
+def _format_quality_tier(quality: str) -> str:
+    style = {
+        "high": "bold green",
+        "moderate": "yellow",
+        "low": "dim",
+    }.get(quality, "white")
+    return f"[{style}]{quality.upper()}[/]"
+
+
+def _format_stability_tier(stability: str) -> str:
+    style = {
+        "stable": "bold green",
+        "moderate": "yellow",
+        "volatile": "bold red",
+    }.get(stability, "white")
+    return f"[{style}]{stability.upper()}[/]"
 
 
 def _confidence_bar(conf: float, width: int = 10) -> str:
@@ -219,6 +253,10 @@ def _detail_signature(
     return (
         row.symbol,
         row.action.value,
+        row.tier.value,
+        row.signal_quality,
+        row.stability,
+        row.quality_reasons,
         round(row.confidence, 3),
         round(row.combined_score, 3),
         round(row.technical_score, 3),
@@ -408,12 +446,12 @@ class DetailPanel(Static):
         explanation = _explain_row(r)
         history = (snap.signal_history or {}).get(r.symbol)
 
-        # Header line — symbol + action + confidence, tightly packed.
+        # Header line — symbol + tier + confidence + quality / stability tiers.
         header = (
-            f"[bold cyan]{r.symbol}[/]  {_action_text(r.action)}  "
-            f"[dim]conf[/] [bold]{r.confidence:.2f}[/] "
-            f"[dim]({explanation.confidence_label}, combined "
-            f"[/][{_score_style(r.combined_score)}]{r.combined_score:+.2f}[/][dim])[/]"
+            f"[bold cyan]{r.symbol}[/]  {_tier_text(r.tier)}  "
+            f"[dim]conf[/] [bold]{r.confidence:.2f}[/]  "
+            f"[dim]quality[/] {_format_quality_tier(r.signal_quality)}  "
+            f"[dim]stability[/] {_format_stability_tier(r.stability)}"
         )
 
         # Tagline — the engine's plain-English verdict.
@@ -440,6 +478,15 @@ class DetailPanel(Static):
         else:
             signals_lines = ["  [dim]no contributing signals[/dim]"]
         signals_block = "[bold cyan]Signals[/]\n" + "\n".join(signals_lines)
+
+        # Section: Tier reasons (the bullets that explain why the tier
+        # is what it is). Only shows when promote_to_tier produced
+        # reasons — i.e. some driver met the threshold to be mentioned.
+        if r.quality_reasons:
+            reason_lines = [f"  • [dim]{rich_escape(reason)}[/dim]" for reason in r.quality_reasons]
+            tier_block = "[bold cyan]Why this tier[/]\n" + "\n".join(reason_lines)
+        else:
+            tier_block = ""
 
         # Section: History (this session).
         history_block = (
@@ -474,6 +521,8 @@ class DetailPanel(Static):
             )
 
         sections = [header, tagline, numbers, signals_block]
+        if tier_block:
+            sections.append(tier_block)
         if history_block:
             sections.append(history_block)
         if alerts_block:
@@ -753,11 +802,11 @@ class DashboardApp(App[None]):
         table = self.query_one(DataTable)
         table.clear(columns=False)
         for r in snap.rows:
-            action_cell = _action_text(r.action) if not r.error else "[red]ERR[/red]"
+            tier_cell = _tier_text(r.tier) if not r.error else "[red]ERR[/red]"
             bar = _confidence_bar(r.confidence)
             row_cells: tuple[object, ...] = (
                 r.symbol,
-                action_cell,
+                tier_cell,
                 f"{r.confidence:.2f}" if not r.error else "—",
                 bar,
                 _fmt_signed(r.technical_score) if not r.error else "—",

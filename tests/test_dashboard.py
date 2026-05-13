@@ -547,6 +547,8 @@ async def test_detail_panel_invalidates_cache_when_row_changes() -> None:
     fired = datetime.now(UTC)
 
     def _make_row(action: SignalAction, conf: float) -> RecommendationRow:
+        from src.strategy.base import RecommendationTier
+
         return RecommendationRow(
             symbol="AAPL",
             action=action,
@@ -561,6 +563,7 @@ async def test_detail_panel_invalidates_cache_when_row_changes() -> None:
             num_news_articles=0,
             reasoning="",
             timestamp=fired,
+            tier=RecommendationTier.from_action(action),
         )
 
     app = DashboardApp(
@@ -625,6 +628,120 @@ async def test_watchlist_header_renders_opp_lines_when_qualifying_rows_exist() -
         # OPP section + at least one opportunity kind label.
         assert "OPP" in text
         assert any(kind in text for kind in ("convergence", "high_conviction"))
+
+
+async def test_table_action_cell_renders_tier_display() -> None:
+    """The table's ACTION column should render the 5-tier display
+    (e.g. 'STRONG BUY'), not the base 3-tier action string."""
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+    from src.strategy.base import RecommendationTier
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        # The mock controller doesn't reliably produce STRONG (needs
+        # specific scoring/history), so we just assert the cell content
+        # is one of the five valid display strings.
+        table = app.query_one(DataTable)
+        # Walk the first row's ACTION cell text.
+        if table.row_count:
+            valid_displays = {t.display for t in RecommendationTier}
+            cell_text = str(table.get_cell_at((0, 1)))
+            # Strip Rich markup for the comparison.
+            assert any(d in cell_text for d in valid_displays), (
+                f"action cell should contain one of {valid_displays}, got: {cell_text}"
+            )
+
+
+async def test_detail_panel_renders_tier_quality_stability_when_reasons_present() -> None:
+    """When a recommendation has quality_reasons, the detail panel
+    shows the 'Why this tier' section."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.strategy.base import RecommendationTier
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="NVDA",
+        action=SignalAction.BUY,
+        confidence=0.78,
+        combined_score=0.7,
+        technical_score=0.5,
+        sentiment_score=0.5,
+        rsi=0.5,
+        macd=0.6,
+        bollinger=0.4,
+        last_price=520.0,
+        num_news_articles=8,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.STRONG_BUY,
+        signal_quality="high",
+        stability="stable",
+        quality_reasons=(
+            "Strong technical alignment",
+            "Bullish sentiment acceleration",
+            "Low reversal frequency",
+        ),
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        detail.row_index = 0
+        text = detail.render()
+        assert "STRONG BUY" in text
+        assert "HIGH" in text  # quality tier
+        assert "STABLE" in text  # stability tier
+        assert "Why this tier" in text
+        assert "Strong technical alignment" in text
+
+
+async def test_detail_panel_omits_tier_section_when_no_reasons() -> None:
+    """No quality_reasons → no 'Why this tier' section. Keeps the
+    detail panel tight on data-thin rows."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.2,
+        combined_score=0.1,
+        technical_score=0.05,
+        sentiment_score=0.0,
+        rsi=0.0, macd=0.0, bollinger=0.0,
+        last_price=150.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+        # quality_reasons defaults to empty tuple — no reasons surfaced
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        detail.row_index = 0
+        text = detail.render()
+        assert "Why this tier" not in text
 
 
 async def test_watchlist_header_renders_pulse_line_when_rows_present() -> None:

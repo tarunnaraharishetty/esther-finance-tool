@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from src.strategy.base import SignalAction
+from src.strategy.base import RecommendationTier, SignalAction
 
 if TYPE_CHECKING:
     from src.intelligence.alerts import Alert
@@ -38,6 +38,14 @@ class RecommendationRow:
     # Most-recent headline strings (top ~5), kept on the row so the dashboard
     # AI-brief worker can pass them to the LLM without a second Alpaca fetch.
     headlines: tuple[str, ...] = ()
+    # 5-tier recommendation surface (filled by promote_to_tier in the
+    # controller after engine.recommend()). Defaults preserve the
+    # invariant that tier always exists; STRONG only appears when the
+    # promoter's four gates pass.
+    tier: RecommendationTier = RecommendationTier.HOLD
+    signal_quality: str = "moderate"
+    stability: str = "stable"
+    quality_reasons: tuple[str, ...] = ()
     error: str | None = None  # populated if the per-symbol fetch failed
 
 
