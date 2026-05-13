@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-13 (end-of-session wrap).*
+*Last touched: 2026-05-13 (expanded opportunity drilldown shipped).*
 
 ---
 
@@ -46,7 +46,8 @@ src/
 │                      # alert_prioritizer · watchlist · history · tier ·
 │                      # rankings · recap · grounding · pulse ·
 │                      # pulse_history · opportunities · signal_profile ·
-│                      # opportunity_history · opportunity_brief
+│                      # opportunity_history · opportunity_brief ·
+│                      # opportunity_drilldown
 └── utils/             # logging, rate limiter, preflight
 ```
 
@@ -105,46 +106,46 @@ dashboard or exposed via the CLI.
 - Always-visible `StatusLine` at the bottom
 - `EventBuffer` collapses consecutive duplicate log lines
 - Per-symbol alerts surfaced inside `DetailPanel` for the cursor row
+- **Expanded opportunity drilldown** in `DetailPanel`: when the
+  cursor row is in top-N OPPs, surface rank, composite, NEW/Nx
+  tenure, quality-label chips (high conviction / building momentum
+  / reversal candidate / sentiment-driven / unstable·choppy),
+  seven driver bars sorted strongest-first with observational
+  descriptors, plus rationale phrases verbatim from the source
+  `RankedOpportunity`. Non-OPP rows render unchanged.
 - Keyboard shortcuts: `q` quit · `r` refresh · `p` pause · `s` brief
   · `o` cycle OPP · `b` OPP brief · `a` add symbol · `x` remove symbol
 
 **Quality baseline**
-- 488 passing tests, 1 deselected (`slow`/`integration`)
+- 506 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
-- `mypy src` (`--strict`) green across all 43 source files
+- `mypy src` (`--strict`) green across all 44 source files
 - Documented exceptions live in `pyproject.toml`
 
 ---
 
 ## Remaining high-priority roadmap
 
-Six themes for upcoming sessions. Listed with current understanding of
-scope and what they unlock; sequencing recommendation is in the next
-section.
+Five themes for upcoming sessions. Listed with current understanding
+of scope and what they unlock; sequencing recommendation is in the
+next section. (Roadmap item #1 — expanded opportunity drilldown —
+shipped on 2026-05-13.)
 
-### 1. Expanded opportunity drilldown
-The DetailPanel currently shows row data when an OPP is selected. It
-could surface the seven-driver score breakdown (per-driver bar chart),
-the rationale phrases inline, and a side-by-side of "what changed
-since this symbol entered top-N." All of this data is already on
-`RankedOpportunity` and `OpportunityHistory` — this is render
-plumbing, not new state. Highest UX impact for lowest cost.
-
-### 2. News quality scoring
+### 1. News quality scoring
 All news sources currently feed FinBERT with equal weight. A small
 pre-FinBERT pass that weights by recency (newer = more) and source
 reputation (Reuters > Benzinga > blogs) would tighten every
 sentiment-driven feature: alerts, briefs, ranking, pulse. Multiplier
 effect across the rest of the system. Lives in `src/sentiment/`.
 
-### 3. Persistence / history improvements
+### 2. Persistence / history improvements
 Restart loses everything: alert history, signal history, opp tracker
 membership, pulse history, brief caches. A `SessionStore` interface
 (SQLite-backed or json-snapshot-per-session) would let the trader
 resume mid-day. This is foundational for anything that wants to span
 sessions — including multi-timeframe and smarter pulse evolution.
 
-### 4. Multi-timeframe intelligence
+### 3. Multi-timeframe intelligence
 Today the recommender runs on daily bars. Adding a second timeframe
 (e.g., 15-min intraday) would let alerts and the pulse react inside
 the trading day rather than tick-to-tick on daily-bar quirks.
@@ -154,14 +155,14 @@ recommender (per-timeframe scores combined), UI (timeframe toggle
 or both visible). Best done AFTER persistence so intraday state
 survives restarts.
 
-### 5. Smarter market pulse evolution
+### 4. Smarter market pulse evolution
 The pulse currently classifies one tick. With pulse_history we have
 trajectory data. Natural next steps: pattern detection ("breadth
 firming for 8 ticks"), regime classification (risk-on / risk-off /
 mixed), or an LLM-driven read of the trajectory tied into the recap
 brief. Build on top of pulse_history; doesn't add new state.
 
-### 6. Dashboard refinement
+### 5. Dashboard refinement
 Ongoing polish that doesn't fit a neat feature box: column tunables,
 help-overlay (`?`), better empty-state messages, configurable burst
 window, perhaps a command palette via Textual's built-in. Best done
@@ -210,30 +211,25 @@ when the surrounding code is touched.
 
 Sequenced for maximum compounding return.
 
-**1. Expanded opportunity drilldown** *(start here tomorrow)*
-- Cheapest. Pure render plumbing on top of existing `RankedOpportunity`
-  data. Highest immediate UX win — the OPP surface is the thing the
-  trader looks at most.
-
-**2. News quality scoring**
+**1. News quality scoring** *(start here tomorrow)*
 - Multiplier across every sentiment-driven feature (alerts, briefs,
   ranking, pulse). Contained to `src/sentiment/`. Can ship without
-  touching anything downstream.
+  touching anything downstream. Cheapest unshipped win.
 
-**3. Persistence (`SessionStore`)**
+**2. Persistence (`SessionStore`)**
 - Foundation for everything else. Multi-timeframe and smarter pulse
   evolution both want session state to survive restarts. Doing it
   here unblocks both.
 
-**4. Multi-timeframe intelligence**
+**3. Multi-timeframe intelligence**
 - Biggest architectural lift; do after persistence so intraday state
   is durable. Plan the schema with persistence in mind.
 
-**5. Smarter market pulse evolution**
+**4. Smarter market pulse evolution**
 - Builds naturally on persistence + multi-timeframe + existing
   pulse_history. Likely an LLM-driven read of the trajectory.
 
-**6. Dashboard refinement**
+**5. Dashboard refinement**
 - In parallel with the above. Pick up small items between bigger
   features rather than as a dedicated session.
 
@@ -243,33 +239,36 @@ Sequenced for maximum compounding return.
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 488 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 506 passing
 ```
 
-Open this doc and start with **Expanded opportunity drilldown**
-(roadmap item #1, recommended order step 1). Render plumbing on the
-DetailPanel — surface the seven-driver scores + rationale + history
-delta when the cursor row is in the top-N. Data is already on
-`RankedOpportunity` and `snap.opp_history`; no new state needed.
+Open this doc and start with **News quality scoring** (roadmap item
+#1, recommended order step 1). A small pre-FinBERT pass in
+`src/sentiment/` that weights articles by recency + source
+reputation; the per-article weight multiplies into the existing
+sentiment aggregation. No data-layer changes, no new state — every
+downstream feature (alerts, briefs, ranking, pulse) inherits the
+improvement automatically.
 
 Suggested opening prompt to Claude:
 
-> Do the expanded OPP drilldown. When the selected row is in the
-> top-N OPPs, the DetailPanel should show the 7-driver score
-> breakdown (per-driver bar), the rationale phrases inline, and how
-> long the OPP has been in the top-N. Keep the existing per-row
-> sections (header, signals, history, alerts) — the OPP block is
-> additive when applicable.
+> Implement news quality scoring. Add a per-article weight in
+> `src/sentiment/` that combines recency (newer headlines weigh
+> more) and source reputation (Reuters > major outlets > blogs).
+> Apply the weight when aggregating per-symbol sentiment so the
+> recommendation engine, pulse, and ranking all benefit. Keep the
+> default weights configurable via `Settings`; deterministic
+> behavior in unit tests.
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean and pushed to `origin/main` at `10ce4e0`.
-- **Tests:** 488 passing, 1 deselected (`slow`/`integration` mark).
+- **Branch:** `main` is clean and pushed to `origin/main` at `448a1db`.
+- **Tests:** 506 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
-  across all 43 source files.
+  across all 44 source files.
 - **Dependencies installed in `.venv/`** (Python 3.14): all of
   `pyproject.toml`'s base set, plus `anthropic`, `pyyaml`, `textual`,
   `ruff`, `mypy`, `pytest`. `alembic` and `backtrader` removed.
