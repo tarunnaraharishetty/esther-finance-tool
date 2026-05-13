@@ -111,13 +111,16 @@ dashboard or exposed via the CLI.
   tenure, quality-label chips (high conviction / building momentum
   / reversal candidate / sentiment-driven / unstable·choppy),
   seven driver bars sorted strongest-first with observational
-  descriptors, plus rationale phrases verbatim from the source
-  `RankedOpportunity`. Non-OPP rows render unchanged.
+  descriptors, source rationale phrases verbatim, **plus richer
+  composite state phrases** (momentum strengthening across recent
+  ticks · positive/negative sentiment breadth · stable BUY/SELL
+  persistence) derived strictly from driver + profile + row state.
+  Non-OPP rows render unchanged.
 - Keyboard shortcuts: `q` quit · `r` refresh · `p` pause · `s` brief
   · `o` cycle OPP · `b` OPP brief · `a` add symbol · `x` remove symbol
 
 **Quality baseline**
-- 506 passing tests, 1 deselected (`slow`/`integration`)
+- 514 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
 - `mypy src` (`--strict`) green across all 44 source files
 - Documented exceptions live in `pyproject.toml`
@@ -239,7 +242,7 @@ Sequenced for maximum compounding return.
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 506 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 514 passing
 ```
 
 Open this doc and start with **News quality scoring** (roadmap item
@@ -264,8 +267,10 @@ Suggested opening prompt to Claude:
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean and pushed to `origin/main` at `448a1db`.
-- **Tests:** 506 passing, 1 deselected (`slow`/`integration` mark).
+- **Branch:** `main` is clean at `773355a` (push to `origin/main`
+  pending — harness blocked direct push to default branch; previous
+  three drilldown commits are also queued locally).
+- **Tests:** 514 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
   across all 44 source files.
