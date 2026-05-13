@@ -349,7 +349,9 @@ async def test_app_watchlist_header_renders() -> None:
         await pilot.pause(0.3)
         header = app.query_one(WatchlistHeader)
         text = header.render()
-        assert "Action mix" in text
+        # New layout uses fixed-width section labels.
+        assert "MIX" in text
+        assert "BUY" in text  # action chip is always present
         # First frame: no prior snapshot to diff.
         assert "first frame" in text or "no changes" in text
 

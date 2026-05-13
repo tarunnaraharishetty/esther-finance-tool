@@ -32,10 +32,11 @@ from textual.widgets import DataTable, Footer, Header, RichLog, Static
 from src.dashboard.state import DashboardSnapshot, RecommendationRow
 from src.intelligence.explain import Explanation, explain
 from src.intelligence.history import SignalEpisode, SignalHistorySummary
+from src.intelligence.rankings import Rankings
+from src.intelligence.rankings import compute as compute_rankings
 from src.intelligence.watchlist import (
     action_breakdown,
     diff_snapshots,
-    top_movers,
 )
 from src.strategy.base import SignalAction
 
@@ -80,7 +81,11 @@ def _confidence_bar(conf: float, width: int = 10) -> str:
 
 
 class WatchlistHeader(Static):
-    """Three-line header above the watchlist: movers / action mix / diff.
+    """Compact intelligence header above the watchlist.
+
+    Status line + up to six ranked sections (momentum, sentiment,
+    reversals, confidence, unusual movers, volatility). Empty sections
+    are skipped so first-tick / no-history layouts stay tight.
 
     Holds an internal reference to the previous snapshot so it can render
     "Since last refresh" without coupling to the controller's state.
@@ -106,40 +111,71 @@ class WatchlistHeader(Static):
         if snap is None:
             return "[dim]watchlist intel: loading…[/dim]"
 
-        # Line 1 — top movers (3 strongest abs(combined_score))
-        movers = top_movers(snap, n=3)
-        if movers:
-            mover_chunks = [
-                f"[bold]{m.symbol}[/bold] [{_score_style(m.combined_score)}]"
-                f"{m.combined_score:+.2f}[/]"
-                for m in movers
-            ]
-            line1 = "[dim]Top movers:[/dim]  " + "  |  ".join(mover_chunks)
-        else:
-            line1 = "[dim]Top movers: (none — all rows errored)[/dim]"
+        rankings = compute_rankings(snap, n=3)
+        lines: list[str] = []
 
-        # Line 2 — action breakdown
+        # --- Status line: action mix + changes since last refresh -------
         counts = action_breakdown(snap)
-        line2 = (
-            "[dim]Action mix:[/dim]  "
+        mix = (
             f"[bold green]{counts[SignalAction.BUY]} BUY[/]  "
             f"[bold yellow]{counts[SignalAction.HOLD]} HOLD[/]  "
             f"[bold red]{counts[SignalAction.SELL]} SELL[/]"
         )
-
-        # Line 3 — diff against prev
         changes = diff_snapshots(snap, self._prev_snapshot)
         if changes:
-            change_chunks = [
-                f"[bold]{c.symbol}[/bold] [dim]({c.kind})[/dim]" for c in changes[:4]
-            ]
-            line3 = "[dim]Since last refresh:[/dim]  " + "  ·  ".join(change_chunks)
+            change_str = "  ·  ".join(
+                f"[bold]{c.symbol}[/bold] [dim]({c.kind})[/dim]"
+                for c in changes[:3]
+            )
         elif self._prev_snapshot is None:
-            line3 = "[dim]Since last refresh: (first frame)[/dim]"
+            change_str = "[dim](first frame)[/dim]"
         else:
-            line3 = "[dim]Since last refresh: no changes[/dim]"
+            change_str = "[dim](no changes)[/dim]"
+        lines.append(
+            f"{_section_label('MIX')}{mix}      "
+            f"{_section_label('CHANGES')}{change_str}"
+        )
 
-        return f"{line1}\n{line2}\n{line3}"
+        # --- Ranked sections (skip empties) ----------------------------
+        sections: list[tuple[str, tuple[tuple[str, float], ...], str]] = [
+            ("MOMENTUM", rankings.strongest_momentum, "signed"),
+            ("SENTIMENT", rankings.strongest_sentiment, "signed"),
+            ("CONFIDENCE", rankings.highest_confidence, "magnitude"),
+            ("REVERSALS", rankings.biggest_reversals, "reversal"),
+            ("UNUSUAL", rankings.unusual_movers, "magnitude"),
+            ("VOLATILE", rankings.most_volatile, "int"),
+        ]
+        for label, entries, fmt in sections:
+            if not entries:
+                continue
+            cells = "  ".join(_format_rank_cell(sym, score, fmt) for sym, score in entries)
+            lines.append(f"{_section_label(label)}{cells}")
+
+        return "\n".join(lines)
+
+
+def _section_label(text: str) -> str:
+    """Fixed-width left-aligned section header. 11 chars keeps columns
+    visually aligned across the panel."""
+    return f"[bold dim]{text:<11}[/]"
+
+
+def _format_rank_cell(symbol: str, score: float, fmt: str) -> str:
+    """Render one (symbol, score) cell consistent with the section's fmt."""
+    if fmt == "signed":
+        return f"[bold]{symbol}[/] [{_score_style(score)}]{score:+.2f}[/]"
+    if fmt == "magnitude":
+        # Non-negative score (confidence, unusual). Color by magnitude.
+        style = "bold green" if score >= 0.6 else "yellow" if score >= 0.3 else "dim"
+        return f"[bold]{symbol}[/] [{style}]{score:.2f}[/]"
+    if fmt == "int":
+        return f"[bold]{symbol}[/] [yellow]{int(score)}[/]"
+    if fmt == "reversal":
+        # Signed score: positive = bearish->bullish flip, negative = the reverse.
+        arrow = "↑" if score > 0 else "↓"
+        style = "bold green" if score > 0 else "bold red"
+        return f"[bold]{symbol}[/] [{style}]{arrow}[/]"
+    return f"[bold]{symbol}[/] {score:+.2f}"
 
 
 def _score_style(score: float) -> str:
@@ -291,7 +327,7 @@ class DashboardApp(App[None]):
 
     CSS = """
     Screen { layout: vertical; }
-    #watchlist_header { height: 3; padding: 0 1; }
+    #watchlist_header { height: auto; max-height: 8; padding: 0 1; }
     #detail { height: auto; padding: 0 1 1 1; border-top: solid $primary 30%; }
     #alerts { height: 6; border-top: solid $warning 50%; }
     #events { height: 10; border-top: solid $primary 30%; }
