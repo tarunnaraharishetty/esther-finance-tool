@@ -32,6 +32,7 @@ from textual.widgets import DataTable, Footer, Header, RichLog, Static
 from src.dashboard.state import DashboardSnapshot, RecommendationRow
 from src.intelligence.explain import Explanation, explain
 from src.intelligence.history import SignalEpisode, SignalHistorySummary
+from src.intelligence.multi_timeframe import MultiTimeframeView
 from src.intelligence.opportunities import (
     Opportunity,
     RankedOpportunity,
@@ -120,6 +121,84 @@ def _confidence_bar(conf: float, width: int = 10) -> str:
     """Mini ASCII bar — width chars filled proportional to conf in [0,1]."""
     filled = max(0, min(width, int(round(conf * width))))
     return "█" * filled + "·" * (width - filled)
+
+
+_MTF_DIRECTION_GLYPH = {
+    "bullish": "↑",
+    "bearish": "↓",
+    "neutral": "·",
+}
+
+
+_MTF_ALIGNMENT_STYLE = {
+    "aligned_bullish": "bold green",
+    "aligned_bearish": "bold red",
+    "short_reversal": "bold yellow",
+    "mixed": "dim white",
+}
+
+
+def _mtf_cell(mtf: MultiTimeframeView | None) -> str:
+    """Render the watchlist-table MTF column.
+
+    Three-char glyph (short-medium-long direction) colored by the
+    overall alignment label. Returns a dim em-dash when the row has no
+    MTF view (df too short).
+    """
+    if mtf is None:
+        return "[dim]—[/dim]"
+    glyphs = (
+        _MTF_DIRECTION_GLYPH[mtf.short.direction]
+        + _MTF_DIRECTION_GLYPH[mtf.medium.direction]
+        + _MTF_DIRECTION_GLYPH[mtf.long.direction]
+    )
+    style = _MTF_ALIGNMENT_STYLE.get(mtf.alignment, "white")
+    return f"[{style}]{glyphs}[/]"
+
+
+def _mtf_strength_label(strength: float) -> str:
+    """Coarse strength tier — for the detail-panel timeframes section."""
+    if strength >= 0.67:
+        return "strong"
+    if strength >= 0.33:
+        return "moderate"
+    return "weak"
+
+
+def _render_timeframes_block(mtf: MultiTimeframeView) -> str:
+    """Render the per-symbol "Timeframes" section in DetailPanel.
+
+    Three lines (short/medium/long) showing direction glyph, direction
+    label, signed pct change, bar count, and a strength tier. Final
+    line surfaces the alignment label + numeric strength.
+    """
+    lines: list[str] = []
+    for tf in (mtf.short, mtf.medium, mtf.long):
+        glyph = _MTF_DIRECTION_GLYPH[tf.direction]
+        direction_style = {
+            "bullish": "bold green",
+            "bearish": "bold red",
+            "neutral": "dim",
+        }[tf.direction]
+        strength_label = _mtf_strength_label(tf.strength)
+        strength_style = {
+            "strong": "bold",
+            "moderate": "white",
+            "weak": "dim",
+        }[strength_label]
+        bars_word = "bar" if tf.bars_used == 1 else "bars"
+        lines.append(
+            f"  [dim]{tf.horizon:<7}[/] [{direction_style}]{glyph} {tf.direction:<8}[/]  "
+            f"[dim]·[/]  {tf.delta_pct:+5.1f}%  "
+            f"[dim]over[/] {tf.bars_used} {bars_word}  "
+            f"[dim]·[/]  [{strength_style}]{strength_label}[/]"
+        )
+    alignment_style = _MTF_ALIGNMENT_STYLE.get(mtf.alignment, "white")
+    lines.append(
+        f"  [dim]alignment[/]  [{alignment_style}]{mtf.alignment}[/]  "
+        f"[dim]·  strength[/] {mtf.alignment_strength:.2f}"
+    )
+    return "\n".join(lines)
 
 
 class WatchlistHeader(Static):
@@ -261,6 +340,19 @@ def _detail_signature(
         for a in snap.recent_alerts
         if a.symbol == row.symbol
     )
+    # MTF view signature — rounded so the float-noise problem the
+    # other sig fields work around doesn't bust the cache here.
+    if row.mtf is None:
+        mtf_sig: tuple = ()
+    else:
+        m = row.mtf
+        mtf_sig = (
+            m.alignment,
+            round(m.alignment_strength, 3),
+            (m.short.direction, round(m.short.delta_pct, 2), m.short.bars_used),
+            (m.medium.direction, round(m.medium.delta_pct, 2), m.medium.bars_used),
+            (m.long.direction, round(m.long.delta_pct, 2), m.long.bars_used),
+        )
     return (
         row.symbol,
         row.action.value,
@@ -280,6 +372,7 @@ def _detail_signature(
         row.error,
         hist_sig,
         symbol_alerts_sig,
+        mtf_sig,
         brief_state,
         brief_text,
     )
@@ -325,6 +418,14 @@ def _header_signature(
         (o.symbol, round(o.composite_score, 3), o.profile)
         for o in rank_opportunities(snap, n=3)
     )
+    # MTF cells drive the per-row glyph in the table — they don't
+    # appear in the header itself, but the watchlist table renders off
+    # the same render path. Including them ensures the cached header
+    # doesn't go stale when alignment flips on a sub-table row.
+    mtf_sig = tuple(
+        (r.symbol, r.mtf.alignment if r.mtf is not None else None)
+        for r in snap.rows
+    )
     return (
         rows_sig,
         prev_sig,
@@ -332,6 +433,7 @@ def _header_signature(
         indicators_sig,
         pulse_sig,
         opp_sig,
+        mtf_sig,
     )
 
 
@@ -609,6 +711,15 @@ class DetailPanel(Static):
         else:
             tier_block = ""
 
+        # Section: Timeframes — short/medium/long trend breakdown plus
+        # the alignment label. Omitted when the controller couldn't
+        # compute an MTF view (df too short).
+        timeframes_block = (
+            "[bold cyan]Timeframes[/]\n" + _render_timeframes_block(r.mtf)
+            if r.mtf is not None
+            else ""
+        )
+
         # Section: History (this session).
         history_block = (
             "[bold cyan]History[/]\n" + _render_history_block(history)
@@ -644,6 +755,8 @@ class DetailPanel(Static):
         sections = [header, tagline, numbers, signals_block]
         if tier_block:
             sections.append(tier_block)
+        if timeframes_block:
+            sections.append(timeframes_block)
         if history_block:
             sections.append(history_block)
         if alerts_block:
@@ -857,7 +970,7 @@ class DashboardApp(App[None]):
             table = DataTable(zebra_stripes=True, cursor_type="row")
             table.add_columns(
                 "SYM", "ACTION", "CONF", "BAR", "TECH", "SENT",
-                "RSI", "MACD", "BBAND", "PRICE", "NEWS",
+                "RSI", "MACD", "BBAND", "PRICE", "NEWS", "MTF",
             )
             yield table
             yield DetailPanel(id="detail")
@@ -1038,6 +1151,7 @@ class DashboardApp(App[None]):
                 _fmt_signed(r.bollinger),
                 _fmt_price(r.last_price),
                 str(r.num_news_articles) if not r.error else r.error or "",
+                _mtf_cell(r.mtf) if not r.error else "[dim]—[/dim]",
             )
             table.add_row(*row_cells, key=r.symbol)
 

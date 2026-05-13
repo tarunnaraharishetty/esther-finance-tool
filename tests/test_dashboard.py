@@ -830,7 +830,7 @@ async def test_app_renders_and_responds_to_keys() -> None:
         await pilot.pause(0.3)
         table = app.query_one(DataTable)
         assert table.row_count == 3
-        assert len(table.columns) == 11  # see compose()
+        assert len(table.columns) == 12  # see compose() — SYM..NEWS + MTF
 
         # Pause / resume key toggles state
         await pilot.press("p")
@@ -1460,3 +1460,244 @@ async def test_app_s_keypress_with_mock_summarizer_loads_and_caches() -> None:
         await pilot.press("s")
         await pilot.pause(0.1)
         assert summarizer.summarize.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Multi-timeframe column + Timeframes detail-panel section
+# ---------------------------------------------------------------------------
+
+
+def _mtf_view(
+    *,
+    short: str = "bullish",
+    medium: str = "bullish",
+    long: str = "bullish",
+    short_pct: float = 3.0,
+    medium_pct: float = 8.0,
+    long_pct: float = 15.0,
+    alignment: str = "aligned_bullish",
+    alignment_strength: float = 0.6,
+) -> object:
+    """Construct a MultiTimeframeView with sane defaults for rendering tests."""
+    from src.intelligence.multi_timeframe import (
+        MultiTimeframeView,
+        TimeframeTrend,
+    )
+
+    def _t(horizon: str, direction: str, pct: float, bars: int) -> TimeframeTrend:
+        return TimeframeTrend(
+            horizon=horizon,
+            direction=direction,
+            strength=min(1.0, abs(pct) / 20.0),
+            delta_pct=pct,
+            bars_used=bars,
+        )
+
+    return MultiTimeframeView(
+        symbol="AAPL",
+        short=_t("short", short, short_pct, 5),
+        medium=_t("medium", medium, medium_pct, 20),
+        long=_t("long", long, long_pct, 60),
+        alignment=alignment,
+        alignment_strength=alignment_strength,
+    )
+
+
+def test_mtf_cell_renders_aligned_bullish_with_three_up_arrows() -> None:
+    from src.dashboard.app import _mtf_cell
+
+    cell = _mtf_cell(_mtf_view())  # type: ignore[arg-type]
+    assert "↑↑↑" in cell
+    assert "green" in cell
+
+
+def test_mtf_cell_renders_aligned_bearish_in_red() -> None:
+    from src.dashboard.app import _mtf_cell
+
+    view = _mtf_view(
+        short="bearish",
+        medium="bearish",
+        long="bearish",
+        short_pct=-3.0,
+        medium_pct=-8.0,
+        long_pct=-15.0,
+        alignment="aligned_bearish",
+    )
+    cell = _mtf_cell(view)  # type: ignore[arg-type]
+    assert "↓↓↓" in cell
+    assert "red" in cell
+
+
+def test_mtf_cell_renders_short_reversal_with_mixed_glyphs() -> None:
+    """Short bearish + long bullish — the headline 'pullback in uptrend'
+    pattern. Cell shows actual per-horizon direction glyphs colored
+    yellow."""
+    from src.dashboard.app import _mtf_cell
+
+    view = _mtf_view(
+        short="bearish",
+        medium="neutral",
+        long="bullish",
+        short_pct=-3.0,
+        medium_pct=0.5,
+        long_pct=12.0,
+        alignment="short_reversal",
+    )
+    cell = _mtf_cell(view)  # type: ignore[arg-type]
+    assert "↓·↑" in cell
+    assert "yellow" in cell
+
+
+def test_mtf_cell_renders_mixed_in_dim() -> None:
+    from src.dashboard.app import _mtf_cell
+
+    view = _mtf_view(
+        short="bullish",
+        medium="neutral",
+        long="neutral",
+        short_pct=2.0,
+        medium_pct=0.5,
+        long_pct=1.0,
+        alignment="mixed",
+    )
+    cell = _mtf_cell(view)  # type: ignore[arg-type]
+    assert "↑··" in cell
+    assert "dim" in cell
+
+
+def test_mtf_cell_renders_dim_dash_when_view_is_none() -> None:
+    from src.dashboard.app import _mtf_cell
+
+    cell = _mtf_cell(None)
+    assert "—" in cell
+    assert "dim" in cell
+
+
+def test_mtf_strength_label_tiers() -> None:
+    from src.dashboard.app import _mtf_strength_label
+
+    assert _mtf_strength_label(0.1) == "weak"
+    assert _mtf_strength_label(0.33) == "moderate"
+    assert _mtf_strength_label(0.5) == "moderate"
+    assert _mtf_strength_label(0.67) == "strong"
+    assert _mtf_strength_label(1.0) == "strong"
+
+
+def test_render_timeframes_block_contains_three_horizon_lines() -> None:
+    from src.dashboard.app import _render_timeframes_block
+
+    block = _render_timeframes_block(_mtf_view())  # type: ignore[arg-type]
+    # Each horizon label appears on its own line.
+    assert "short" in block
+    assert "medium" in block
+    assert "long" in block
+    # Direction labels render.
+    assert "bullish" in block
+    # Signed pct change renders.
+    assert "+3.0%" in block or "+3.00%" in block or "+3.0" in block
+    # Alignment label and strength surface on the last line.
+    assert "aligned_bullish" in block
+    assert "strength" in block
+
+
+def test_render_timeframes_block_shows_bar_counts() -> None:
+    """The trader needs to know which window each horizon used — if
+    we fall back to a short df, the value depends on len(df)."""
+    from src.dashboard.app import _render_timeframes_block
+
+    block = _render_timeframes_block(_mtf_view())  # type: ignore[arg-type]
+    assert "5 bars" in block
+    assert "20 bars" in block
+    assert "60 bars" in block
+
+
+async def test_app_table_renders_mtf_column() -> None:
+    """End-to-end smoke: MockController produces rows with MTF; the
+    table has an MTF column header."""
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        table = app.query_one(DataTable)
+        column_labels = [str(c.label) for c in table.columns.values()]
+        assert "MTF" in column_labels
+
+
+async def test_app_detail_panel_includes_timeframes_section() -> None:
+    """Smoke: when the mock controller produces a row with MTF, the
+    detail panel includes the Timeframes block."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        detail = app.query_one(DetailPanel)
+        rendered = detail.render()
+        # Render() returns a Rich-markup string; the section header is plain text.
+        assert "Timeframes" in rendered
+
+
+async def test_app_detail_panel_omits_timeframes_when_mtf_none() -> None:
+    """If a row has mtf=None (df too short), the section is omitted —
+    no empty 'Timeframes' header with no content."""
+    from dataclasses import replace
+
+    from src.dashboard.app import DashboardApp, DetailPanel
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        # Strip the mtf field from the snapshot's row to simulate the
+        # short-df fallback path.
+        snap = app._snapshot
+        assert snap is not None
+        snap.rows[:] = [replace(snap.rows[0], mtf=None)]
+        detail = app.query_one(DetailPanel)
+        # Invalidate cached signature so render runs again.
+        detail._last_signature = None
+        detail.snapshot = snap
+        rendered = detail.render()
+        assert "Timeframes" not in rendered
+
+
+def test_recommendation_row_carries_mtf_field() -> None:
+    """The dashboard row schema includes the new mtf field with default
+    None — guards against accidental removal during refactors."""
+    from src.dashboard.state import RecommendationRow
+
+    fields = RecommendationRow.__dataclass_fields__
+    assert "mtf" in fields
+    # Default is None so legacy callers / tests don't have to set it.
+    assert fields["mtf"].default is None
+
+
+def test_no_prediction_language_in_mtf_render_helpers() -> None:
+    """Regression guard: the rendered strings carry no forecast / prediction
+    language. Same anti-hallucination contract as pulse / opportunities."""
+    from src.dashboard.app import _mtf_cell, _render_timeframes_block
+
+    view = _mtf_view(
+        short="bearish",
+        medium="neutral",
+        long="bullish",
+        short_pct=-3.0,
+        medium_pct=0.5,
+        long_pct=12.0,
+        alignment="short_reversal",
+    )
+    combined = _mtf_cell(view) + "\n" + _render_timeframes_block(view)  # type: ignore[arg-type]
+    lowered = combined.lower()
+    for word in ("likely", "will rise", "will fall", "expected to", "forecast", "predict"):
+        assert word not in lowered, f"forbidden word {word!r} in render"

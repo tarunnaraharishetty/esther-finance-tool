@@ -16,6 +16,7 @@ from src.strategy.base import RecommendationTier, SignalAction
 if TYPE_CHECKING:
     from src.intelligence.alerts import Alert
     from src.intelligence.history import SignalHistorySummary
+    from src.intelligence.multi_timeframe import MultiTimeframeView
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,11 @@ class RecommendationRow:
     signal_quality: str = "moderate"
     stability: str = "stable"
     quality_reasons: tuple[str, ...] = ()
+    # Multi-timeframe trend view computed by the controller from the
+    # same OHLCV df it fed to the recommendation engine. ``None`` when
+    # the df has fewer than 5 bars (unrenderable). Render code branches
+    # on None to omit the MTF column / detail section.
+    mtf: MultiTimeframeView | None = None
     error: str | None = None  # populated if the per-symbol fetch failed
 
 

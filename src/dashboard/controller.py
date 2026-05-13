@@ -33,6 +33,7 @@ from src.data.news_ingestion import NewsSource, get_news_source
 from src.intelligence.alert_prioritizer import AlertPrioritizer, AlertState
 from src.intelligence.alerts import AlertEngine
 from src.intelligence.history import SignalHistory, SignalHistorySummary
+from src.intelligence.multi_timeframe import MultiTimeframeView, compute_mtf_view
 from src.intelligence.tier import promote_to_tier
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import SignalAction
@@ -180,10 +181,12 @@ class DashboardController(BaseController):
                 a.headline
                 for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
             )
+            mtf = compute_mtf_view(df, symbol)
             return _row_from_recommendation(
                 rec,
                 last_price=float(df["close"].iloc[-1]),
                 headlines=top_headlines,
+                mtf=mtf,
             )
         except Exception as e:
             self.events.error(f"{symbol}: {e}")
@@ -334,10 +337,12 @@ class MockDashboardController(BaseController):
             a.headline
             for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
         )
+        mtf = compute_mtf_view(df, symbol)
         return _row_from_recommendation(
             rec,
             last_price=float(df["close"].iloc[-1]),
             headlines=top_headlines,
+            mtf=mtf,
         )
 
 
@@ -347,7 +352,10 @@ class MockDashboardController(BaseController):
 
 
 def _row_from_recommendation(
-    rec: object, last_price: float, headlines: tuple[str, ...] = ()
+    rec: object,
+    last_price: float,
+    headlines: tuple[str, ...] = (),
+    mtf: MultiTimeframeView | None = None,
 ) -> RecommendationRow:
     """Convert a TradingRecommendation to a dashboard row."""
     indicators = getattr(rec, "indicator_scores", {}) or {}
@@ -370,6 +378,7 @@ def _row_from_recommendation(
         signal_quality=str(rec.signal_quality),  # type: ignore[attr-defined]
         stability=str(rec.stability),  # type: ignore[attr-defined]
         quality_reasons=tuple(rec.quality_reasons),  # type: ignore[attr-defined]
+        mtf=mtf,
     )
 
 
