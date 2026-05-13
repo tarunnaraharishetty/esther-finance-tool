@@ -16,10 +16,13 @@ from src.intelligence.alerts import (
     Alert,
     AlertEngine,
     ConfidenceThresholdRule,
+    OpportunityEntryRule,
     Rule,
     SentimentShiftRule,
+    SnapshotRule,
     load_prioritizer_config_from_yaml,
     load_rules_from_yaml,
+    load_snapshot_rules_from_yaml,
 )
 from src.intelligence.explain import Contributor, Explanation, explain
 from src.intelligence.history import SignalEpisode, SignalHistory, SignalHistorySummary
@@ -56,6 +59,7 @@ __all__ = [
     "LLMSummarizer",
     "MarketPulse",
     "Opportunity",
+    "OpportunityEntryRule",
     "PrioritizerConfig",
     "RankedOpportunity",
     "RecapContext",
@@ -65,6 +69,7 @@ __all__ = [
     "SignalHistory",
     "SignalHistorySummary",
     "SignalProfile",
+    "SnapshotRule",
     "Summarizer",
     "TemplateSummarizer",
     "WatchlistChange",
@@ -76,6 +81,7 @@ __all__ = [
     "explain",
     "load_prioritizer_config_from_yaml",
     "load_rules_from_yaml",
+    "load_snapshot_rules_from_yaml",
     "promote_to_tier",
     "rank_opportunities",
     "top_movers",

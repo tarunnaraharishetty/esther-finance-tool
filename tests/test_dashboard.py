@@ -175,7 +175,8 @@ def test_mock_controller_signal_history_grows_across_ticks() -> None:
 
 def test_controller_uses_injected_alert_engine() -> None:
     """The controller should hand rows to whatever AlertEngine was injected."""
-    engine = AlertEngine(rules=[])  # zero rules → never any alerts
+    # zero rules + zero snapshot rules → never any alerts.
+    engine = AlertEngine(rules=[], snapshot_rules=[])
     ctrl = MockDashboardController(
         watchlist=["AAPL", "MSFT"], seed=7, alert_engine=engine
     )

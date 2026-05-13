@@ -27,6 +27,27 @@
 #                          double-alerts.
 #                          severity (default: info)
 
+# Snapshot rules operate on the whole watchlist each tick rather than
+# one row at a time. They're the right fit for cross-row signals (e.g.
+# "this symbol just entered the top-N ranked opportunities"). Omit the
+# `snapshot_rules:` block entirely to keep the built-in defaults.
+#
+# Available snapshot rule types:
+#
+#   opportunity_entry      Fires when a symbol newly enters the top-N
+#                          ranked OPPORTUNITIES (composite-score top list).
+#                          Quiet on the first tick (no baseline) and on
+#                          stable membership tick-over-tick.
+#                          n              (default: 3)
+#                          min_composite  (default: 0.30)
+#                          severity       (default: info)
+
+snapshot_rules:
+  - type: opportunity_entry
+    n: 3
+    min_composite: 0.30
+    severity: info
+
 rules:
   # Any recommendation flip — most actionable signal for a discretionary trader.
   - type: action_changed
@@ -68,6 +89,9 @@ prioritizer:
     confidence_threshold: 300
     sentiment_shift: 600
     tier_changed: 300
+    # Opportunities can shuffle through the top-N as composite scores
+    # bounce; 10 min cooldown keeps the alert focused on durable changes.
+    opportunity_entry: 600
 
   composites:
     # When ALL `requires` rules fire for the same symbol in the same tick,

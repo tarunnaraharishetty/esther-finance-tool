@@ -111,6 +111,10 @@ _DEFAULT_COOLDOWNS = {
     # Tier changes can oscillate around the promotion gate when one
     # quality driver hovers near a threshold; 5 min suppresses the noise.
     "tier_changed": 300,
+    # Opportunity entries bounce around composite-score thresholds as
+    # symbols shuffle through the top-N. 10 min cooldown keeps the alert
+    # focused on durable changes rather than rank noise.
+    "opportunity_entry": 600,
 }
 
 

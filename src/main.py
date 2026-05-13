@@ -724,6 +724,7 @@ def dashboard(
         AlertEngine,
         load_prioritizer_config_from_yaml,
         load_rules_from_yaml,
+        load_snapshot_rules_from_yaml,
     )
     from src.strategy.recommendation import RecommendationEngine
 
@@ -736,11 +737,19 @@ def dashboard(
     if alerts_path.exists():
         try:
             rules = load_rules_from_yaml(alerts_path)
+            snapshot_rules = load_snapshot_rules_from_yaml(alerts_path)
             prio_config = load_prioritizer_config_from_yaml(alerts_path)
-            alert_engine = AlertEngine(rules=rules)
+            # YAML with no `snapshot_rules:` block returns an empty list,
+            # which would silence opportunity_entry. Fall back to defaults
+            # so the OPP alert stays on unless explicitly muted.
+            engine_kwargs: dict[str, object] = {"rules": rules}
+            if snapshot_rules:
+                engine_kwargs["snapshot_rules"] = snapshot_rules
+            alert_engine = AlertEngine(**engine_kwargs)  # type: ignore[arg-type]
             alert_prioritizer = AlertPrioritizer(config=prio_config)  # type: ignore[arg-type]
             console.print(
-                f"[dim]loaded {len(rules)} alert rule(s) from {alerts_path}[/dim]"
+                f"[dim]loaded {len(rules)} alert rule(s) + "
+                f"{len(snapshot_rules)} snapshot rule(s) from {alerts_path}[/dim]"
             )
         except ValueError as e:
             console.print(f"[red]invalid {alerts_path}: {e}[/red]")

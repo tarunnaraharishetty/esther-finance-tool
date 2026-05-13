@@ -136,21 +136,25 @@ class DashboardController(BaseController):
             return_exceptions=False,
         )
         rows_list = list(rows)
-        fresh_alerts = self.alert_engine.evaluate(rows_list)
-        alerts = self.alert_prioritizer.prioritize(
-            fresh_alerts, self.alert_state, now=now
-        )
-        self.alert_state.record(alerts)
         history = self._record_history(rows_list, now)
-        return DashboardSnapshot(
+        # Build the snapshot first so snapshot-level rules can see the
+        # same view the dashboard will render. Alerts get filled in
+        # after prioritization.
+        snap = DashboardSnapshot(
             tick=self._tick,
             rows=rows_list,
             events=self.events.snapshot(),
-            alerts=alerts,
-            recent_alerts=self.alert_state.recent(20),
             signal_history=history,
             timestamp=now,
         )
+        fresh_alerts = self.alert_engine.evaluate(rows_list)
+        fresh_alerts.extend(self.alert_engine.evaluate_snapshot(snap))
+        snap.alerts = self.alert_prioritizer.prioritize(
+            fresh_alerts, self.alert_state, now=now
+        )
+        self.alert_state.record(snap.alerts)
+        snap.recent_alerts = self.alert_state.recent(20)
+        return snap
 
     async def _row_for(self, symbol: str, now: datetime) -> RecommendationRow:
         bars_start = now - timedelta(days=self.lookback_days)
@@ -265,21 +269,22 @@ class MockDashboardController(BaseController):
         now = datetime.now(UTC)
         self.events.info(f"mock tick {self._tick} ({len(self.watchlist)} symbols)")
         rows = [self._mock_row(sym, now) for sym in self.watchlist]
-        fresh_alerts = self.alert_engine.evaluate(rows)
-        alerts = self.alert_prioritizer.prioritize(
-            fresh_alerts, self.alert_state, now=now
-        )
-        self.alert_state.record(alerts)
         history = self._record_history(rows, now)
-        return DashboardSnapshot(
+        snap = DashboardSnapshot(
             tick=self._tick,
             rows=rows,
             events=self.events.snapshot(),
-            alerts=alerts,
-            recent_alerts=self.alert_state.recent(20),
             signal_history=history,
             timestamp=now,
         )
+        fresh_alerts = self.alert_engine.evaluate(rows)
+        fresh_alerts.extend(self.alert_engine.evaluate_snapshot(snap))
+        snap.alerts = self.alert_prioritizer.prioritize(
+            fresh_alerts, self.alert_state, now=now
+        )
+        self.alert_state.record(snap.alerts)
+        snap.recent_alerts = self.alert_state.recent(20)
+        return snap
 
     def _mock_row(self, symbol: str, now: datetime) -> RecommendationRow:
         prof = self._sym_profiles[symbol]

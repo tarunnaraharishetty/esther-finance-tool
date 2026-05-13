@@ -8,7 +8,7 @@ in :class:`AlertEngine`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Protocol
 import yaml
 
 if TYPE_CHECKING:
-    from src.dashboard.state import RecommendationRow
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,20 @@ class Rule(Protocol):
         current: RecommendationRow,
         previous: RecommendationRow | None,
     ) -> Alert | None: ...
+
+
+class SnapshotRule(Protocol):
+    """A rule that evaluates the whole snapshot rather than one row.
+
+    Used for cross-row signals — e.g. "this symbol just entered the
+    top-N ranked opportunities" depends on every other row's composite
+    score, not just one row's history. May fire for zero, one, or
+    multiple symbols in a single tick, so the contract returns a list.
+    """
+
+    name: str
+
+    def evaluate_snapshot(self, snapshot: DashboardSnapshot) -> list[Alert]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -176,22 +190,109 @@ class TierChangedRule:
         )
 
 
+@dataclass
+class OpportunityEntryRule:
+    """Fires when a symbol newly enters the top-N ranked opportunities.
+
+    Snapshot-level rule: each tick it recomputes the top-N composite
+    ranking and compares membership against the prior tick's top-N. Any
+    symbol that's in this tick's top-N but wasn't in the last one
+    triggers an alert. Symbols that stay in the top-N tick-over-tick
+    stay silent (the alert is the *entry event*, not the membership).
+
+    Skipped on the first tick of a session — there's no prior set to
+    diff against, and emitting "everything is new!" the first time the
+    dashboard opens would be noise rather than signal.
+
+    Symbols below ``min_composite`` are filtered before comparison so a
+    quiet entry at composite 0.05 doesn't trip the alert.
+    """
+
+    n: int = 3
+    """Top-N to consider — should match what the dashboard renders."""
+
+    min_composite: float = 0.30
+    """Composite floor; entries below this don't fire (cuts noise)."""
+
+    severity: str = "info"
+    name: str = "opportunity_entry"
+
+    # Sentinel ``None`` means "first tick, no baseline yet."
+    _previous_top: set[str] | None = field(default=None, init=False, repr=False)
+
+    def evaluate_snapshot(self, snapshot: DashboardSnapshot) -> list[Alert]:
+        # Lazy import: opportunities -> dashboard.state -> alerts would
+        # otherwise create a cycle at import time.
+        from src.intelligence.opportunities import rank_opportunities
+
+        ranked = rank_opportunities(snapshot, n=self.n)
+        # Apply the composite floor before computing membership so a
+        # quiet entry doesn't churn the prior set either.
+        qualifying = [opp for opp in ranked if opp.composite_score >= self.min_composite]
+        current_top = {opp.symbol for opp in qualifying}
+
+        prior = self._previous_top
+        self._previous_top = current_top
+
+        if prior is None:
+            # First tick — baseline only, no alerts.
+            return []
+
+        now = datetime.now(UTC)
+        new_entries = [opp for opp in qualifying if opp.symbol not in prior]
+        return [
+            Alert(
+                symbol=opp.symbol,
+                rule=self.name,
+                severity=self.severity,
+                message=(
+                    f"entered top-{self.n} opportunities at "
+                    f"{opp.composite_score:.2f} ({opp.tier.display})"
+                ),
+                fired_at=now,
+            )
+            for opp in new_entries
+        ]
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
 
 
 class AlertEngine:
-    """Holds last-seen state per symbol and applies a rule set per tick."""
+    """Holds last-seen state per symbol and applies a rule set per tick.
 
-    def __init__(self, rules: list[Rule] | None = None) -> None:
+    Two rule families:
+
+    * ``rules`` — per-row, stateless rules that compare current vs
+      previous :class:`RecommendationRow` (the engine holds the previous
+      row state).
+    * ``snapshot_rules`` — snapshot-level rules that need the whole
+      :class:`DashboardSnapshot` and hold their own cross-tick state.
+
+    Both families produce :class:`Alert` instances that flow into the
+    prioritizer together — cooldowns, composites, and the per-tick cap
+    apply uniformly across both.
+    """
+
+    def __init__(
+        self,
+        rules: list[Rule] | None = None,
+        snapshot_rules: list[SnapshotRule] | None = None,
+    ) -> None:
         # `rules is None` means "use defaults"; an explicit empty list means
         # "no rules" (useful for tests and for users who want a silent dashboard).
         self.rules: list[Rule] = _default_rules() if rules is None else list(rules)
+        self.snapshot_rules: list[SnapshotRule] = (
+            _default_snapshot_rules()
+            if snapshot_rules is None
+            else list(snapshot_rules)
+        )
         self._previous: dict[str, RecommendationRow] = {}
 
     def evaluate(self, rows: list[RecommendationRow]) -> list[Alert]:
-        """Run every rule against each row; update internal state."""
+        """Run every per-row rule against each row; update internal state."""
         alerts: list[Alert] = []
         for row in rows:
             prev = self._previous.get(row.symbol)
@@ -205,6 +306,17 @@ class AlertEngine:
                 self._previous[row.symbol] = row
         return alerts
 
+    def evaluate_snapshot(self, snapshot: DashboardSnapshot) -> list[Alert]:
+        """Run every snapshot-level rule against the whole snapshot.
+
+        Each rule may emit zero, one, or many alerts. Snapshot rules
+        own their own state; the engine just dispatches.
+        """
+        alerts: list[Alert] = []
+        for rule in self.snapshot_rules:
+            alerts.extend(rule.evaluate_snapshot(snapshot))
+        return alerts
+
 
 def _default_rules() -> list[Rule]:
     return [
@@ -213,6 +325,10 @@ def _default_rules() -> list[Rule]:
         SentimentShiftRule(),
         TierChangedRule(),
     ]
+
+
+def _default_snapshot_rules() -> list[SnapshotRule]:
+    return [OpportunityEntryRule()]
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +341,10 @@ _RULE_REGISTRY: dict[str, type[Rule]] = {
     "confidence_threshold": ConfidenceThresholdRule,
     "sentiment_shift": SentimentShiftRule,
     "tier_changed": TierChangedRule,
+}
+
+_SNAPSHOT_RULE_REGISTRY: dict[str, type[SnapshotRule]] = {
+    "opportunity_entry": OpportunityEntryRule,
 }
 
 _VALID_SEVERITIES = {"info", "warn", "critical"}
@@ -276,6 +396,55 @@ def load_rules_from_yaml(path: Path) -> list[Rule]:
             out.append(rule_cls(**kwargs))  # type: ignore[call-arg]
         except TypeError as e:
             raise ValueError(f"rules[{i}] ({rtype}): {e}") from e
+    return out
+
+
+def load_snapshot_rules_from_yaml(path: Path) -> list[SnapshotRule]:
+    """Parse an optional ``snapshot_rules:`` block from ``alerts.yaml``.
+
+    Schema mirrors the per-row ``rules:`` block; valid types come from
+    :data:`_SNAPSHOT_RULE_REGISTRY`. Returns an empty list when the
+    block is absent, which leaves :class:`AlertEngine` free to fall back
+    to :func:`_default_snapshot_rules`.
+
+    Example::
+
+        snapshot_rules:
+          - type: opportunity_entry
+            n: 5
+            min_composite: 0.25
+            severity: warn
+    """
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"alerts config must be a mapping, got {type(raw).__name__}")
+    rules_raw = raw.get("snapshot_rules", [])
+    if not isinstance(rules_raw, list):
+        raise ValueError("alerts config: 'snapshot_rules' must be a list")
+
+    out: list[SnapshotRule] = []
+    for i, entry in enumerate(rules_raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f"snapshot_rules[{i}] must be a mapping")
+        kwargs = dict(entry)
+        rtype = kwargs.pop("type", None)
+        if rtype is None:
+            raise ValueError(f"snapshot_rules[{i}] is missing 'type'")
+        rule_cls = _SNAPSHOT_RULE_REGISTRY.get(rtype)
+        if rule_cls is None:
+            valid = sorted(_SNAPSHOT_RULE_REGISTRY.keys())
+            raise ValueError(
+                f"snapshot_rules[{i}]: unknown rule type {rtype!r} (valid: {valid})"
+            )
+        if "severity" in kwargs and kwargs["severity"] not in _VALID_SEVERITIES:
+            raise ValueError(
+                f"snapshot_rules[{i}]: severity must be one of "
+                f"{sorted(_VALID_SEVERITIES)}, got {kwargs['severity']!r}"
+            )
+        try:
+            out.append(rule_cls(**kwargs))  # type: ignore[call-arg]
+        except TypeError as e:
+            raise ValueError(f"snapshot_rules[{i}] ({rtype}): {e}") from e
     return out
 
 

@@ -8,15 +8,17 @@ from pathlib import Path
 
 import pytest
 
-from src.dashboard.state import RecommendationRow
+from src.dashboard.state import DashboardSnapshot, RecommendationRow
 from src.intelligence.alerts import (
     ActionChangedRule,
     AlertEngine,
     ConfidenceThresholdRule,
+    OpportunityEntryRule,
     SentimentShiftRule,
     TierChangedRule,
     load_prioritizer_config_from_yaml,
     load_rules_from_yaml,
+    load_snapshot_rules_from_yaml,
 )
 from src.strategy.base import RecommendationTier, SignalAction
 
@@ -448,6 +450,255 @@ def test_prio_loader_example_yaml_in_repo_parses() -> None:
     # The example ships at least one composite + the two documented cooldowns.
     assert len(config.composites) >= 1
     assert "confidence_threshold" in config.cooldowns
+
+
+# ---------------------------------------------------------------------------
+# Engine error-row handling
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# OpportunityEntryRule (snapshot-level)
+# ---------------------------------------------------------------------------
+
+
+def _opp_row(
+    symbol: str,
+    *,
+    action: SignalAction = SignalAction.BUY,
+    confidence: float = 0.65,
+    technical: float = 0.5,
+    sentiment: float = 0.5,
+    news: int = 2,
+    rsi: float = 0.5,
+    macd: float = 0.5,
+    bollinger: float = 0.5,
+    tier: RecommendationTier | None = None,
+    signal_quality: str = "high",
+    stability: str = "stable",
+) -> RecommendationRow:
+    """A row tuned to rank highly in `rank_opportunities`.
+
+    Default args produce a composite score well above the rule's
+    `min_composite` floor — caller flips one or two knobs to test
+    edge cases.
+    """
+    return RecommendationRow(
+        symbol=symbol,
+        action=action,
+        confidence=confidence,
+        combined_score=confidence if action == SignalAction.BUY else -confidence,
+        technical_score=technical,
+        sentiment_score=sentiment,
+        rsi=rsi,
+        macd=macd,
+        bollinger=bollinger,
+        last_price=100.0,
+        num_news_articles=news,
+        reasoning="",
+        timestamp=datetime.now(UTC),
+        tier=tier if tier is not None else RecommendationTier.from_action(action),
+        signal_quality=signal_quality,
+        stability=stability,
+    )
+
+
+def _opp_snap(rows: list[RecommendationRow]) -> DashboardSnapshot:
+    return DashboardSnapshot(
+        tick=1,
+        rows=rows,
+        events=[],
+        signal_history={},
+        timestamp=datetime.now(UTC),
+    )
+
+
+def test_opp_entry_silent_on_first_tick() -> None:
+    """First tick has no baseline — should not fire even with strong
+    candidates, otherwise opening the dashboard would spam alerts."""
+    rule = OpportunityEntryRule()
+    snap = _opp_snap([_opp_row("NVDA"), _opp_row("AAPL")])
+    assert rule.evaluate_snapshot(snap) == []
+
+
+def test_opp_entry_fires_when_symbol_newly_enters_top_n() -> None:
+    rule = OpportunityEntryRule(n=3)
+    # Tick 1 — baseline with one strong candidate.
+    rule.evaluate_snapshot(_opp_snap([_opp_row("NVDA")]))
+    # Tick 2 — AAPL appears at the top.
+    alerts = rule.evaluate_snapshot(
+        _opp_snap([_opp_row("NVDA"), _opp_row("AAPL")])
+    )
+    fired_symbols = {a.symbol for a in alerts}
+    assert "AAPL" in fired_symbols
+    assert "NVDA" not in fired_symbols  # already in baseline
+
+
+def test_opp_entry_silent_when_membership_stable() -> None:
+    rule = OpportunityEntryRule(n=3)
+    rows = [_opp_row("NVDA"), _opp_row("AAPL")]
+    rule.evaluate_snapshot(_opp_snap(rows))
+    # Same set again — no entry events.
+    assert rule.evaluate_snapshot(_opp_snap(rows)) == []
+
+
+def test_opp_entry_respects_min_composite_floor() -> None:
+    """A symbol that ranks but at a low composite shouldn't fire."""
+    rule = OpportunityEntryRule(min_composite=0.5)
+    # Tick 1 baseline — strong NVDA.
+    rule.evaluate_snapshot(_opp_snap([_opp_row("NVDA")]))
+    # Tick 2 — a HOLD with weak signals can't even score (rank_opportunities
+    # excludes HOLD), so build a directional but very weak row. We zero
+    # every driver-input so composite ends up under 0.5.
+    weak = _opp_row(
+        "AAPL",
+        confidence=0.2,
+        technical=0.0,
+        sentiment=0.0,
+        news=0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        signal_quality="low",
+        stability="volatile",
+    )
+    alerts = rule.evaluate_snapshot(_opp_snap([_opp_row("NVDA"), weak]))
+    assert all(a.symbol != "AAPL" for a in alerts)
+
+
+def test_opp_entry_emits_for_multiple_new_entries() -> None:
+    rule = OpportunityEntryRule(n=3)
+    rule.evaluate_snapshot(_opp_snap([_opp_row("NVDA")]))  # baseline
+    alerts = rule.evaluate_snapshot(
+        _opp_snap([_opp_row("NVDA"), _opp_row("AAPL"), _opp_row("MSFT")])
+    )
+    new_symbols = {a.symbol for a in alerts}
+    assert {"AAPL", "MSFT"} <= new_symbols
+
+
+def test_opp_entry_message_includes_score_and_tier() -> None:
+    rule = OpportunityEntryRule()
+    rule.evaluate_snapshot(_opp_snap([_opp_row("NVDA")]))
+    alerts = rule.evaluate_snapshot(
+        _opp_snap([_opp_row("NVDA"), _opp_row("AAPL", tier=RecommendationTier.STRONG_BUY)])
+    )
+    aapl = next(a for a in alerts if a.symbol == "AAPL")
+    assert aapl.rule == "opportunity_entry"
+    assert "top-3" in aapl.message
+    assert "STRONG BUY" in aapl.message
+
+
+def test_opp_entry_in_default_snapshot_rule_set() -> None:
+    """A fresh AlertEngine includes the opportunity entry rule out of the box."""
+    engine = AlertEngine()
+    assert any(
+        isinstance(r, OpportunityEntryRule) for r in engine.snapshot_rules
+    )
+
+
+def test_engine_evaluate_snapshot_dispatches_to_snapshot_rules() -> None:
+    """AlertEngine.evaluate_snapshot routes the snapshot through every
+    registered snapshot rule and gathers the union of their alerts."""
+    engine = AlertEngine()
+    # Tick 1 baseline.
+    engine.evaluate_snapshot(_opp_snap([_opp_row("NVDA")]))
+    # Tick 2 — AAPL is new.
+    alerts = engine.evaluate_snapshot(
+        _opp_snap([_opp_row("NVDA"), _opp_row("AAPL")])
+    )
+    assert any(
+        a.rule == "opportunity_entry" and a.symbol == "AAPL" for a in alerts
+    )
+
+
+def test_engine_with_explicit_empty_snapshot_rules_is_silent() -> None:
+    """Passing an empty list (not None) means "no snapshot rules"."""
+    engine = AlertEngine(snapshot_rules=[])
+    assert engine.snapshot_rules == []
+    assert engine.evaluate_snapshot(_opp_snap([_opp_row("AAPL")])) == []
+
+
+# ---------------------------------------------------------------------------
+# Snapshot-rule YAML loader
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_loader_returns_empty_when_block_absent(tmp_path: Path) -> None:
+    """No `snapshot_rules:` block → empty list (caller decides whether to
+    fall back to defaults). Keeps old alerts.yaml files working unchanged."""
+    path = _write_yaml(
+        tmp_path,
+        """
+rules:
+  - type: action_changed
+""",
+    )
+    assert load_snapshot_rules_from_yaml(path) == []
+
+
+def test_snapshot_loader_parses_opportunity_entry(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+snapshot_rules:
+  - type: opportunity_entry
+    n: 5
+    min_composite: 0.25
+    severity: warn
+""",
+    )
+    rules = load_snapshot_rules_from_yaml(path)
+    assert len(rules) == 1
+    assert isinstance(rules[0], OpportunityEntryRule)
+    assert rules[0].n == 5
+    assert rules[0].min_composite == 0.25
+    assert rules[0].severity == "warn"
+
+
+def test_snapshot_loader_unknown_type_raises(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+snapshot_rules:
+  - type: not_a_real_snapshot_rule
+""",
+    )
+    with pytest.raises(ValueError, match="unknown rule type"):
+        load_snapshot_rules_from_yaml(path)
+
+
+def test_snapshot_loader_invalid_severity_raises(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+snapshot_rules:
+  - type: opportunity_entry
+    severity: WHATEVER
+""",
+    )
+    with pytest.raises(ValueError, match="severity must be one of"):
+        load_snapshot_rules_from_yaml(path)
+
+
+def test_snapshot_loader_example_yaml_in_repo_parses() -> None:
+    """The shipped example must always parse cleanly through both loaders."""
+    path = Path(__file__).resolve().parents[1] / "config" / "alerts.example.yaml"
+    if not path.exists():
+        pytest.skip(f"{path} not present")
+    snap_rules = load_snapshot_rules_from_yaml(path)
+    assert any(isinstance(r, OpportunityEntryRule) for r in snap_rules)
+
+
+def test_snapshot_loader_missing_type_raises(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+snapshot_rules:
+  - n: 5
+""",
+    )
+    with pytest.raises(ValueError, match="missing 'type'"):
+        load_snapshot_rules_from_yaml(path)
 
 
 # ---------------------------------------------------------------------------
