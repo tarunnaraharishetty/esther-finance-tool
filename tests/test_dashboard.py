@@ -591,6 +591,42 @@ async def test_detail_panel_invalidates_cache_when_row_changes() -> None:
         assert "BUY" not in second or first != second
 
 
+async def test_watchlist_header_renders_opp_lines_when_qualifying_rows_exist() -> None:
+    """A row that qualifies for a high_conviction opportunity should
+    produce an OPP line in the header."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+    qualifying = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.BUY,
+        confidence=0.7,
+        combined_score=0.7,
+        technical_score=0.5,
+        sentiment_score=0.5,
+        rsi=0.5, macd=0.5, bollinger=0.5,
+        last_price=150.0,
+        num_news_articles=5,
+        reasoning="",
+        timestamp=fired,
+    )
+    snap = DashboardSnapshot(tick=1, rows=[qualifying])
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        # OPP section + at least one opportunity kind label.
+        assert "OPP" in text
+        assert any(kind in text for kind in ("convergence", "high_conviction"))
+
+
 async def test_watchlist_header_renders_pulse_line_when_rows_present() -> None:
     """The pulse line is always at the top when any healthy rows
     exist. Tier values are stable schema (bullish/bearish/mixed/neutral

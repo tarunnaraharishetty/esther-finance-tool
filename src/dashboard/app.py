@@ -32,6 +32,7 @@ from textual.widgets import DataTable, Footer, Header, RichLog, Static
 from src.dashboard.state import DashboardSnapshot, RecommendationRow
 from src.intelligence.explain import Explanation, explain
 from src.intelligence.history import SignalEpisode, SignalHistorySummary
+from src.intelligence.opportunities import Opportunity, detect_opportunities
 from src.intelligence.pulse import MarketPulse, compute_pulse
 from src.intelligence.rankings import Rankings
 from src.intelligence.rankings import compute as compute_rankings
@@ -172,6 +173,11 @@ class WatchlistHeader(Static):
         if alerts_summary:
             lines.append(f"{_section_label('ALERTS')}{alerts_summary}")
 
+        # --- Opportunities (skip when none qualify) --------------------
+        opportunities = detect_opportunities(snap, n=3)
+        for opp in opportunities:
+            lines.append(f"{_section_label('OPP')}{_format_opportunity(opp)}")
+
         return "\n".join(lines)
 
 
@@ -265,12 +271,31 @@ def _header_signature(
     # Pulse output drives the PULSE line.
     pulse = compute_pulse(snap)
     pulse_sig = (pulse.sentiment, pulse.conviction, pulse.activity)
+    # Opportunities drive the OPP lines.
+    opp_sig = tuple(
+        (o.symbol, o.kind) for o in detect_opportunities(snap, n=3)
+    )
     return (
         rows_sig,
         prev_sig,
         tuple(sorted(severity_counts.items())),
         indicators_sig,
         pulse_sig,
+        opp_sig,
+    )
+
+
+def _format_opportunity(opp: Opportunity) -> str:
+    """One opportunity line: SYMBOL  kind-tag  rationale."""
+    kind_style = {
+        "convergence": "bold green",
+        "reversal": "bold yellow",
+        "high_conviction": "bold cyan",
+    }.get(opp.kind, "white")
+    return (
+        f"[bold]{opp.symbol}[/]  "
+        f"[{kind_style}]{opp.kind}[/]  "
+        f"[dim]{rich_escape(opp.rationale)}[/dim]"
     )
 
 

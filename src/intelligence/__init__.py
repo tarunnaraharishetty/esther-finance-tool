@@ -24,6 +24,7 @@ from src.intelligence.alerts import (
 from src.intelligence.explain import Contributor, Explanation, explain
 from src.intelligence.history import SignalEpisode, SignalHistory, SignalHistorySummary
 from src.intelligence.llm_summary import LLMSummarizer
+from src.intelligence.opportunities import Opportunity, detect_opportunities
 from src.intelligence.pulse import MarketPulse, compute_pulse
 from src.intelligence.recap import LLMRecapGenerator, RecapContext
 from src.intelligence.summary import Summarizer, TemplateSummarizer
@@ -47,6 +48,7 @@ __all__ = [
     "LLMRecapGenerator",
     "LLMSummarizer",
     "MarketPulse",
+    "Opportunity",
     "PrioritizerConfig",
     "RecapContext",
     "Rule",
@@ -59,6 +61,7 @@ __all__ = [
     "WatchlistChange",
     "action_breakdown",
     "compute_pulse",
+    "detect_opportunities",
     "diff_snapshots",
     "explain",
     "load_prioritizer_config_from_yaml",
