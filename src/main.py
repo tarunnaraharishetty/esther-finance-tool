@@ -811,24 +811,30 @@ def dashboard(
             alert_prioritizer=alert_prioritizer,
         )
 
-    # Try to build the LLM summarizer; if ANTHROPIC_API_KEY isn't set the
-    # dashboard still launches but the `s` keypress will surface a clean error.
+    # Try to build the LLM summarizer + OPP briefer; if ANTHROPIC_API_KEY
+    # isn't set the dashboard still launches but the `s` and `b` keypresses
+    # surface a clean error.
     summarizer: object | None
+    opportunity_briefer: object | None
     try:
         from src.intelligence.llm_summary import LLMSummarizer
+        from src.intelligence.opportunity_brief import LLMOpportunityBriefer
 
         summarizer = LLMSummarizer(settings=settings)
+        opportunity_briefer = LLMOpportunityBriefer(settings=settings)
     except RuntimeError:
         summarizer = None
+        opportunity_briefer = None
         console.print(
             "[yellow]ANTHROPIC_API_KEY not set — AI briefs disabled. "
-            "Press `s` for setup hint.[/yellow]"
+            "Press `s` or `b` for setup hint.[/yellow]"
         )
 
     DashboardApp(
         controller,
         refresh_seconds=refresh_seconds,
         summarizer=summarizer,  # type: ignore[arg-type]
+        opportunity_briefer=opportunity_briefer,  # type: ignore[arg-type]
     ).run()
 
 

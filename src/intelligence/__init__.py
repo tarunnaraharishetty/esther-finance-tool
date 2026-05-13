@@ -33,6 +33,10 @@ from src.intelligence.opportunities import (
     detect_opportunities,
     rank_opportunities,
 )
+from src.intelligence.opportunity_brief import (
+    LLMOpportunityBriefer,
+    OpportunityBriefContext,
+)
 from src.intelligence.opportunity_history import (
     OpportunityHistory,
     OpportunityMembershipTracker,
@@ -59,10 +63,12 @@ __all__ = [
     "ConfidenceThresholdRule",
     "Contributor",
     "Explanation",
+    "LLMOpportunityBriefer",
     "LLMRecapGenerator",
     "LLMSummarizer",
     "MarketPulse",
     "Opportunity",
+    "OpportunityBriefContext",
     "OpportunityEntryRule",
     "OpportunityHistory",
     "OpportunityMembershipTracker",

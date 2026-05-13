@@ -51,6 +51,7 @@ from src.strategy.base import RecommendationTier, SignalAction
 
 if TYPE_CHECKING:
     from src.dashboard.controller import BaseController
+    from src.intelligence.opportunity_brief import LLMOpportunityBriefer
     from src.intelligence.summary import Summarizer
 
 
@@ -240,6 +241,7 @@ def _detail_signature(
     snap: DashboardSnapshot,
     brief_state: str,
     brief_text: str,
+    brief_kind: str = "row",
 ) -> tuple:
     """Stable signature of what DetailPanel.render() would produce.
 
@@ -285,6 +287,7 @@ def _detail_signature(
         symbol_alerts_sig,
         brief_state,
         brief_text,
+        brief_kind,
     )
 
 
@@ -581,6 +584,7 @@ class DetailPanel(Static):
     snapshot: reactive[DashboardSnapshot | None] = reactive(None)
     brief_state: reactive[str] = reactive("idle")  # idle | loading | ready | error
     brief_text: reactive[str] = reactive("")
+    brief_kind: reactive[str] = reactive("row")  # "row" | "opp"
 
     # In-render cache: when the input signature matches the last frame,
     # short-circuit and return the cached string. Saves a full Rich
@@ -597,7 +601,7 @@ class DetailPanel(Static):
         r = snap.rows[idx]
 
         signature = _detail_signature(
-            r, snap, self.brief_state, self.brief_text
+            r, snap, self.brief_state, self.brief_text, self.brief_kind
         )
         if signature == self._last_signature:
             return self._last_rendered
@@ -664,20 +668,23 @@ class DetailPanel(Static):
             else ""
         )
 
-        # Section: AI brief.
+        # Section: AI brief. Header reflects which kind of brief this is
+        # so the trader can tell a per-row summary from an OPP brief at
+        # a glance — the prose styles look similar enough otherwise.
         brief_block = ""
+        brief_label = "AI brief — OPP" if self.brief_kind == "opp" else "AI brief"
         if self.brief_state == "loading":
             brief_block = (
-                "[bold cyan]AI brief[/]\n  [dim italic]loading…[/dim italic]"
+                f"[bold cyan]{brief_label}[/]\n  [dim italic]loading…[/dim italic]"
             )
         elif self.brief_state == "ready":
             brief_block = (
-                "[bold cyan]AI brief[/]\n  "
+                f"[bold cyan]{brief_label}[/]\n  "
                 f"[italic]{rich_escape(self.brief_text)}[/italic]"
             )
         elif self.brief_state == "error":
             brief_block = (
-                "[bold cyan]AI brief[/]\n  "
+                f"[bold cyan]{brief_label}[/]\n  "
                 f"[red]failed:[/] {rich_escape(self.brief_text)}"
             )
 
@@ -860,6 +867,7 @@ class DashboardApp(App[None]):
         Binding("p", "toggle_pause", "pause/resume"),
         Binding("s", "summarize_selected", "AI brief"),
         Binding("o", "cycle_opportunity", "next OPP"),
+        Binding("b", "brief_opportunity", "OPP brief"),
         Binding("up,down", "noop", "select", show=False),
     ]
 
@@ -870,6 +878,7 @@ class DashboardApp(App[None]):
         controller: "BaseController",
         refresh_seconds: float = 5.0,
         summarizer: "Summarizer | None" = None,
+        opportunity_briefer: "LLMOpportunityBriefer | None" = None,
         burst_seconds: float = 1.5,
     ) -> None:
         super().__init__()
@@ -881,6 +890,7 @@ class DashboardApp(App[None]):
         # replaced on each refresh.
         self.burst_seconds = burst_seconds
         self.summarizer = summarizer
+        self.opportunity_briefer = opportunity_briefer
         self._snapshot: DashboardSnapshot | None = None
         self._tick_handle = None
         self._tick_burst_handle = None
@@ -888,6 +898,10 @@ class DashboardApp(App[None]):
         self._previous_actions: dict[str, SignalAction] = {}
         # Brief cache keyed by (symbol, action_str). Action change invalidates.
         self._brief_cache: dict[tuple[str, str], str] = {}
+        # OPP brief cache keyed by (symbol, composite_bucket). Bucket is
+        # round(composite * 100) so a meaningful score shift re-bills,
+        # but tick-over-tick float jitter on the same OPP doesn't.
+        self._opp_brief_cache: dict[tuple[str, int], str] = {}
 
     # -- layout -----------------------------------------------------------
 
@@ -930,6 +944,103 @@ class DashboardApp(App[None]):
 
     def action_noop(self) -> None:  # bound for footer hint only
         pass
+
+    def action_brief_opportunity(self) -> None:
+        """`b`: generate or show an AI brief for one ranked opportunity.
+
+        Target picking: the currently-selected row if it's in the top-N
+        OPP set, else OPP #1. This pairs naturally with `o` (cycle) —
+        press `o` to land on OPP #2, then `b` to brief that one. From a
+        non-OPP row, `b` is a one-key shortcut to the top OPP brief.
+
+        Caches by (symbol, composite_bucket) where bucket is composite
+        rounded to two decimals * 100. Tick-over-tick float jitter on
+        the same OPP doesn't re-bill, but a meaningful score shift does.
+
+        No-op when no opportunities are ranked. Surfaces a friendly
+        error in DetailPanel when the briefer isn't configured.
+        """
+        snap = self._snapshot
+        if snap is None or not snap.rows:
+            return
+
+        from src.intelligence.opportunity_brief import OpportunityBriefContext
+
+        ranked = rank_opportunities(snap, n=3)
+        if not ranked:
+            return
+
+        opp_symbols = [opp.symbol for opp in ranked]
+        selected = self._selected_row()
+        if selected is not None and selected.symbol in opp_symbols:
+            target_symbol = selected.symbol
+        else:
+            target_symbol = opp_symbols[0]
+
+        target_opp = next(opp for opp in ranked if opp.symbol == target_symbol)
+
+        detail = self.query_one(DetailPanel)
+        detail.brief_kind = "opp"
+
+        if self.opportunity_briefer is None:
+            detail.brief_state = "error"
+            detail.brief_text = (
+                "ANTHROPIC_API_KEY not configured — see ALPACA_SETUP.md."
+            )
+            detail.refresh()
+            return
+
+        composite_bucket = round(target_opp.composite_score * 100)
+        cache_key = (target_symbol, composite_bucket)
+        if cache_key in self._opp_brief_cache:
+            detail.brief_state = "ready"
+            detail.brief_text = self._opp_brief_cache[cache_key]
+            detail.refresh()
+            return
+
+        context = OpportunityBriefContext.from_snapshot(snap, target_symbol)
+        if context is None:
+            # Defensive: rank_opportunities found this symbol but
+            # from_snapshot couldn't build a context. Bail silently.
+            return
+
+        detail.brief_state = "loading"
+        detail.brief_text = ""
+        detail.refresh()
+        self.run_worker(
+            self._fetch_opp_brief(context, cache_key),
+            exclusive=False,
+            group="opp_brief",
+        )
+
+    async def _fetch_opp_brief(
+        self,
+        context: "OpportunityBriefContext",  # noqa: F821 — quoted for forward ref
+        cache_key: tuple[str, int],
+    ) -> None:
+        """Compute the OPP brief off the UI thread, then push to DetailPanel."""
+        import asyncio
+
+        assert self.opportunity_briefer is not None  # checked by caller
+
+        try:
+            text = await asyncio.to_thread(
+                self.opportunity_briefer.brief, context
+            )
+        except Exception as e:  # noqa: BLE001 — surfaced as an error state
+            detail = self.query_one(DetailPanel)
+            detail.brief_state = "error"
+            detail.brief_text = str(e)
+            detail.brief_kind = "opp"
+            detail.refresh()
+            return
+
+        self._opp_brief_cache[cache_key] = text
+        detail = self.query_one(DetailPanel)
+        detail.brief_state = "ready"
+        detail.brief_text = text
+        detail.brief_kind = "opp"
+        detail.refresh()
 
     def action_cycle_opportunity(self) -> None:
         """`o`: drill into the next ranked OPP by moving the table cursor.
@@ -1137,11 +1248,15 @@ class DashboardApp(App[None]):
     def _sync_brief_for_cursor(self) -> None:
         """Reset / restore the AI brief footer based on the row under cursor.
 
-        If the cache has an entry for the currently-selected (symbol, action),
-        show it. Otherwise reset to idle so the previous brief doesn't linger
-        once the user has moved off that row.
+        If the row-brief cache has an entry for the currently-selected
+        (symbol, action), show it. Otherwise reset to idle so a previous
+        brief (row or OPP) doesn't linger once the cursor has moved.
+        Always resets brief_kind to "row" since cursor navigation is a
+        per-row concept; the user re-presses ``b`` to surface an OPP
+        brief, which hits the OPP cache instantly if available.
         """
         detail = self.query_one(DetailPanel)
+        detail.brief_kind = "row"
         row = self._selected_row()
         if row is None or row.error:
             detail.brief_state = "idle"

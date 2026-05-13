@@ -1658,3 +1658,193 @@ async def test_cycle_opportunity_noop_when_no_ranked_opps() -> None:
         before = table.cursor_row
         await pilot.press("o")
         assert table.cursor_row == before
+
+
+# ---------------------------------------------------------------------------
+# OPP LLM brief: `b` key generates a per-opportunity brief
+# ---------------------------------------------------------------------------
+
+
+async def test_app_b_keypress_with_no_briefer_surfaces_error() -> None:
+    """`b` with opportunity_briefer=None puts DetailPanel into an error
+    state pointing at ANTHROPIC_API_KEY — same UX as the `s` path."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot
+
+    rows = [_opp_drill_row("AAPL"), _opp_drill_row("MSFT")]
+    snap = DashboardSnapshot(tick=1, rows=rows)
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT"]),
+        refresh_seconds=999.0,
+        opportunity_briefer=None,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        app._snapshot = snap
+        app._render_table(snap)
+        await pilot.press("b")
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        assert detail.brief_state == "error"
+        assert detail.brief_kind == "opp"
+        assert "ANTHROPIC_API_KEY" in detail.brief_text
+
+
+async def test_app_b_keypress_noop_when_no_opps_ranked() -> None:
+    """All-HOLD watchlist → `b` does nothing, even with a briefer set."""
+    from unittest.mock import MagicMock
+
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot
+    from src.intelligence.opportunities import rank_opportunities
+
+    briefer = MagicMock()
+    briefer.brief = MagicMock(return_value="should not be called")
+
+    rows = [_opp_drill_hold_row("AAPL"), _opp_drill_hold_row("MSFT")]
+    snap = DashboardSnapshot(tick=1, rows=rows)
+    assert rank_opportunities(snap, n=3) == []  # premise
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT"]),
+        refresh_seconds=999.0,
+        opportunity_briefer=briefer,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        app._snapshot = snap
+        app._render_table(snap)
+        before_state = app.query_one(DetailPanel).brief_state
+        await pilot.press("b")
+        await pilot.pause(0.1)
+        # Briefer must not have been called; detail state unchanged.
+        assert briefer.brief.call_count == 0
+        assert app.query_one(DetailPanel).brief_state == before_state
+
+
+async def test_app_b_keypress_briefs_top_opp_from_non_opp_row() -> None:
+    """Cursor on a HOLD row → `b` jumps to the top OPP and briefs it."""
+    from unittest.mock import MagicMock
+
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot
+    from src.intelligence.opportunities import rank_opportunities
+
+    briefer = MagicMock()
+    briefer.brief = MagicMock(return_value="NVDA leads at composite 0.8.")
+
+    rows = [
+        _opp_drill_hold_row("SPY"),  # row 0 — non-OPP
+        _opp_drill_row("AAPL"),
+        _opp_drill_row("MSFT"),
+    ]
+    snap = DashboardSnapshot(tick=1, rows=rows)
+    expected_top = rank_opportunities(snap, n=3)[0].symbol
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=[r.symbol for r in rows]),
+        refresh_seconds=999.0,
+        opportunity_briefer=briefer,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        app._snapshot = snap
+        app._render_table(snap)
+        # Park cursor on the HOLD row.
+        app.query_one(DataTable).move_cursor(row=0)
+
+        await pilot.press("b")
+        await pilot.pause(0.3)  # worker completes
+
+        detail = app.query_one(DetailPanel)
+        assert detail.brief_state == "ready"
+        assert detail.brief_kind == "opp"
+        assert detail.brief_text == "NVDA leads at composite 0.8."
+        # The briefer received a context for the top OPP, not the HOLD row.
+        ctx = briefer.brief.call_args.args[0]
+        assert ctx.symbol == expected_top
+
+
+async def test_app_b_keypress_briefs_currently_selected_opp() -> None:
+    """Cursor on an OPP row → `b` briefs THAT opportunity, not the top one."""
+    from unittest.mock import MagicMock
+
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot
+    from src.intelligence.opportunities import rank_opportunities
+
+    briefer = MagicMock()
+    briefer.brief = MagicMock(return_value="brief text")
+
+    rows = [
+        _opp_drill_row("AAPL"),
+        _opp_drill_row("MSFT"),
+        _opp_drill_row("NVDA"),
+    ]
+    snap = DashboardSnapshot(tick=1, rows=rows)
+    ranked = rank_opportunities(snap, n=3)
+    assert len(ranked) >= 2
+
+    # Pick an OPP that ISN'T rank 1 so we can prove we briefed the
+    # selected one rather than defaulting to the top.
+    non_top_opp = ranked[1].symbol
+    non_top_row_idx = next(i for i, r in enumerate(rows) if r.symbol == non_top_opp)
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=[r.symbol for r in rows]),
+        refresh_seconds=999.0,
+        opportunity_briefer=briefer,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        app._snapshot = snap
+        app._render_table(snap)
+        app.query_one(DataTable).move_cursor(row=non_top_row_idx)
+
+        await pilot.press("b")
+        await pilot.pause(0.3)
+
+        ctx = briefer.brief.call_args.args[0]
+        assert ctx.symbol == non_top_opp
+
+
+async def test_app_b_keypress_caches_brief_by_composite_bucket() -> None:
+    """Second `b` press on the same OPP (same composite) hits the cache;
+    the underlying briefer is called only once."""
+    from unittest.mock import MagicMock
+
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot
+
+    briefer = MagicMock()
+    briefer.brief = MagicMock(return_value="cached brief")
+
+    rows = [_opp_drill_row("NVDA"), _opp_drill_row("AAPL")]
+    snap = DashboardSnapshot(tick=1, rows=rows)
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["NVDA", "AAPL"]),
+        refresh_seconds=999.0,
+        opportunity_briefer=briefer,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        app._snapshot = snap
+        app._render_table(snap)
+
+        await pilot.press("b")
+        await pilot.pause(0.3)
+        assert briefer.brief.call_count == 1
+
+        # Re-press: cache hit, no second call.
+        await pilot.press("b")
+        await pilot.pause(0.1)
+        assert briefer.brief.call_count == 1
+        detail = app.query_one(DetailPanel)
+        assert detail.brief_state == "ready"
+        assert detail.brief_text == "cached brief"
