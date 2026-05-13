@@ -402,6 +402,153 @@ async def test_app_watchlist_header_renders() -> None:
         assert "first frame" in text or "no changes" in text
 
 
+async def test_watchlist_header_renders_alerts_summary_when_present() -> None:
+    """When recent_alerts is non-empty, the header should show an
+    ALERTS line with severity counts."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot
+    from src.intelligence.alerts import Alert
+
+    fired = datetime.now(UTC)
+    snap = DashboardSnapshot(
+        tick=1,
+        rows=[],  # don't care for this test
+        recent_alerts=(
+            Alert(symbol="AAPL", rule="action_changed", severity="critical",
+                  message="boom", fired_at=fired),
+            Alert(symbol="MSFT", rule="confidence_threshold", severity="warn",
+                  message="x", fired_at=fired),
+            Alert(symbol="NVDA", rule="sentiment_shift", severity="info",
+                  message="x", fired_at=fired),
+        ),
+    )
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        assert "ALERTS" in text
+        assert "1 critical" in text
+        assert "1 warn" in text
+        assert "1 info" in text
+        assert "3 this session" in text
+
+
+async def test_watchlist_header_skips_alerts_when_none() -> None:
+    """No recent_alerts → no ALERTS line. Keeps the header tight on
+    quiet sessions."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        header = app.query_one(WatchlistHeader)
+        # First tick of the mock controller: no alerts yet.
+        text = header.render()
+        assert "ALERTS" not in text
+
+
+async def test_detail_panel_shows_per_symbol_alerts_filtered_from_recent() -> None:
+    """The detail panel's new Alerts section should list only alerts
+    for the symbol under cursor, not all session alerts."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.intelligence.alerts import Alert
+
+    fired = datetime.now(UTC)
+    row_aapl = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.BUY,
+        confidence=0.5,
+        combined_score=0.5,
+        technical_score=0.5,
+        sentiment_score=0.0,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
+        last_price=150.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    snap = DashboardSnapshot(
+        tick=1,
+        rows=[row_aapl],
+        recent_alerts=(
+            Alert(symbol="AAPL", rule="action_changed", severity="critical",
+                  message="AAPL flipped HOLD->BUY", fired_at=fired),
+            Alert(symbol="MSFT", rule="confidence_threshold", severity="info",
+                  message="MSFT crossed 0.6", fired_at=fired),
+        ),
+    )
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        detail.row_index = 0
+        text = detail.render()
+        # AAPL's alert appears, MSFT's does not.
+        assert "AAPL flipped HOLD->BUY" in text
+        assert "MSFT crossed 0.6" not in text
+        assert "Alerts" in text  # the section header
+
+
+async def test_detail_panel_omits_alerts_section_when_symbol_has_none() -> None:
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.intelligence.alerts import Alert
+
+    fired = datetime.now(UTC)
+    row_aapl = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.BUY,
+        confidence=0.5,
+        combined_score=0.5,
+        technical_score=0.5,
+        sentiment_score=0.0,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
+        last_price=150.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    # MSFT has alerts; AAPL doesn't. Looking at AAPL → no Alerts section.
+    snap = DashboardSnapshot(
+        tick=1,
+        rows=[row_aapl],
+        recent_alerts=(
+            Alert(symbol="MSFT", rule="action_changed", severity="warn",
+                  message="x", fired_at=fired),
+        ),
+    )
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        detail.row_index = 0
+        text = detail.render()
+        # No Alerts section since AAPL has no alerts.
+        # Use a tight check that doesn't false-match other text:
+        assert "[bold cyan]Alerts[/]" not in text
+
+
 async def test_app_s_keypress_with_no_summarizer_surfaces_error() -> None:
     """`s` with summarizer=None should put DetailPanel into an error state
     pointing at ANTHROPIC_API_KEY — no crash, no network call."""

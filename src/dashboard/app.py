@@ -151,6 +151,11 @@ class WatchlistHeader(Static):
             cells = "  ".join(_format_rank_cell(sym, score, fmt) for sym, score in entries)
             lines.append(f"{_section_label(label)}{cells}")
 
+        # --- Session alert summary (skip when empty) -------------------
+        alerts_summary = _format_alert_counts(snap.recent_alerts)
+        if alerts_summary:
+            lines.append(f"{_section_label('ALERTS')}{alerts_summary}")
+
         return "\n".join(lines)
 
 
@@ -158,6 +163,29 @@ def _section_label(text: str) -> str:
     """Fixed-width left-aligned section header. 11 chars keeps columns
     visually aligned across the panel."""
     return f"[bold dim]{text:<11}[/]"
+
+
+def _format_alert_counts(alerts: tuple[object, ...]) -> str:
+    """Compact severity summary for the watchlist header alerts line.
+
+    Returns empty string if no alerts in the rolling window.
+    """
+    from src.intelligence.alerts import Alert
+
+    if not alerts:
+        return ""
+    counts: dict[str, int] = {"critical": 0, "warn": 0, "info": 0}
+    for a in alerts:
+        if isinstance(a, Alert):
+            counts[a.severity] = counts.get(a.severity, 0) + 1
+    chunks: list[str] = []
+    if counts["critical"]:
+        chunks.append(f"[bold red]{counts['critical']} critical[/]")
+    if counts["warn"]:
+        chunks.append(f"[bold yellow]{counts['warn']} warn[/]")
+    if counts["info"]:
+        chunks.append(f"[cyan]{counts['info']} info[/]")
+    return "  ".join(chunks) + f"  [dim]({len(alerts)} this session)[/dim]"
 
 
 def _format_rank_cell(symbol: str, score: float, fmt: str) -> str:
@@ -246,6 +274,14 @@ class DetailPanel(Static):
             else ""
         )
 
+        # Section: Alerts (this symbol, this session).
+        symbol_alerts = [a for a in snap.recent_alerts if a.symbol == r.symbol]
+        alerts_block = (
+            "[bold cyan]Alerts[/]\n" + _render_symbol_alerts(symbol_alerts)
+            if symbol_alerts
+            else ""
+        )
+
         # Section: AI brief.
         brief_block = ""
         if self.brief_state == "loading":
@@ -266,9 +302,40 @@ class DetailPanel(Static):
         sections = [header, tagline, numbers, signals_block]
         if history_block:
             sections.append(history_block)
+        if alerts_block:
+            sections.append(alerts_block)
         if brief_block:
             sections.append(brief_block)
         return "\n".join(sections)
+
+
+def _render_symbol_alerts(alerts: list[object], *, limit: int = 4) -> str:
+    """Render up to ``limit`` recent alerts for one symbol, newest-first.
+
+    Caller pre-filters by symbol; we just render. Each line is
+    severity-colored to match the alerts pane's styling.
+    """
+    severity_style = {
+        "critical": "bold red",
+        "warn": "yellow",
+        "info": "cyan",
+    }
+    lines: list[str] = []
+    for alert in alerts[:limit]:
+        # Duck-type: Alert has .severity .rule .message .fired_at attrs.
+        sev = getattr(alert, "severity", "info")
+        rule = getattr(alert, "rule", "?")
+        message = getattr(alert, "message", "")
+        fired_at = getattr(alert, "fired_at", None)
+        style = severity_style.get(sev, "white")
+        when = fired_at.strftime("%H:%M:%S") if fired_at is not None else "?"
+        lines.append(
+            f"  [dim]{when}[/dim]  [{style}]{sev.upper():8}[/]  "
+            f"[dim]{rule}[/dim]  {rich_escape(message)}"
+        )
+    if len(alerts) > limit:
+        lines.append(f"  [dim]+ {len(alerts) - limit} more this session[/dim]")
+    return "\n".join(lines)
 
 
 def _render_history_block(h: SignalHistorySummary) -> str:
