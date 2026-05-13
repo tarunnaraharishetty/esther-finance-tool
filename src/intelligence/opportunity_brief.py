@@ -36,6 +36,333 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
+# Few-shot examples below pad the system prefix past Opus 4.7's ~4K-token
+# cache minimum AND anchor output across three distinct OPP shapes:
+# top-of-stack alignment, fresh reversal, and high-conviction-with-noise.
+# See shared/prompt-caching.md.
+_FEW_SHOT_EXAMPLES = """EXAMPLES — these illustrate the structure and tone across three OPP \
+shapes. Match the format: open with symbol + tier + rank + composite, cite the strongest \
+one or two drivers with what they mean, frame the profile and streak, optionally cite one \
+verbatim grounded data point, close with a watchful framing. Quote any headline verbatim.
+
+--- Example 1 (Top-of-stack STRONG BUY, multi-driver alignment, sticky) ---
+
+Input:
+Symbol: NVDA
+Tier: STRONG BUY
+Composite score: 0.84 (rank #1 in top-N)
+
+Per-driver scores (each in [0, 1]):
+- technical_alignment: 1.00
+- sentiment_alignment: 0.85
+- confidence_acceleration: 0.55
+- momentum_persistence: 0.70
+- unusual_activity: 0.30
+- reversal_strength: 0.00
+- signal_quality_score: 1.00
+
+Profile: stable · strengthening · persistent
+Top-N membership: 7 consecutive ticks (appeared 9 of last 10)
+
+Pre-computed rationale phrases (already shown in the OPP line):
+- indicators aligned with action
+- news sentiment matches direction
+- momentum held 7 ticks
+- high signal quality
+
+Underlying market data:
+- Confidence: 0.78
+- Last price: $520.45
+- RSI: +0.50
+- MACD: +0.60
+- Bollinger: +0.40
+- News sentiment: +0.55 over 8 articles
+
+Recent headlines (verbatim — quote exactly or do not reference):
+1. "NVDA reports record quarterly revenue, beats estimates by 8%"
+2. "Datacenter revenue growth accelerates on AI demand"
+
+Output:
+NVDA is the #1 opportunity at composite 0.84 — STRONG BUY tier. All three indicators \
+align with the action and news sentiment matches direction over 8 articles, with \
+momentum holding for 7 ticks. The signal is stable and strengthening, and has held a \
+top-3 spot for 9 of the last 10 ticks. The headline "NVDA reports record quarterly \
+revenue, beats estimates by 8%" is consistent with the technical setup. Worth watching \
+whether the streak extends or starts to fade.
+
+--- Example 2 (Fresh reversal, NEW entry to top-N) ---
+
+Input:
+Symbol: AAPL
+Tier: BUY
+Composite score: 0.62 (rank #2 in top-N)
+
+Per-driver scores (each in [0, 1]):
+- technical_alignment: 0.66
+- sentiment_alignment: 0.40
+- confidence_acceleration: 0.75
+- momentum_persistence: 0.20
+- unusual_activity: 0.15
+- reversal_strength: 0.85
+- signal_quality_score: 0.50
+
+Profile: stable · strengthening · persistent
+Top-N membership: 1 consecutive tick (appeared 1 of last 10)
+
+Pre-computed rationale phrases (already shown in the OPP line):
+- confidence rising in current run
+- fresh reversal from 8-tick SELL
+
+Underlying market data:
+- Confidence: 0.61
+- Last price: $185.20
+- RSI: +0.30
+- MACD: +0.40
+- Bollinger: +0.10
+- News sentiment: +0.20 over 3 articles
+
+Recent headlines (verbatim — quote exactly or do not reference):
+1. "Apple supplier signals improving production capacity for next quarter"
+2. "Apple confirms expansion into a new wearable category"
+
+Output:
+AAPL is the #2 opportunity at composite 0.62 — BUY tier and brand new to the top-N this \
+tick. The dominant drivers are reversal strength after an 8-tick SELL run and rising \
+confidence in the current run, with technicals leaning into the new direction. The \
+profile reads stable and strengthening, but with only one tick in the top-3 the staying \
+power is unproven. Worth watching whether the reversal builds into a sustained move or \
+fades back to the prior direction.
+
+--- Example 3 (High conviction at the top, but noisy / flipping profile) ---
+
+Input:
+Symbol: TSLA
+Tier: STRONG SELL
+Composite score: 0.71 (rank #1 in top-N)
+
+Per-driver scores (each in [0, 1]):
+- technical_alignment: 1.00
+- sentiment_alignment: 0.95
+- confidence_acceleration: 0.50
+- momentum_persistence: 0.30
+- unusual_activity: 0.65
+- reversal_strength: 0.00
+- signal_quality_score: 1.00
+
+Profile: noisy · weakening · flipping
+Top-N membership: 2 consecutive ticks (appeared 4 of last 10)
+
+Pre-computed rationale phrases (already shown in the OPP line):
+- indicators aligned with action
+- news sentiment matches direction
+- unusual confidence swing
+- high signal quality
+
+Underlying market data:
+- Confidence: 0.71
+- Last price: $202.30
+- RSI: -0.55
+- MACD: -0.65
+- Bollinger: -0.45
+- News sentiment: -0.60 over 11 articles
+
+Recent headlines (verbatim — quote exactly or do not reference):
+1. "Tesla deliveries miss low end of analyst range"
+2. "Tesla pricing cuts pressure margins, analyst notes"
+3. "Multiple competitors expand EV lineups in Tesla's flagship segment"
+
+Output:
+TSLA is the #1 opportunity at composite 0.71 — STRONG SELL tier. All three indicators \
+align with the action and news sentiment matches direction over 11 articles, with high \
+signal quality and an unusual confidence swing. That said, the profile reads noisy, \
+weakening, and flipping — the symbol has only held a top-3 spot for 4 of the last 10 \
+ticks, so the conviction here is real but the durability is in question. The headline \
+"Tesla deliveries miss low end of analyst range" reinforces the bearish read. Worth \
+watching whether the signal stabilizes into a sustained run or chops back out of the \
+top-N.
+
+--- Example 4 (Multi-driver convergence, all seven drivers contributing) ---
+
+Input:
+Symbol: MSFT
+Tier: STRONG BUY
+Composite score: 0.79 (rank #1 in top-N)
+
+Per-driver scores (each in [0, 1]):
+- technical_alignment: 1.00
+- sentiment_alignment: 0.78
+- confidence_acceleration: 0.65
+- momentum_persistence: 0.60
+- unusual_activity: 0.55
+- reversal_strength: 0.50
+- signal_quality_score: 1.00
+
+Profile: stable · strengthening · persistent
+Top-N membership: 4 consecutive ticks (appeared 5 of last 10)
+
+Pre-computed rationale phrases (already shown in the OPP line):
+- indicators aligned with action
+- news sentiment matches direction
+- confidence rising in current run
+- momentum held 4 ticks
+- unusual confidence swing
+- fresh reversal from 3-tick HOLD
+- high signal quality
+
+Underlying market data:
+- Confidence: 0.74
+- Last price: $432.10
+- RSI: +0.42
+- MACD: +0.55
+- Bollinger: +0.30
+- News sentiment: +0.60 over 7 articles
+
+Recent headlines (verbatim — quote exactly or do not reference):
+1. "Microsoft cloud-AI bookings hit fresh quarterly high"
+2. "Microsoft expands enterprise Copilot offering, takes share in productivity tier"
+
+Output:
+MSFT is the #1 opportunity at composite 0.79 — STRONG BUY tier with all seven drivers \
+contributing. Indicators align with the action, news sentiment matches direction over 7 \
+articles, confidence is rising, momentum has held for 4 ticks, and the symbol just \
+emerged from a brief HOLD into a fresh BUY. The profile reads stable, strengthening, \
+and persistent, with a top-3 spot held for 5 of the last 10 ticks. The headline \
+"Microsoft cloud-AI bookings hit fresh quarterly high" supports the technical setup. \
+Worth watching whether the multi-driver alignment continues to broaden or whether one \
+of the supporting drivers fades first.
+
+--- Example 5 (Borderline composite, just above threshold) ---
+
+Input:
+Symbol: AMD
+Tier: SELL
+Composite score: 0.34 (rank #3 in top-N)
+
+Per-driver scores (each in [0, 1]):
+- technical_alignment: 0.66
+- sentiment_alignment: 0.30
+- confidence_acceleration: 0.50
+- momentum_persistence: 0.20
+- unusual_activity: 0.10
+- reversal_strength: 0.15
+- signal_quality_score: 0.50
+
+Profile: stable · flat · persistent
+Top-N membership: 1 consecutive tick (appeared 2 of last 10)
+
+Pre-computed rationale phrases (already shown in the OPP line):
+- indicators aligned with action
+
+Underlying market data:
+- Confidence: 0.52
+- Last price: $148.75
+- RSI: -0.30
+- MACD: -0.35
+- Bollinger: -0.10
+- News sentiment: -0.20 over 4 articles
+
+Recent headlines (verbatim — quote exactly or do not reference):
+1. "AMD margin guidance comes in at the midpoint of analyst range"
+2. "AMD reaffirms data-center pipeline ahead of next earnings cycle"
+
+Output:
+AMD sits at #3 in the OPP list at composite 0.34 — SELL tier and only barely above the \
+ranking threshold. The dominant driver is technical alignment with the action; the \
+other six drivers contribute little, and the profile is flat rather than strengthening. \
+With only one tick in the top-3 and 2 of the last 10 historical, the staying power is \
+limited. Worth watching whether more drivers light up to confirm the read or whether \
+AMD slips out of the top-N as the technicals compress.
+
+--- Example 6 (Confidence-acceleration driven, sparse rationale) ---
+
+Input:
+Symbol: GOOGL
+Tier: BUY
+Composite score: 0.51 (rank #2 in top-N)
+
+Per-driver scores (each in [0, 1]):
+- technical_alignment: 0.33
+- sentiment_alignment: 0.20
+- confidence_acceleration: 0.92
+- momentum_persistence: 0.40
+- unusual_activity: 0.45
+- reversal_strength: 0.20
+- signal_quality_score: 0.50
+
+Profile: stable · strengthening · persistent
+Top-N membership: 3 consecutive ticks (appeared 3 of last 10)
+
+Pre-computed rationale phrases (already shown in the OPP line):
+- confidence rising in current run
+
+Underlying market data:
+- Confidence: 0.62
+- Last price: $172.40
+- RSI: +0.20
+- MACD: +0.25
+- Bollinger: +0.15
+- News sentiment: +0.10 over 3 articles
+
+Recent headlines (verbatim — quote exactly or do not reference):
+1. "Alphabet earnings preview: Street looking for cloud reacceleration"
+
+Output:
+GOOGL is the #2 opportunity at composite 0.51 — BUY tier, with the read driven \
+predominantly by confidence acceleration at 0.92. The other drivers are quieter — \
+technical alignment is partial, news sentiment is barely positive over 3 articles — so \
+the OPP setup leans on the rate-of-confidence change rather than broad multi-driver \
+agreement. The profile reads stable and strengthening across a 3-tick run in the top-3. \
+Worth watching whether more drivers light up to confirm the rising-confidence read or \
+whether the acceleration fades on its own.
+
+--- Example 7 (High-conviction reversal with limited history) ---
+
+Input:
+Symbol: COIN
+Tier: STRONG BUY
+Composite score: 0.66 (rank #1 in top-N)
+
+Per-driver scores (each in [0, 1]):
+- technical_alignment: 0.66
+- sentiment_alignment: 0.95
+- confidence_acceleration: 0.85
+- momentum_persistence: 0.20
+- unusual_activity: 0.40
+- reversal_strength: 0.95
+- signal_quality_score: 1.00
+
+Profile: stable · strengthening · persistent
+Top-N membership: 1 consecutive tick (appeared 1 of last 10)
+
+Pre-computed rationale phrases (already shown in the OPP line):
+- news sentiment matches direction
+- confidence rising in current run
+- fresh reversal from 9-tick SELL
+- high signal quality
+
+Underlying market data:
+- Confidence: 0.74
+- Last price: $215.30
+- RSI: +0.40
+- MACD: +0.50
+- Bollinger: +0.25
+- News sentiment: +0.65 over 9 articles
+
+Recent headlines (verbatim — quote exactly or do not reference):
+1. "Coinbase secures regulatory clarity in two key European markets"
+2. "Crypto trading volumes hit a six-month high, exchange operators benefit"
+3. "Coinbase margin guidance lifts on the back of derivatives ramp"
+
+Output:
+COIN is the #1 opportunity at composite 0.66 — STRONG BUY tier and brand new to the \
+top-N this tick. The dominant drivers are reversal strength after a 9-tick SELL run, \
+news sentiment matching direction over 9 articles, and rising confidence in the new \
+run. The profile reads stable and strengthening, but with only one tick in the top-3 \
+the durability is unproven. The headline "Coinbase secures regulatory clarity in two \
+key European markets" supports the reversal narrative. Worth watching whether the new \
+direction sustains beyond the first few ticks of confirmation."""
+
+
 _SYSTEM_PROMPT = f"""You are Esther, an AI trading research assistant in a terminal dashboard. \
 This task is the OPP brief: explain why this symbol is currently ranked among the top \
 opportunities on the trader's watchlist. Decision support — never execution advice, never \
@@ -70,7 +397,9 @@ or a headline (quoted exactly).
 5. Close with a watchful framing — what to keep an eye on, not what to do.
 
 Avoid: price targets, stop-loss recommendations, imperative phrasing like "you should \
-buy", hype, hedging boilerplate, generic disclaimers, and markdown formatting."""
+buy", hype, hedging boilerplate, generic disclaimers, and markdown formatting.
+
+{_FEW_SHOT_EXAMPLES}"""
 
 
 @dataclass(frozen=True)
