@@ -339,9 +339,7 @@ def test_mock_controller_populates_pulse_and_pulse_history() -> None:
     """The controller computes pulse once + records into the rolling
     tracker, attaching both to the snapshot. Subsequent ticks extend
     the pulse_history series."""
-    ctrl = MockDashboardController(
-        watchlist=["AAPL", "MSFT", "NVDA"], seed=7
-    )
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT", "NVDA"], seed=7)
     s1 = asyncio.run(ctrl.fetch_snapshot())
     assert s1.pulse is not None
     assert s1.pulse_history is not None
@@ -366,9 +364,7 @@ def test_mock_controller_populates_opp_history_for_top_n() -> None:
     candidates to actually populate top-3 (a watchlist of two HOLDs
     would give us nothing to assert against).
     """
-    ctrl = MockDashboardController(
-        watchlist=["AAPL", "MSFT", "NVDA", "TSLA", "SPY"], seed=7
-    )
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT", "NVDA", "TSLA", "SPY"], seed=7)
     s1 = asyncio.run(ctrl.fetch_snapshot())
     if not s1.opp_history:
         # Mock RNG happened to produce no directional rows on tick 1.
@@ -393,9 +389,7 @@ def test_controller_uses_injected_alert_engine() -> None:
     """The controller should hand rows to whatever AlertEngine was injected."""
     # zero rules + zero snapshot rules → never any alerts.
     engine = AlertEngine(rules=[], snapshot_rules=[])
-    ctrl = MockDashboardController(
-        watchlist=["AAPL", "MSFT"], seed=7, alert_engine=engine
-    )
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT"], seed=7, alert_engine=engine)
     s1 = asyncio.run(ctrl.fetch_snapshot())
     s2 = asyncio.run(ctrl.fetch_snapshot())
     assert s1.alerts == []
@@ -416,9 +410,7 @@ def test_controller_runs_alerts_through_prioritizer() -> None:
     )
 
     drop_all = AlertPrioritizer(PrioritizerConfig(max_per_tick=0))
-    ctrl = MockDashboardController(
-        watchlist=["AAPL", "MSFT"], seed=7, alert_prioritizer=drop_all
-    )
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT"], seed=7, alert_prioritizer=drop_all)
     # Run a few ticks to let raw rules generate firings.
     asyncio.run(ctrl.fetch_snapshot())
     s2 = asyncio.run(ctrl.fetch_snapshot())
@@ -481,9 +473,7 @@ def _df(n: int = 60, drift: float = 0.005) -> pd.DataFrame:
     )
 
 
-def _build_live_controller(
-    *, df: pd.DataFrame | None = None
-) -> DashboardController:
+def _build_live_controller(*, df: pd.DataFrame | None = None) -> DashboardController:
     market = MagicMock()
     market.get_bars = AsyncMock(return_value=["bar"])  # sentinel
     market.to_dataframe = MagicMock(return_value=df if df is not None else _df())
@@ -551,9 +541,7 @@ def test_live_controller_merges_cached_bars(
             "close": np.linspace(100, 150, 50),
             "volume": np.full(50, 1_000_000, dtype=int),
         },
-        index=pd.date_range(
-            start=datetime(2026, 1, 1, tzinfo=UTC), periods=50, freq="D", tz="UTC"
-        ),
+        index=pd.date_range(start=datetime(2026, 1, 1, tzinfo=UTC), periods=50, freq="D", tz="UTC"),
     )
     cache.write_bars("AAPL", TimeFrame.DAY_1, cached)
 
@@ -566,9 +554,7 @@ def test_live_controller_merges_cached_bars(
             "close": np.linspace(155, 160, 5),
             "volume": np.full(5, 1_000_000, dtype=int),
         },
-        index=pd.date_range(
-            start=datetime(2026, 3, 1, tzinfo=UTC), periods=5, freq="D", tz="UTC"
-        ),
+        index=pd.date_range(start=datetime(2026, 3, 1, tzinfo=UTC), periods=5, freq="D", tz="UTC"),
     )
     captured: dict[str, int] = {}
 
@@ -596,9 +582,7 @@ def test_live_controller_merges_cached_bars(
         )
 
     ctrl = _build_live_controller(df=live)
-    monkeypatch.setattr(
-        RecommendationEngine, "recommend", _capture_recommend, raising=True
-    )
+    monkeypatch.setattr(RecommendationEngine, "recommend", _capture_recommend, raising=True)
     snap = asyncio.run(ctrl.fetch_snapshot())
     assert snap.rows[0].error is None
     # Engine should have seen the merged dataframe: 50 cached + 5 live.
@@ -643,8 +627,9 @@ async def test_burst_fires_when_alerts_present() -> None:
         tick=1,
         rows=[],
         alerts=[
-            Alert(symbol="AAPL", rule="action_changed", severity="warn",
-                  message="x", fired_at=fired),
+            Alert(
+                symbol="AAPL", rule="action_changed", severity="warn", message="x", fired_at=fired
+            ),
         ],
     )
     async with app.run_test() as pilot:
@@ -671,7 +656,9 @@ async def test_burst_fires_when_action_flips_vs_prev() -> None:
             combined_score=0.5,
             technical_score=0.5,
             sentiment_score=0.0,
-            rsi=0.5, macd=0.5, bollinger=0.5,
+            rsi=0.5,
+            macd=0.5,
+            bollinger=0.5,
             last_price=150.0,
             num_news_articles=0,
             reasoning="",
@@ -684,9 +671,7 @@ async def test_burst_fires_when_action_flips_vs_prev() -> None:
         # First call seeds the baseline; can't flip yet.
         app._should_burst(DashboardSnapshot(tick=1, rows=[_row(SignalAction.HOLD)]))
         # Second call has a different action → burst.
-        result = app._should_burst(
-            DashboardSnapshot(tick=2, rows=[_row(SignalAction.BUY)])
-        )
+        result = app._should_burst(DashboardSnapshot(tick=2, rows=[_row(SignalAction.BUY)]))
         assert result is True
 
 
@@ -708,7 +693,9 @@ async def test_burst_quiet_when_no_alerts_and_actions_stable() -> None:
             combined_score=0.0,
             technical_score=0.0,
             sentiment_score=0.0,
-            rsi=0.0, macd=0.0, bollinger=0.0,
+            rsi=0.0,
+            macd=0.0,
+            bollinger=0.0,
             last_price=150.0,
             num_news_articles=0,
             reasoning="",
@@ -748,7 +735,9 @@ async def test_burst_ignores_error_rows_for_flip_detection() -> None:
             combined_score=0.5,
             technical_score=0.5,
             sentiment_score=0.0,
-            rsi=0.5, macd=0.5, bollinger=0.5,
+            rsi=0.5,
+            macd=0.5,
+            bollinger=0.5,
             last_price=150.0,
             num_news_articles=0,
             reasoning="",
@@ -783,7 +772,9 @@ async def test_pulse_line_surfaces_breadth_when_directional() -> None:
             combined_score=0.5,
             technical_score=0.5,
             sentiment_score=0.5,
-            rsi=0.4, macd=0.5, bollinger=0.4,  # MACD aligned with BUY
+            rsi=0.4,
+            macd=0.5,
+            bollinger=0.4,  # MACD aligned with BUY
             last_price=100.0,
             num_news_articles=3,  # news-bearing → sentiment_breadth counts
             reasoning="",
@@ -824,7 +815,9 @@ async def test_pulse_line_omits_breadth_when_no_directional_rows() -> None:
         combined_score=0.0,
         technical_score=0.0,
         sentiment_score=0.0,
-        rsi=0.0, macd=0.0, bollinger=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
         last_price=100.0,
         num_news_articles=0,
         reasoning="",
@@ -862,7 +855,9 @@ async def test_pulse_line_surfaces_strong_tier_symbols() -> None:
         combined_score=0.8,
         technical_score=0.6,
         sentiment_score=0.5,
-        rsi=0.5, macd=0.6, bollinger=0.4,
+        rsi=0.5,
+        macd=0.6,
+        bollinger=0.4,
         last_price=520.0,
         num_news_articles=5,
         reasoning="",
@@ -900,7 +895,9 @@ async def test_pulse_line_omits_alerts_chunk_when_zero() -> None:
         combined_score=0.0,
         technical_score=0.0,
         sentiment_score=0.0,
-        rsi=0.0, macd=0.0, bollinger=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
         last_price=100.0,
         num_news_articles=0,
         reasoning="",
@@ -968,7 +965,9 @@ async def test_status_line_surfaces_strong_tier_symbol() -> None:
         combined_score=0.7,
         technical_score=0.6,
         sentiment_score=0.5,
-        rsi=0.5, macd=0.6, bollinger=0.4,
+        rsi=0.5,
+        macd=0.6,
+        bollinger=0.4,
         last_price=520.0,
         num_news_articles=8,
         reasoning="",
@@ -1006,19 +1005,22 @@ async def test_status_line_shows_critical_alert_count() -> None:
         combined_score=0.1,
         technical_score=0.0,
         sentiment_score=0.0,
-        rsi=0.0, macd=0.0, bollinger=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
         last_price=150.0,
         num_news_articles=0,
         reasoning="",
         timestamp=fired,
     )
     alerts = (
-        Alert(symbol="AAPL", rule="tier_changed", severity="critical",
-              message="x", fired_at=fired),
-        Alert(symbol="MSFT", rule="action_changed", severity="critical",
-              message="x", fired_at=fired),
-        Alert(symbol="NVDA", rule="confidence_threshold", severity="info",
-              message="x", fired_at=fired),
+        Alert(symbol="AAPL", rule="tier_changed", severity="critical", message="x", fired_at=fired),
+        Alert(
+            symbol="MSFT", rule="action_changed", severity="critical", message="x", fired_at=fired
+        ),
+        Alert(
+            symbol="NVDA", rule="confidence_threshold", severity="info", message="x", fired_at=fired
+        ),
     )
     snap = DashboardSnapshot(tick=1, rows=[row], recent_alerts=alerts)
 
@@ -1197,9 +1199,7 @@ async def test_detail_panel_invalidates_cache_when_row_changes() -> None:
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
         detail = app.query_one(DetailPanel)
-        detail.snapshot = DashboardSnapshot(
-            tick=1, rows=[_make_row(SignalAction.BUY, 0.5)]
-        )
+        detail.snapshot = DashboardSnapshot(tick=1, rows=[_make_row(SignalAction.BUY, 0.5)])
         detail.row_index = 0
         first = detail.render()
         sig_one = detail._last_signature
@@ -1209,9 +1209,7 @@ async def test_detail_panel_invalidates_cache_when_row_changes() -> None:
         assert detail._last_signature == sig_one
 
         # Now flip the action — cache must invalidate.
-        detail.snapshot = DashboardSnapshot(
-            tick=2, rows=[_make_row(SignalAction.SELL, 0.5)]
-        )
+        detail.snapshot = DashboardSnapshot(tick=2, rows=[_make_row(SignalAction.SELL, 0.5)])
         second = detail.render()
         assert detail._last_signature != sig_one
         assert "SELL" in second
@@ -1232,7 +1230,9 @@ async def test_watchlist_header_renders_opp_lines_when_qualifying_rows_exist() -
         combined_score=0.7,
         technical_score=0.5,
         sentiment_score=0.5,
-        rsi=0.5, macd=0.5, bollinger=0.5,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
         last_price=150.0,
         num_news_articles=5,
         reasoning="",
@@ -1256,9 +1256,13 @@ async def test_watchlist_header_renders_opp_lines_when_qualifying_rows_exist() -
         assert any(
             axis in text
             for axis in (
-                "stable", "noisy",
-                "strengthening", "weakening", "flat",
-                "persistent", "flipping",
+                "stable",
+                "noisy",
+                "strengthening",
+                "weakening",
+                "flat",
+                "persistent",
+                "flipping",
             )
         )
 
@@ -1279,7 +1283,9 @@ async def test_opp_line_shows_composite_score_and_profile_chip() -> None:
         combined_score=0.8,
         technical_score=0.7,
         sentiment_score=0.6,
-        rsi=0.5, macd=0.7, bollinger=0.4,
+        rsi=0.5,
+        macd=0.7,
+        bollinger=0.4,
         last_price=520.0,
         num_news_articles=8,
         reasoning="",
@@ -1302,6 +1308,7 @@ async def test_opp_line_shows_composite_score_and_profile_chip() -> None:
         assert "OPP" in text
         # Composite score formatted to two decimals appears somewhere.
         import re
+
         assert re.search(r"\b0\.\d{2}\b", text), f"expected composite score in {text}"
         # Profile chip has all three axes.
         assert "stable" in text
@@ -1323,7 +1330,9 @@ async def test_opp_section_omitted_when_no_directional_rows() -> None:
         combined_score=0.0,
         technical_score=0.0,
         sentiment_score=0.0,
-        rsi=0.0, macd=0.0, bollinger=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
         last_price=100.0,
         num_news_articles=0,
         reasoning="",
@@ -1437,7 +1446,9 @@ async def test_detail_panel_omits_tier_section_when_no_reasons() -> None:
         combined_score=0.1,
         technical_score=0.05,
         sentiment_score=0.0,
-        rsi=0.0, macd=0.0, bollinger=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
         last_price=150.0,
         num_news_articles=0,
         reasoning="",
@@ -1543,7 +1554,9 @@ async def test_detail_panel_omits_opportunity_section_for_non_opp_row() -> None:
         combined_score=0.05,
         technical_score=0.0,
         sentiment_score=0.0,
-        rsi=0.0, macd=0.0, bollinger=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
         last_price=150.0,
         num_news_articles=0,
         reasoning="",
@@ -1626,6 +1639,14 @@ async def test_detail_panel_quality_chips_render_for_high_conviction_row() -> No
         # building-momentum chip — both labels co-fire on truly strong
         # setups.
         assert "building momentum" in text
+        # State phrases render in the Rationale section. The strong
+        # accel + persistence combo earns "momentum strengthening";
+        # the BUY action + multi-article sentiment alignment earns
+        # "positive sentiment breadth"; the stable + persistent
+        # profile earns "stable BUY persistence".
+        assert "momentum strengthening across recent ticks" in text
+        assert "positive sentiment breadth" in text
+        assert "stable BUY persistence" in text
 
 
 async def test_watchlist_header_renders_pulse_line_when_rows_present() -> None:
@@ -1662,12 +1683,23 @@ async def test_watchlist_header_renders_alerts_summary_when_present() -> None:
         tick=1,
         rows=[],  # don't care for this test
         recent_alerts=(
-            Alert(symbol="AAPL", rule="action_changed", severity="critical",
-                  message="boom", fired_at=fired),
-            Alert(symbol="MSFT", rule="confidence_threshold", severity="warn",
-                  message="x", fired_at=fired),
-            Alert(symbol="NVDA", rule="sentiment_shift", severity="info",
-                  message="x", fired_at=fired),
+            Alert(
+                symbol="AAPL",
+                rule="action_changed",
+                severity="critical",
+                message="boom",
+                fired_at=fired,
+            ),
+            Alert(
+                symbol="MSFT",
+                rule="confidence_threshold",
+                severity="warn",
+                message="x",
+                fired_at=fired,
+            ),
+            Alert(
+                symbol="NVDA", rule="sentiment_shift", severity="info", message="x", fired_at=fired
+            ),
         ),
     )
     app = DashboardApp(
@@ -1730,10 +1762,20 @@ async def test_detail_panel_shows_per_symbol_alerts_filtered_from_recent() -> No
         tick=1,
         rows=[row_aapl],
         recent_alerts=(
-            Alert(symbol="AAPL", rule="action_changed", severity="critical",
-                  message="AAPL flipped HOLD->BUY", fired_at=fired),
-            Alert(symbol="MSFT", rule="confidence_threshold", severity="info",
-                  message="MSFT crossed 0.6", fired_at=fired),
+            Alert(
+                symbol="AAPL",
+                rule="action_changed",
+                severity="critical",
+                message="AAPL flipped HOLD->BUY",
+                fired_at=fired,
+            ),
+            Alert(
+                symbol="MSFT",
+                rule="confidence_threshold",
+                severity="info",
+                message="MSFT crossed 0.6",
+                fired_at=fired,
+            ),
         ),
     )
     app = DashboardApp(
@@ -1778,8 +1820,9 @@ async def test_detail_panel_omits_alerts_section_when_symbol_has_none() -> None:
         tick=1,
         rows=[row_aapl],
         recent_alerts=(
-            Alert(symbol="MSFT", rule="action_changed", severity="warn",
-                  message="x", fired_at=fired),
+            Alert(
+                symbol="MSFT", rule="action_changed", severity="warn", message="x", fired_at=fired
+            ),
         ),
     )
     app = DashboardApp(
@@ -1823,9 +1866,7 @@ async def test_app_s_keypress_with_mock_summarizer_loads_and_caches() -> None:
     from src.dashboard.app import DashboardApp, DetailPanel
 
     summarizer = MagicMock()
-    summarizer.summarize = MagicMock(
-        return_value="AAPL leans bullish with high confidence."
-    )
+    summarizer.summarize = MagicMock(return_value="AAPL leans bullish with high confidence.")
 
     app = DashboardApp(
         MockDashboardController(watchlist=["AAPL", "MSFT"]),
@@ -1864,7 +1905,9 @@ def _opp_drill_row(symbol: str, *, action: SignalAction = SignalAction.BUY) -> R
         combined_score=0.6 if action == SignalAction.BUY else -0.6,
         technical_score=0.5,
         sentiment_score=0.5 if action == SignalAction.BUY else -0.5,
-        rsi=0.5, macd=0.5, bollinger=0.5,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
         last_price=100.0,
         num_news_articles=3,
         reasoning="",
@@ -1884,7 +1927,9 @@ def _opp_drill_hold_row(symbol: str) -> RecommendationRow:
         combined_score=0.0,
         technical_score=0.0,
         sentiment_score=0.0,
-        rsi=0.0, macd=0.0, bollinger=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
         last_price=100.0,
         num_news_articles=0,
         reasoning="",
@@ -2206,7 +2251,7 @@ def test_sparkline_normalized_uses_full_range_for_zero_to_one() -> None:
     from src.dashboard.app import _SPARKLINE_CHARS, _sparkline_normalized
 
     spark = _sparkline_normalized((0.0, 1.0))
-    assert spark[0] == _SPARKLINE_CHARS[0]   # lowest char
+    assert spark[0] == _SPARKLINE_CHARS[0]  # lowest char
     assert spark[1] == _SPARKLINE_CHARS[-1]  # highest char
 
 

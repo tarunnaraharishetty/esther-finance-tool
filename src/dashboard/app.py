@@ -184,9 +184,7 @@ class WatchlistHeader(Static):
 
         # --- HIST line (sparklines of recent pulses; needs >=2 ticks) --
         if snap.pulse_history is not None and snap.pulse_history.has_trend:
-            lines.append(
-                f"{_section_label('HIST')}{_format_pulse_history(snap.pulse_history)}"
-            )
+            lines.append(f"{_section_label('HIST')}{_format_pulse_history(snap.pulse_history)}")
 
         # --- Status line: action mix + changes since last refresh -------
         counts = action_breakdown(snap)
@@ -198,17 +196,13 @@ class WatchlistHeader(Static):
         changes = diff_snapshots(snap, self._prev_snapshot)
         if changes:
             change_str = "  ·  ".join(
-                f"[bold]{c.symbol}[/bold] [dim]({c.kind})[/dim]"
-                for c in changes[:3]
+                f"[bold]{c.symbol}[/bold] [dim]({c.kind})[/dim]" for c in changes[:3]
             )
         elif self._prev_snapshot is None:
             change_str = "[dim](first frame)[/dim]"
         else:
             change_str = "[dim](no changes)[/dim]"
-        lines.append(
-            f"{_section_label('MIX')}{mix}      "
-            f"{_section_label('CHANGES')}{change_str}"
-        )
+        lines.append(f"{_section_label('MIX')}{mix}      {_section_label('CHANGES')}{change_str}")
 
         # --- Ranked sections (skip empties) ----------------------------
         sections: list[tuple[str, tuple[tuple[str, float], ...], str]] = [
@@ -237,10 +231,7 @@ class WatchlistHeader(Static):
         opportunities = rank_opportunities(snap, n=3)
         for opp in opportunities:
             history = snap.opp_history.get(opp.symbol)
-            lines.append(
-                f"{_section_label('OPP')}"
-                f"{_format_ranked_opportunity(opp, history)}"
-            )
+            lines.append(f"{_section_label('OPP')}{_format_ranked_opportunity(opp, history)}")
 
         return "\n".join(lines)
 
@@ -272,9 +263,7 @@ def _detail_signature(
             history.current.tick_count,
             round(history.current.confidence_first, 3),
             round(history.current.confidence_last, 3),
-            tuple(
-                (ep.action.value, ep.tick_count) for ep in history.recent
-            ),
+            tuple((ep.action.value, ep.tick_count) for ep in history.recent),
         )
     # Per-symbol alert count signature.
     symbol_alerts_sig = tuple(
@@ -305,9 +294,7 @@ def _detail_signature(
             opp.profile.trend,
             opp.profile.persistence,
             opp.rationale,
-            (opp_history.streak, opp_history.appearances)
-            if opp_history is not None
-            else None,
+            (opp_history.streak, opp_history.appearances) if opp_history is not None else None,
         )
     return (
         row.symbol,
@@ -345,14 +332,9 @@ def _header_signature(
     identically, so we can short-circuit the redraw.
     """
     # Per-row identity for action mix + diff input.
-    rows_sig = tuple(
-        (r.symbol, r.action.value, round(r.confidence, 3), r.error)
-        for r in snap.rows
-    )
+    rows_sig = tuple((r.symbol, r.action.value, round(r.confidence, 3), r.error) for r in snap.rows)
     prev_sig = (
-        tuple(r.symbol + r.action.value for r in prev_snap.rows)
-        if prev_snap is not None
-        else None
+        tuple(r.symbol + r.action.value for r in prev_snap.rows) if prev_snap is not None else None
     )
     # Recent-alerts count by severity drives the ALERTS line.
     from src.intelligence.alerts import Alert
@@ -363,8 +345,12 @@ def _header_signature(
             severity_counts[a.severity] = severity_counts.get(a.severity, 0) + 1
     # Round indicator scores so float noise doesn't bust the cache.
     indicators_sig = tuple(
-        (r.symbol, round(r.macd if r.macd == r.macd else 0.0, 3),
-         round(r.sentiment_score, 3), r.num_news_articles)
+        (
+            r.symbol,
+            round(r.macd if r.macd == r.macd else 0.0, 3),
+            round(r.sentiment_score, 3),
+            r.num_news_articles,
+        )
         for r in snap.rows
     )
     # Pulse output drives the PULSE line. Capture the full set of fields
@@ -490,12 +476,9 @@ def _format_profile_chip(profile: SignalProfile) -> str:
     enough to fit on one OPP line.
     """
     parts = [
-        f"[{_PROFILE_AXIS_STYLES['stability'][profile.stability]}]"
-        f"{profile.stability}[/]",
-        f"[{_PROFILE_AXIS_STYLES['trend'][profile.trend]}]"
-        f"{profile.trend}[/]",
-        f"[{_PROFILE_AXIS_STYLES['persistence'][profile.persistence]}]"
-        f"{profile.persistence}[/]",
+        f"[{_PROFILE_AXIS_STYLES['stability'][profile.stability]}]{profile.stability}[/]",
+        f"[{_PROFILE_AXIS_STYLES['trend'][profile.trend]}]{profile.trend}[/]",
+        f"[{_PROFILE_AXIS_STYLES['persistence'][profile.persistence]}]{profile.persistence}[/]",
     ]
     return "[dim][[/dim]" + "[dim]·[/dim]".join(parts) + "[dim]][/dim]"
 
@@ -561,8 +544,7 @@ def _render_opportunity_drilldown(drilldown: OpportunityDrilldown) -> str:
 
     if drilldown.quality_labels:
         chips = "  [dim]·[/]  ".join(
-            f"[{_quality_label_style(label)}]{label}[/]"
-            for label in drilldown.quality_labels
+            f"[{_quality_label_style(label)}]{label}[/]" for label in drilldown.quality_labels
         )
         lines.append(f"  {chips}")
 
@@ -570,11 +552,7 @@ def _render_opportunity_drilldown(drilldown: OpportunityDrilldown) -> str:
     for driver in drilldown.drivers:
         bar = _driver_bar(driver.score)
         style = _driver_style(driver.score)
-        descriptor = (
-            f"  [dim]{rich_escape(driver.descriptor)}[/dim]"
-            if driver.descriptor
-            else ""
-        )
+        descriptor = f"  [dim]{rich_escape(driver.descriptor)}[/dim]" if driver.descriptor else ""
         lines.append(
             f"    [dim]{driver.label:<22}[/dim]  "
             f"[{style}]{bar}[/]  "
@@ -582,8 +560,14 @@ def _render_opportunity_drilldown(drilldown: OpportunityDrilldown) -> str:
             f"{descriptor}"
         )
 
-    if drilldown.rationale:
+    if drilldown.state_phrases or drilldown.rationale:
         lines.append("  [bold dim]Rationale[/]")
+        # State phrases first — they describe richer combinations
+        # (strengthening, breadth, persistence). The source rationale
+        # follows with per-driver specifics (tick counts, etc.) so the
+        # reader gets the gist line first and the detail below.
+        for phrase in drilldown.state_phrases:
+            lines.append(f"    [dim]·[/]  [dim]{rich_escape(phrase)}[/dim]")
         for phrase in drilldown.rationale:
             lines.append(f"    [dim]·[/]  [dim]{rich_escape(phrase)}[/dim]")
 
@@ -660,21 +644,16 @@ def _format_pulse(pulse: MarketPulse) -> str:
 
     # Reversal intensity — surface only when non-zero (calm sessions stay tight).
     if pulse.reversal_intensity > 0:
-        chunks.append(
-            f"[dim]revs[/dim] [yellow]{pulse.reversal_intensity}[/yellow]"
-        )
+        chunks.append(f"[dim]revs[/dim] [yellow]{pulse.reversal_intensity}[/yellow]")
 
     # Alert intensity — only when non-zero.
     if pulse.alert_intensity > 0:
-        chunks.append(
-            f"[dim]alerts[/dim] [bold red]{pulse.alert_intensity}[/]"
-        )
+        chunks.append(f"[dim]alerts[/dim] [bold red]{pulse.alert_intensity}[/]")
 
     # Strongest symbols — small inline list. Omitted entirely when none.
     if pulse.strongest_symbols:
         strong_chunks = [
-            f"[bold]{sym}[/] [dim]{display}[/dim]"
-            for sym, display in pulse.strongest_symbols
+            f"[bold]{sym}[/] [dim]{display}[/dim]" for sym, display in pulse.strongest_symbols
         ]
         chunks.append("STRONG " + " ".join(strong_chunks))
 
@@ -700,9 +679,7 @@ _SPARKLINE_CHARS = "▁▂▃▄▅▆▇█"
 ``round(value * 7)`` for a normalized [0, 1] series."""
 
 
-def _sparkline_normalized(
-    values: tuple[float, ...], *, lo: float = 0.0, hi: float = 1.0
-) -> str:
+def _sparkline_normalized(values: tuple[float, ...], *, lo: float = 0.0, hi: float = 1.0) -> str:
     """Sparkline with a fixed value range — best for breadth fractions
     where the absolute level matters (50% should look mid-height
     regardless of whether the series ever hit 80%).
@@ -715,10 +692,7 @@ def _sparkline_normalized(
     if span <= 0:
         return _SPARKLINE_CHARS[0] * len(values)
     n = len(_SPARKLINE_CHARS) - 1
-    return "".join(
-        _SPARKLINE_CHARS[max(0, min(n, round((v - lo) / span * n)))]
-        for v in values
-    )
+    return "".join(_SPARKLINE_CHARS[max(0, min(n, round((v - lo) / span * n)))] for v in values)
 
 
 def _sparkline_relative(values: tuple[int, ...] | tuple[float, ...]) -> str:
@@ -737,9 +711,7 @@ def _sparkline_relative(values: tuple[int, ...] | tuple[float, ...]) -> str:
         return _SPARKLINE_CHARS[0] * len(values)
     span = hi - lo
     n = len(_SPARKLINE_CHARS) - 1
-    return "".join(
-        _SPARKLINE_CHARS[round((v - lo) / span * n)] for v in values
-    )
+    return "".join(_SPARKLINE_CHARS[round((v - lo) / span * n)] for v in values)
 
 
 def _format_pulse_history(history: PulseHistory) -> str:
@@ -754,20 +726,14 @@ def _format_pulse_history(history: PulseHistory) -> str:
     if any(v > 0 for v in history.momentum_breadth):
         spark = _sparkline_normalized(history.momentum_breadth)
         style = _breadth_style(mom_curr)
-        chunks.append(
-            f"[dim]mom[/dim] [{style}]{spark}[/] [{style}]"
-            f"{round(mom_curr * 100)}%[/]"
-        )
+        chunks.append(f"[dim]mom[/dim] [{style}]{spark}[/] [{style}]{round(mom_curr * 100)}%[/]")
 
     # Sentiment breadth — fixed [0, 1] scale.
     sent_curr = history.sentiment_breadth[-1]
     if any(v > 0 for v in history.sentiment_breadth):
         spark = _sparkline_normalized(history.sentiment_breadth)
         style = _breadth_style(sent_curr)
-        chunks.append(
-            f"[dim]sent[/dim] [{style}]{spark}[/] [{style}]"
-            f"{round(sent_curr * 100)}%[/]"
-        )
+        chunks.append(f"[dim]sent[/dim] [{style}]{spark}[/] [{style}]{round(sent_curr * 100)}%[/]")
 
     # Reversal intensity — relative scale (no natural upper bound).
     if any(v > 0 for v in history.reversal_intensity):
@@ -781,8 +747,7 @@ def _format_pulse_history(history: PulseHistory) -> str:
     if any(v > 0 for v in history.alert_intensity):
         spark = _sparkline_relative(history.alert_intensity)
         chunks.append(
-            f"[dim]alerts[/dim] [bold red]{spark}[/] "
-            f"[bold red]{history.alert_intensity[-1]}[/]"
+            f"[dim]alerts[/dim] [bold red]{spark}[/] [bold red]{history.alert_intensity[-1]}[/]"
         )
 
     if not chunks:
@@ -876,7 +841,11 @@ class DetailPanel(Static):
                 break
 
         signature = _detail_signature(
-            r, snap, self.brief_state, self.brief_text, self.brief_kind,
+            r,
+            snap,
+            self.brief_state,
+            self.brief_text,
+            self.brief_kind,
             opp_match=opp_match,
         )
         if signature == self._last_signature:
@@ -939,22 +908,25 @@ class DetailPanel(Static):
         # Section: Alerts (this symbol, this session).
         symbol_alerts = [a for a in snap.recent_alerts if a.symbol == r.symbol]
         alerts_block = (
-            "[bold cyan]Alerts[/]\n" + _render_symbol_alerts(symbol_alerts)
-            if symbol_alerts
-            else ""
+            "[bold cyan]Alerts[/]\n" + _render_symbol_alerts(symbol_alerts) if symbol_alerts else ""
         )
 
         # Section: Opportunity Intelligence (only when this symbol ranks
-        # in the top-N). Additive — non-OPP rows render unchanged.
+        # in the top-N). Additive — non-OPP rows render unchanged. The
+        # row is threaded through so action-aware state phrases
+        # (sentiment breadth polarity, stable BUY/SELL persistence) can
+        # fire.
         opp_block = ""
         if opp_match is not None:
             rank, opp = opp_match
             drilldown = build_drilldown(
-                opp, rank, snap.opp_history.get(r.symbol)
+                opp,
+                rank,
+                snap.opp_history.get(r.symbol),
+                row=r,
             )
-            opp_block = (
-                "[bold cyan]Opportunity Intelligence[/]\n"
-                + _render_opportunity_drilldown(drilldown)
+            opp_block = "[bold cyan]Opportunity Intelligence[/]\n" + _render_opportunity_drilldown(
+                drilldown
             )
 
         # Section: AI brief. Header reflects which kind of brief this is
@@ -963,18 +935,14 @@ class DetailPanel(Static):
         brief_block = ""
         brief_label = "AI brief — OPP" if self.brief_kind == "opp" else "AI brief"
         if self.brief_state == "loading":
-            brief_block = (
-                f"[bold cyan]{brief_label}[/]\n  [dim italic]loading…[/dim italic]"
-            )
+            brief_block = f"[bold cyan]{brief_label}[/]\n  [dim italic]loading…[/dim italic]"
         elif self.brief_state == "ready":
             brief_block = (
-                f"[bold cyan]{brief_label}[/]\n  "
-                f"[italic]{rich_escape(self.brief_text)}[/italic]"
+                f"[bold cyan]{brief_label}[/]\n  [italic]{rich_escape(self.brief_text)}[/italic]"
             )
         elif self.brief_state == "error":
             brief_block = (
-                f"[bold cyan]{brief_label}[/]\n  "
-                f"[red]failed:[/] {rich_escape(self.brief_text)}"
+                f"[bold cyan]{brief_label}[/]\n  [red]failed:[/] {rich_escape(self.brief_text)}"
             )
 
         sections = [header, tagline, numbers, signals_block]
@@ -1003,10 +971,7 @@ def _format_event_line(ev: object) -> str:
     colour = {"info": "green", "warn": "yellow", "error": "red"}.get(level, "white")
     ts = timestamp.strftime("%H:%M:%S") if timestamp is not None else "?"
     suffix = f"  [dim]× {count}[/dim]" if count > 1 else ""
-    return (
-        f"[dim]{ts}[/] [{colour}]{level.upper():5}[/] "
-        f"{rich_escape(message)}{suffix}"
-    )
+    return f"[dim]{ts}[/] [{colour}]{level.upper():5}[/] {rich_escape(message)}{suffix}"
 
 
 def _render_symbol_alerts(alerts: list[Alert], *, limit: int = 4) -> str:
@@ -1126,9 +1091,7 @@ class StatusLine(Static):
             chunks.append(f"[{tier_style}]{display}[/] [bold]{sym}[/]")
 
         # Critical alert count.
-        critical = sum(
-            1 for a in snap.recent_alerts if a.severity == "critical"
-        )
+        critical = sum(1 for a in snap.recent_alerts if a.severity == "critical")
         if critical:
             chunks.append(f"[bold red]{critical} critical[/]")
 
@@ -1154,8 +1117,7 @@ class AddSymbolModal(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Container(id="add_symbol_modal"):
             yield Static(
-                "[bold]Add symbol to watchlist[/bold]\n"
-                "[dim]e.g. NVDA · Esc to cancel[/dim]"
+                "[bold]Add symbol to watchlist[/bold]\n[dim]e.g. NVDA · Esc to cancel[/dim]"
             )
             yield Input(placeholder="symbol", id="add_symbol_input")
 
@@ -1247,8 +1209,17 @@ class DashboardApp(App[None]):
             yield WatchlistHeader(id="watchlist_header")
             table: DataTable[object] = DataTable(zebra_stripes=True, cursor_type="row")
             table.add_columns(
-                "SYM", "ACTION", "CONF", "BAR", "TECH", "SENT",
-                "RSI", "MACD", "BBAND", "PRICE", "NEWS",
+                "SYM",
+                "ACTION",
+                "CONF",
+                "BAR",
+                "TECH",
+                "SENT",
+                "RSI",
+                "MACD",
+                "BBAND",
+                "PRICE",
+                "NEWS",
             )
             yield table
             yield DetailPanel(id="detail")
@@ -1316,6 +1287,7 @@ class DashboardApp(App[None]):
                 f"[bold green]+[/] watchlist: added [bold]{symbol}[/]"
             )
             # Textual's run_worker is typed as Callable[..., Never] upstream, but
+
         # accepts any coroutine at runtime — the ignore is for the upstream
         # type signature, not a runtime concern.
         self.run_worker(self._refresh_snapshot, exclusive=True)  # type: ignore[arg-type]
@@ -1339,9 +1311,7 @@ class DashboardApp(App[None]):
         )
         # Wipe brief caches keyed on this symbol so a re-add doesn't
         # show a stale brief from the prior session.
-        self._brief_cache = {
-            k: v for k, v in self._brief_cache.items() if k[0] != row.symbol
-        }
+        self._brief_cache = {k: v for k, v in self._brief_cache.items() if k[0] != row.symbol}
         self._opp_brief_cache = {
             k: v for k, v in self._opp_brief_cache.items() if k[0] != row.symbol
         }
@@ -1389,9 +1359,7 @@ class DashboardApp(App[None]):
 
         if self.opportunity_briefer is None:
             detail.brief_state = "error"
-            detail.brief_text = (
-                "ANTHROPIC_API_KEY not configured — see ALPACA_SETUP.md."
-            )
+            detail.brief_text = "ANTHROPIC_API_KEY not configured — see ALPACA_SETUP.md."
             detail.refresh()
             return
 
@@ -1429,9 +1397,7 @@ class DashboardApp(App[None]):
         assert self.opportunity_briefer is not None  # checked by caller
 
         try:
-            text = await asyncio.to_thread(
-                self.opportunity_briefer.brief, context
-            )
+            text = await asyncio.to_thread(self.opportunity_briefer.brief, context)
         except Exception as e:
             detail = self.query_one(DetailPanel)
             detail.brief_state = "error"
@@ -1493,9 +1459,7 @@ class DashboardApp(App[None]):
         detail = self.query_one(DetailPanel)
         if self.summarizer is None:
             detail.brief_state = "error"
-            detail.brief_text = (
-                "ANTHROPIC_API_KEY not configured — see ALPACA_SETUP.md."
-            )
+            detail.brief_text = "ANTHROPIC_API_KEY not configured — see ALPACA_SETUP.md."
             detail.refresh()
             return
 
@@ -1524,9 +1488,7 @@ class DashboardApp(App[None]):
         idx = max(0, min(idx, len(snap.rows) - 1))
         return snap.rows[idx]
 
-    async def _fetch_brief(
-        self, row: RecommendationRow, cache_key: tuple[str, str]
-    ) -> None:
+    async def _fetch_brief(self, row: RecommendationRow, cache_key: tuple[str, str]) -> None:
         """Compute the AI brief off the UI thread, then push to DetailPanel."""
         import asyncio
 
@@ -1565,9 +1527,7 @@ class DashboardApp(App[None]):
         try:
             snap = await self.controller.fetch_snapshot()
         except Exception as e:
-            self.query_one("#events", RichLog).write(
-                f"[red]controller error:[/] {e}"
-            )
+            self.query_one("#events", RichLog).write(f"[red]controller error:[/] {e}")
             return
         self._snapshot = snap
         self._render_table(snap)
@@ -1593,9 +1553,7 @@ class DashboardApp(App[None]):
                 if prev is not None and prev != row.action:
                     burst = True
                     break
-        self._previous_actions = {
-            r.symbol: r.action for r in snap.rows if not r.error
-        }
+        self._previous_actions = {r.symbol: r.action for r in snap.rows if not r.error}
         return burst
 
     def _maybe_schedule_burst(self, snap: DashboardSnapshot) -> None:

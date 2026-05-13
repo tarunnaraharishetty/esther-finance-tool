@@ -21,7 +21,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from src.strategy.base import SignalAction
+
 if TYPE_CHECKING:
+    from src.dashboard.state import RecommendationRow
     from src.intelligence.opportunities import RankedOpportunity
     from src.intelligence.opportunity_history import OpportunityHistory
 
@@ -38,6 +41,14 @@ _BUILDING_MOMENTUM_PERSISTENCE_FLOOR = 0.50
 _REVERSAL_CANDIDATE_FLOOR = 0.60
 _SENTIMENT_DRIVEN_SENT_FLOOR = 0.60
 _SENTIMENT_DRIVEN_TECH_CEIL = 0.40
+
+# State-phrase gates — combinations of driver/profile/row state that
+# earn a single trader-readable bullet. Each phrase describes current
+# measurable state; none imply future direction.
+_MOMENTUM_STRENGTHENING_ACCEL_FLOOR = 0.60
+_MOMENTUM_STRENGTHENING_PERSISTENCE_FLOOR = 0.50
+_SENTIMENT_BREADTH_ALIGNMENT_FLOOR = 0.60
+_SENTIMENT_BREADTH_MIN_ARTICLES = 3
 
 
 @dataclass(frozen=True)
@@ -66,6 +77,9 @@ class OpportunityDrilldown:
     applicable). ``rationale`` is taken verbatim from the source
     :class:`RankedOpportunity` — single source of truth across the
     OPP line in the header and the drilldown block in the detail panel.
+    ``state_phrases`` extends the drilldown with higher-abstraction
+    observational bullets derived from combinations of driver scores,
+    profile axes, and row state; the header doesn't render these.
     """
 
     rank: int
@@ -75,6 +89,7 @@ class OpportunityDrilldown:
     drivers: tuple[DriverBreakdown, ...]
     quality_labels: tuple[str, ...]
     rationale: tuple[str, ...]
+    state_phrases: tuple[str, ...] = ()
 
 
 _DRIVER_DEFINITIONS: tuple[tuple[str, str], ...] = (
@@ -92,15 +107,23 @@ def build_drilldown(
     opp: RankedOpportunity,
     rank: int,
     history: OpportunityHistory | None,
+    *,
+    row: RecommendationRow | None = None,
 ) -> OpportunityDrilldown:
     """Assemble the drilldown payload for one ranked opportunity.
 
     ``rank`` is 1-based — i.e. the top OPP is rank=1. ``history`` may
     be ``None`` when the symbol isn't tracked yet (e.g. first tick
     after a re-add); the renderer treats that as "no badge".
+
+    ``row`` enables action-aware state phrases — when omitted, the
+    phrases that need action direction or news count simply don't
+    fire. Callers that already have the row (the dashboard does)
+    should pass it.
     """
     drivers = _drivers_for(opp)
     quality_labels = _quality_labels(opp)
+    state_phrases = _state_phrases(opp, row)
     return OpportunityDrilldown(
         rank=rank,
         symbol=opp.symbol,
@@ -109,6 +132,7 @@ def build_drilldown(
         drivers=drivers,
         quality_labels=quality_labels,
         rationale=opp.rationale,
+        state_phrases=state_phrases,
     )
 
 
@@ -190,6 +214,57 @@ def _quality_labels(opp: RankedOpportunity) -> tuple[str, ...]:
     if opp.profile.stability == "noisy" or opp.profile.persistence == "flipping":
         labels.append("unstable / choppy")
     return tuple(labels)
+
+
+def _state_phrases(
+    opp: RankedOpportunity,
+    row: RecommendationRow | None,
+) -> tuple[str, ...]:
+    """Higher-abstraction observational phrases for the drilldown.
+
+    Each phrase fires from a numeric gate over a combination of
+    existing fields (driver scores, profile axes, row action/news
+    count). Strictly observational — phrases describe what the
+    current state *is*, never what it might do next.
+
+    The "reversal intensity elevated" language asked for in the spec
+    is already produced as a per-driver descriptor at the
+    ``reversal_strength`` line, so it isn't repeated here.
+    """
+    phrases: list[str] = []
+
+    # Momentum strengthening — confidence rising within a run that's
+    # had time to build (distinct from "momentum holding", which only
+    # requires persistence).
+    if (
+        opp.confidence_acceleration >= _MOMENTUM_STRENGTHENING_ACCEL_FLOOR
+        and opp.momentum_persistence >= _MOMENTUM_STRENGTHENING_PERSISTENCE_FLOOR
+    ):
+        phrases.append("momentum strengthening across recent ticks")
+
+    # Sentiment breadth — alignment AND multi-article support. The
+    # polarity word reflects the action direction (BUY = positive,
+    # SELL = negative); only directional rows reach this code path
+    # because rank_opportunities filters HOLD out upstream.
+    if (
+        row is not None
+        and opp.sentiment_alignment >= _SENTIMENT_BREADTH_ALIGNMENT_FLOOR
+        and row.num_news_articles >= _SENTIMENT_BREADTH_MIN_ARTICLES
+    ):
+        polarity = "positive" if row.action == SignalAction.BUY else "negative"
+        phrases.append(f"{polarity} sentiment breadth")
+
+    # Stable persistence — a settled run, with the action word inlined
+    # so the trader doesn't have to cross-reference the row.
+    if (
+        row is not None
+        and opp.profile.stability == "stable"
+        and opp.profile.persistence == "persistent"
+        and row.action in (SignalAction.BUY, SignalAction.SELL)
+    ):
+        phrases.append(f"stable {row.action.value.upper()} persistence")
+
+    return tuple(phrases)
 
 
 __all__ = ["DriverBreakdown", "OpportunityDrilldown", "build_drilldown"]
