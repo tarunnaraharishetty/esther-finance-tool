@@ -657,13 +657,22 @@ class DashboardApp(App[None]):
         controller: "BaseController",
         refresh_seconds: float = 5.0,
         summarizer: "Summarizer | None" = None,
+        burst_seconds: float = 1.5,
     ) -> None:
         super().__init__()
         self.controller = controller
         self.refresh_seconds = refresh_seconds
+        # Adaptive cadence: when a tick produces new alerts or any row's
+        # action flips, schedule a one-shot follow-up at burst_seconds
+        # instead of waiting for the next base interval. Cancelled and
+        # replaced on each refresh.
+        self.burst_seconds = burst_seconds
         self.summarizer = summarizer
         self._snapshot: DashboardSnapshot | None = None
         self._tick_handle = None
+        self._tick_burst_handle = None
+        # Per-symbol last-seen action; drives burst detection.
+        self._previous_actions: dict[str, SignalAction] = {}
         # Brief cache keyed by (symbol, action_str). Action change invalidates.
         self._brief_cache: dict[tuple[str, str], str] = {}
 
@@ -797,6 +806,46 @@ class DashboardApp(App[None]):
         self._render_panels(snap)
         self._render_alerts(snap)
         self._render_events(snap)
+        self._maybe_schedule_burst(snap)
+
+    def _should_burst(self, snap: DashboardSnapshot) -> bool:
+        """True when this tick warrants a faster follow-up.
+
+        Triggers: any fresh alert this tick OR any healthy row whose
+        action differs from the prior snapshot's recorded action.
+        Updates ``self._previous_actions`` as a side effect so the
+        next call sees the right baseline.
+        """
+        burst = bool(snap.alerts)
+        if not burst and self._previous_actions:
+            for row in snap.rows:
+                if row.error:
+                    continue
+                prev = self._previous_actions.get(row.symbol)
+                if prev is not None and prev != row.action:
+                    burst = True
+                    break
+        self._previous_actions = {
+            r.symbol: r.action for r in snap.rows if not r.error
+        }
+        return burst
+
+    def _maybe_schedule_burst(self, snap: DashboardSnapshot) -> None:
+        """Cancel any pending burst timer; if conditions are met,
+        schedule a new one-shot follow-up tick at ``burst_seconds``.
+
+        Idempotent — calling this twice within one tick replaces the
+        prior timer rather than stacking. The base ``set_interval``
+        continues running on its own schedule.
+        """
+        if self._tick_burst_handle is not None:
+            self._tick_burst_handle.stop()
+            self._tick_burst_handle = None
+        if self.paused:
+            return
+        if not self._should_burst(snap):
+            return
+        self._tick_burst_handle = self.set_timer(self.burst_seconds, self._tick)
 
     def _render_table(self, snap: DashboardSnapshot) -> None:
         table = self.query_one(DataTable)

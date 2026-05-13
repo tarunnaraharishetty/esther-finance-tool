@@ -410,6 +410,140 @@ def test_live_controller_refuses_non_paper_url(monkeypatch: pytest.MonkeyPatch) 
 # ---------------------------------------------------------------------------
 
 
+async def test_burst_fires_when_alerts_present() -> None:
+    """A snapshot with any alert should trigger burst mode so the
+    dashboard refreshes faster than the base interval."""
+    from src.dashboard.app import DashboardApp
+    from src.dashboard.state import DashboardSnapshot
+    from src.intelligence.alerts import Alert
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    fired = datetime.now(UTC)
+    snap_with_alert = DashboardSnapshot(
+        tick=1,
+        rows=[],
+        alerts=[
+            Alert(symbol="AAPL", rule="action_changed", severity="warn",
+                  message="x", fired_at=fired),
+        ],
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        assert app._should_burst(snap_with_alert) is True
+
+
+async def test_burst_fires_when_action_flips_vs_prev() -> None:
+    """A new snapshot whose row action differs from the prior snapshot's
+    recorded action should burst — that's the 'something just moved' case."""
+    from src.dashboard.app import DashboardApp
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+
+    def _row(action: SignalAction) -> RecommendationRow:
+        return RecommendationRow(
+            symbol="AAPL",
+            action=action,
+            confidence=0.5,
+            combined_score=0.5,
+            technical_score=0.5,
+            sentiment_score=0.0,
+            rsi=0.5, macd=0.5, bollinger=0.5,
+            last_price=150.0,
+            num_news_articles=0,
+            reasoning="",
+            timestamp=datetime.now(UTC),
+        )
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        # First call seeds the baseline; can't flip yet.
+        app._should_burst(DashboardSnapshot(tick=1, rows=[_row(SignalAction.HOLD)]))
+        # Second call has a different action → burst.
+        result = app._should_burst(
+            DashboardSnapshot(tick=2, rows=[_row(SignalAction.BUY)])
+        )
+        assert result is True
+
+
+async def test_burst_quiet_when_no_alerts_and_actions_stable() -> None:
+    """Stable watchlist + empty alerts → no burst."""
+    from src.dashboard.app import DashboardApp
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+
+    def _row() -> RecommendationRow:
+        return RecommendationRow(
+            symbol="AAPL",
+            action=SignalAction.HOLD,
+            confidence=0.3,
+            combined_score=0.0,
+            technical_score=0.0,
+            sentiment_score=0.0,
+            rsi=0.0, macd=0.0, bollinger=0.0,
+            last_price=150.0,
+            num_news_articles=0,
+            reasoning="",
+            timestamp=datetime.now(UTC),
+        )
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        snap1 = DashboardSnapshot(tick=1, rows=[_row()])
+        snap2 = DashboardSnapshot(tick=2, rows=[_row()])
+        # First call: no prior, no alerts → no burst.
+        assert app._should_burst(snap1) is False
+        # Second call: same action, no alerts → no burst.
+        assert app._should_burst(snap2) is False
+
+
+async def test_burst_ignores_error_rows_for_flip_detection() -> None:
+    """An error row replacing a healthy row shouldn't count as a flip —
+    a transient fetch failure isn't a market move."""
+    from src.dashboard.app import DashboardApp
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+
+    def _row(action: SignalAction, error: str | None = None) -> RecommendationRow:
+        return RecommendationRow(
+            symbol="AAPL",
+            action=action,
+            confidence=0.5,
+            combined_score=0.5,
+            technical_score=0.5,
+            sentiment_score=0.0,
+            rsi=0.5, macd=0.5, bollinger=0.5,
+            last_price=150.0,
+            num_news_articles=0,
+            reasoning="",
+            timestamp=datetime.now(UTC),
+            error=error,
+        )
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        app._should_burst(DashboardSnapshot(tick=1, rows=[_row(SignalAction.BUY)]))
+        # Error row this tick — baseline preserved, no burst.
+        result = app._should_burst(
+            DashboardSnapshot(tick=2, rows=[_row(SignalAction.HOLD, error="boom")])
+        )
+        assert result is False
+
+
 async def test_app_renders_and_responds_to_keys() -> None:
     from textual.widgets import DataTable
 
