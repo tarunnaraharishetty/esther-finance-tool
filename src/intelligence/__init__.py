@@ -43,8 +43,8 @@ from src.intelligence.opportunity_history import (
 )
 from src.intelligence.pulse import MarketPulse, compute_pulse
 from src.intelligence.pulse_history import PulseHistory, PulseHistoryTracker
-from src.intelligence.signal_profile import SignalProfile, compute_signal_profile
 from src.intelligence.recap import LLMRecapGenerator, RecapContext
+from src.intelligence.signal_profile import SignalProfile, compute_signal_profile
 from src.intelligence.summary import Summarizer, TemplateSummarizer
 from src.intelligence.tier import promote_to_tier
 from src.intelligence.watchlist import (

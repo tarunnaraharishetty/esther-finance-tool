@@ -119,8 +119,8 @@ class RecommendationEngine:
     def recommend(
         self,
         symbol: str,
-        df: "pd.DataFrame",
-        news: "list[NewsArticle] | None" = None,
+        df: pd.DataFrame,
+        news: list[NewsArticle] | None = None,
         *,
         now: datetime | None = None,
     ) -> TradingRecommendation:
@@ -168,7 +168,7 @@ class RecommendationEngine:
 
     # -- technicals --------------------------------------------------------
 
-    def _score_indicators(self, df: "pd.DataFrame") -> dict[str, float]:
+    def _score_indicators(self, df: pd.DataFrame) -> dict[str, float]:
         if df.empty or "close" not in df.columns:
             return {"rsi": 0.0, "macd": 0.0, "bollinger": 0.0}
         return {
@@ -177,7 +177,7 @@ class RecommendationEngine:
             "bollinger": self._score_bollinger(df),
         }
 
-    def _score_rsi(self, df: "pd.DataFrame") -> float:
+    def _score_rsi(self, df: pd.DataFrame) -> float:
         """Score in [-1, 1]. Oversold → bullish (+), overbought → bearish (-)."""
         series = RSI(period=self.rsi_period).compute(df).dropna()
         if series.empty:
@@ -190,7 +190,7 @@ class RecommendationEngine:
             return 0.0
         return _clip((midpoint - latest) / half_range)
 
-    def _score_macd(self, df: "pd.DataFrame") -> float:
+    def _score_macd(self, df: pd.DataFrame) -> float:
         """Use the MACD line (fast EMA - slow EMA) normalised by price.
 
         The MACD *line* tracks trend direction; positive ⇒ short-term EMA
@@ -208,7 +208,7 @@ class RecommendationEngine:
         # 2% of price worth of MACD line saturates the signal.
         return _clip(macd_line / (0.02 * price))
 
-    def _score_bollinger(self, df: "pd.DataFrame") -> float:
+    def _score_bollinger(self, df: pd.DataFrame) -> float:
         """Mean-reversion read: below lower band → bullish, above upper → bearish."""
         bands = BollingerBands().compute_full(df).dropna()
         if bands.empty:
@@ -234,7 +234,7 @@ class RecommendationEngine:
 
     # -- sentiment ---------------------------------------------------------
 
-    def _score_news(self, news: "list[NewsArticle]") -> list[float]:
+    def _score_news(self, news: list[NewsArticle]) -> list[float]:
         if not news:
             return []
         # Pick most recent articles first.

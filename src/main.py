@@ -13,14 +13,14 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import click  # noqa: E402
-from rich.console import Console  # noqa: E402
-from rich.panel import Panel  # noqa: E402
-from rich.table import Table  # noqa: E402
+import click
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
-from src import __version__  # noqa: E402
-from src.config import get_settings  # noqa: E402
-from src.utils.logging import configure_logging, get_logger  # noqa: E402
+from src import __version__
+from src.config import get_settings
+from src.utils.logging import configure_logging, get_logger
 
 console = Console()
 
@@ -147,7 +147,7 @@ def backfill(
             try:
                 bars_n, news_n = await _backfill_one(sym)
                 results.append((sym, bars_n, news_n, None))
-            except Exception as e:  # noqa: BLE001 — per-symbol surface
+            except Exception as e:
                 log.warning("backfill.error", symbol=sym, error=str(e))
                 results.append((sym, 0, 0, e))
         return results
@@ -256,7 +256,7 @@ def recommend(
                 df = market.to_dataframe(bars)
                 rec = engine.recommend(sym, df, news=news)
                 results.append((sym, rec))
-            except Exception as e:  # noqa: BLE001 — surface as a per-row error
+            except Exception as e:
                 log.warning("recommend.error", symbol=sym, error=str(e))
                 results.append((sym, e))
         return results
@@ -378,7 +378,7 @@ def summarize(symbol: str, lookback_days: int, news_hours: int, no_sentiment: bo
 
     try:
         rec, news = asyncio.run(_gather())
-    except Exception as e:  # noqa: BLE001 — top-level CLI error surface
+    except Exception as e:
         log.warning("summarize.fetch_failed", symbol=sym, error=str(e))
         console.print(f"[red]failed to fetch data for {sym}: {e}[/red]")
         raise click.exceptions.Exit(3) from None
@@ -527,7 +527,7 @@ def recap(
                         headlines=top_headlines,
                     )
                 )
-            except Exception as e:  # noqa: BLE001 — recap is best-effort per symbol
+            except Exception as e:
                 log.warning("recap.error", symbol=sym, error=str(e))
         return rows
 
@@ -841,8 +841,8 @@ def dashboard(
 def _print_banner(settings: object) -> None:
     body = (
         f"[bold]Esther[/bold] v{__version__}\n"
-        f"env: {getattr(settings, 'app_env').value}  "
-        f"paper: {'yes' if getattr(settings, 'is_paper_trading') else 'NO'}\n\n"
+        f"env: {settings.app_env.value}  "
+        f"paper: {'yes' if settings.is_paper_trading else 'NO'}\n\n"
         "Commands:\n"
         "  esther status      show effective config\n"
         "  esther doctor      diagnose Alpaca + FinBERT setup\n"

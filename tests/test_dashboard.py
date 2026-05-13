@@ -17,11 +17,12 @@ from src.dashboard.controller import (
 from src.dashboard.state import (
     DashboardSnapshot,
     EventBuffer,
+    RecommendationRow,
 )
 from src.data.models import NewsArticle
 from src.intelligence.alerts import AlertEngine
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
-from src.strategy.base import SignalAction
+from src.strategy.base import RecommendationTier, SignalAction
 from src.strategy.recommendation import RecommendationEngine
 
 # ---------------------------------------------------------------------------
@@ -374,7 +375,7 @@ def test_mock_controller_populates_opp_history_for_top_n() -> None:
         # The wiring is still exercised; we just can't assert further.
         return
     # First tick: every entry is fresh, streak = 1.
-    for sym, hist in s1.opp_history.items():
+    for hist in s1.opp_history.values():
         assert hist.streak == 1
         assert hist.appearances == 1
     # Symbols absent from top-N shouldn't leak into the dict.
@@ -1683,13 +1684,10 @@ async def test_app_s_keypress_with_mock_summarizer_loads_and_caches() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _opp_drill_row(symbol: str, *, action: SignalAction = SignalAction.BUY) -> "RecommendationRow":  # type: ignore[name-defined]
+def _opp_drill_row(symbol: str, *, action: SignalAction = SignalAction.BUY) -> RecommendationRow:
     """A row with strong, news-bearing directional signals so it ranks
     high in `rank_opportunities` — the OPP drill tests need predictable
     top-N membership."""
-    from src.dashboard.state import RecommendationRow
-    from src.strategy.base import RecommendationTier
-
     return RecommendationRow(
         symbol=symbol,
         action=action,
@@ -1708,11 +1706,8 @@ def _opp_drill_row(symbol: str, *, action: SignalAction = SignalAction.BUY) -> "
     )
 
 
-def _opp_drill_hold_row(symbol: str) -> "RecommendationRow":  # type: ignore[name-defined]
+def _opp_drill_hold_row(symbol: str) -> RecommendationRow:
     """A HOLD row — never ranks as an opportunity."""
-    from src.dashboard.state import RecommendationRow
-    from src.strategy.base import RecommendationTier
-
     return RecommendationRow(
         symbol=symbol,
         action=SignalAction.HOLD,
@@ -1957,7 +1952,7 @@ async def test_app_b_keypress_briefs_currently_selected_opp() -> None:
 
     from textual.widgets import DataTable
 
-    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.app import DashboardApp
     from src.dashboard.state import DashboardSnapshot
     from src.intelligence.opportunities import rank_opportunities
 
@@ -2112,7 +2107,7 @@ async def test_hist_line_appears_after_two_ticks() -> None:
 async def test_hist_line_includes_sparkline_chars_when_signal_present() -> None:
     """When numeric series have non-zero values, the HIST line includes
     sparkline characters from the block-element set."""
-    from src.dashboard.app import DashboardApp, WatchlistHeader, _SPARKLINE_CHARS
+    from src.dashboard.app import _SPARKLINE_CHARS, DashboardApp, WatchlistHeader
 
     app = DashboardApp(
         MockDashboardController(watchlist=["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]),

@@ -19,7 +19,7 @@ class RSI(Indicator):
     price_col: str = "close"
     name: str = "rsi"
 
-    def compute(self, df: "pd.DataFrame") -> "pd.Series":
+    def compute(self, df: pd.DataFrame) -> pd.Series:
         delta = df[self.price_col].diff()
         gain = delta.clip(lower=0.0)
         loss = -delta.clip(upper=0.0)

@@ -9,6 +9,7 @@ can both rely on them.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 from dataclasses import dataclass
@@ -349,8 +350,6 @@ def init_env_from_example(project_root: Path, *, force: bool = False) -> Path:
     dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
     # Lock down on POSIX; on Windows the OS already gates this to the user.
     if os.name != "nt":
-        try:
+        with contextlib.suppress(OSError):
             dst.chmod(0o600)
-        except OSError:
-            pass
     return dst

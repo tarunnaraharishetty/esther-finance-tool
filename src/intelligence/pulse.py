@@ -16,10 +16,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from src.strategy.base import RecommendationTier, SignalAction
+from src.strategy.base import SignalAction
 
 if TYPE_CHECKING:
-    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.dashboard.state import DashboardSnapshot
 
 
 # Thresholds — kept inline so the calibration is visible at the

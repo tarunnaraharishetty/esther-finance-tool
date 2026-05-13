@@ -19,7 +19,7 @@ class Indicator(ABC):
     name: str = "indicator"
 
     @abstractmethod
-    def compute(self, df: "pd.DataFrame") -> "pd.Series": ...
+    def compute(self, df: pd.DataFrame) -> pd.Series: ...
 
-    def __call__(self, df: "pd.DataFrame") -> "pd.Series":
+    def __call__(self, df: pd.DataFrame) -> pd.Series:
         return self.compute(df)

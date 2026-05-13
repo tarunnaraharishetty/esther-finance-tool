@@ -24,7 +24,6 @@ extra clause. If you change either, run the regression guard tests in
 
 from __future__ import annotations
 
-
 # Shared prefix: the four core grounding clauses applied to ANY LLM
 # output Esther produces. Verbatim substrings of this text are asserted
 # by the regression guards.

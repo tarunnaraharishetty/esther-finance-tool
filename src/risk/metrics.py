@@ -17,7 +17,7 @@ TRADING_DAYS_PER_YEAR = 252
 _STD_EPS = 1e-12
 
 
-def sharpe_ratio(returns: "pd.Series", risk_free_rate: float = 0.0) -> float:
+def sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0) -> float:
     """Annualised Sharpe ratio. ``returns`` are periodic (e.g. daily)."""
     excess = returns - risk_free_rate / TRADING_DAYS_PER_YEAR
     std = excess.std()
@@ -26,7 +26,7 @@ def sharpe_ratio(returns: "pd.Series", risk_free_rate: float = 0.0) -> float:
     return float(np.sqrt(TRADING_DAYS_PER_YEAR) * excess.mean() / std)
 
 
-def max_drawdown(equity_curve: "pd.Series") -> float:
+def max_drawdown(equity_curve: pd.Series) -> float:
     """Maximum peak-to-trough drawdown as a positive fraction (0.2 == 20%)."""
     running_max = equity_curve.cummax()
     drawdown = (equity_curve - running_max) / running_max

@@ -91,5 +91,5 @@ class Strategy(ABC):
     name: str = "strategy"
 
     @abstractmethod
-    def generate(self, df: "pd.DataFrame", **context: Any) -> list[Signal]:
+    def generate(self, df: pd.DataFrame, **context: Any) -> list[Signal]:
         """Return zero or more signals for the latest bar in ``df``."""

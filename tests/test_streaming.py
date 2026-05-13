@@ -8,8 +8,6 @@ exercised within the test event loop.
 
 from __future__ import annotations
 
-import asyncio
-import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -34,7 +32,6 @@ def _build_stream_mock(blocking: bool = True) -> MagicMock:
     looks realistic to the wrapper.
     """
     mock = MagicMock()
-    stop_event = asyncio.Event()
     # We can't await from sync code; use a threading event instead.
     import threading
 

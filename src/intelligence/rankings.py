@@ -98,7 +98,7 @@ def _macd_score(r: RecommendationRow) -> float:
 def _reversal_scores(
     rows: list[RecommendationRow],
     history: dict[str, SignalHistorySummary],
-) -> "list[tuple[str, float]]":
+) -> list[tuple[str, float]]:
     """A 'reversal' = the symbol's action flipped recently AND the
     direction implied by the prior episode is the opposite of the
     current.
@@ -126,7 +126,7 @@ def _reversal_scores(
 def _unusual_scores(
     rows: list[RecommendationRow],
     history: dict[str, SignalHistorySummary],
-) -> "list[tuple[str, float]]":
+) -> list[tuple[str, float]]:
     """'Unusual' = the symbol has been in its current state for a long
     time and the confidence is changing fast. The score is
     ``|confidence_delta| * tick_count`` — rewards both stickiness and
@@ -151,7 +151,7 @@ def _unusual_scores(
 def _volatility_scores(
     rows: list[RecommendationRow],
     history: dict[str, SignalHistorySummary],
-) -> "list[tuple[str, float]]":
+) -> list[tuple[str, float]]:
     """Volatility proxy = number of distinct episodes for the symbol in
     this session. More flips = more volatile.
 
@@ -186,7 +186,7 @@ def _action_direction(action: object) -> int:
 
 
 def _top_n(
-    items: "object",
+    items: object,
     *,
     n: int,
     key_abs: bool,

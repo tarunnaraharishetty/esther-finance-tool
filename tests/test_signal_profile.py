@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta
 from src.dashboard.state import RecommendationRow
 from src.intelligence.history import SignalEpisode, SignalHistorySummary
 from src.intelligence.signal_profile import (
-    SignalProfile,
     compute_signal_profile,
 )
 from src.strategy.base import RecommendationTier, SignalAction

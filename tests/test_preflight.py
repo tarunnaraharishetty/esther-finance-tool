@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
-
-import importlib.util
+from unittest.mock import MagicMock
 
 import pytest
 

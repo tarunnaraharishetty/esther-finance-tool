@@ -19,12 +19,12 @@ Layout::
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from rich.markup import escape as rich_escape
 from textual import on
 from textual.app import App, ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Container, Vertical
 from textual.reactive import reactive
 from textual.screen import ModalScreen
@@ -36,15 +36,13 @@ from src.intelligence.history import SignalEpisode, SignalHistorySummary
 from src.intelligence.opportunities import (
     Opportunity,
     RankedOpportunity,
-    detect_opportunities,
     rank_opportunities,
 )
 from src.intelligence.opportunity_history import OpportunityHistory
-from src.intelligence.pulse_history import PulseHistory
 from src.intelligence.pulse import MarketPulse, compute_pulse
-from src.intelligence.signal_profile import SignalProfile
-from src.intelligence.rankings import Rankings
+from src.intelligence.pulse_history import PulseHistory
 from src.intelligence.rankings import compute as compute_rankings
+from src.intelligence.signal_profile import SignalProfile
 from src.intelligence.watchlist import (
     action_breakdown,
     diff_snapshots,
@@ -122,7 +120,7 @@ def _format_stability_tier(stability: str) -> str:
 
 def _confidence_bar(conf: float, width: int = 10) -> str:
     """Mini ASCII bar — width chars filled proportional to conf in [0,1]."""
-    filled = max(0, min(width, int(round(conf * width))))
+    filled = max(0, min(width, round(conf * width)))
     return "█" * filled + "·" * (width - filled)
 
 
@@ -521,11 +519,11 @@ def _format_pulse(pulse: MarketPulse) -> str:
 
     # Breadth fractions — only meaningful when there's a denominator.
     if pulse.momentum_breadth > 0 or directional > 0:
-        mom_pct = int(round(pulse.momentum_breadth * 100))
+        mom_pct = round(pulse.momentum_breadth * 100)
         mom_style = _breadth_style(pulse.momentum_breadth)
         chunks.append(f"[dim]mom[/dim] [{mom_style}]{mom_pct}%[/]")
     if pulse.sentiment_breadth > 0:
-        sent_pct = int(round(pulse.sentiment_breadth * 100))
+        sent_pct = round(pulse.sentiment_breadth * 100)
         sent_style = _breadth_style(pulse.sentiment_breadth)
         chunks.append(f"[dim]sent[/dim] [{sent_style}]{sent_pct}%[/]")
 
@@ -630,7 +628,7 @@ def _format_pulse_history(history: PulseHistory) -> str:
         style = _breadth_style(mom_curr)
         chunks.append(
             f"[dim]mom[/dim] [{style}]{spark}[/] [{style}]"
-            f"{int(round(mom_curr * 100))}%[/]"
+            f"{round(mom_curr * 100)}%[/]"
         )
 
     # Sentiment breadth — fixed [0, 1] scale.
@@ -640,7 +638,7 @@ def _format_pulse_history(history: PulseHistory) -> str:
         style = _breadth_style(sent_curr)
         chunks.append(
             f"[dim]sent[/dim] [{style}]{spark}[/] [{style}]"
-            f"{int(round(sent_curr * 100))}%[/]"
+            f"{round(sent_curr * 100)}%[/]"
         )
 
     # Reversal intensity — relative scale (no natural upper bound).
@@ -995,7 +993,7 @@ class AddSymbolModal(ModalScreen[str | None]):
     duplicate / format validation — this modal just collects text.
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "cancel", "cancel", show=False),
     ]
 
@@ -1043,7 +1041,7 @@ class DashboardApp(App[None]):
     AddSymbolModal Static { margin-bottom: 1; }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("q", "quit", "quit"),
         Binding("r", "refresh_now", "refresh"),
         Binding("p", "toggle_pause", "pause/resume"),
@@ -1059,10 +1057,10 @@ class DashboardApp(App[None]):
 
     def __init__(
         self,
-        controller: "BaseController",
+        controller: BaseController,
         refresh_seconds: float = 5.0,
-        summarizer: "Summarizer | None" = None,
-        opportunity_briefer: "LLMOpportunityBriefer | None" = None,
+        summarizer: Summarizer | None = None,
+        opportunity_briefer: LLMOpportunityBriefer | None = None,
         burst_seconds: float = 1.5,
     ) -> None:
         super().__init__()
@@ -1259,7 +1257,7 @@ class DashboardApp(App[None]):
 
     async def _fetch_opp_brief(
         self,
-        context: "OpportunityBriefContext",  # noqa: F821 — quoted for forward ref
+        context: OpportunityBriefContext,  # noqa: F821 — quoted for forward ref
         cache_key: tuple[str, int],
     ) -> None:
         """Compute the OPP brief off the UI thread, then push to DetailPanel."""
@@ -1271,7 +1269,7 @@ class DashboardApp(App[None]):
             text = await asyncio.to_thread(
                 self.opportunity_briefer.brief, context
             )
-        except Exception as e:  # noqa: BLE001 — surfaced as an error state
+        except Exception as e:
             detail = self.query_one(DetailPanel)
             detail.brief_state = "error"
             detail.brief_text = str(e)
@@ -1377,7 +1375,7 @@ class DashboardApp(App[None]):
             text = await asyncio.to_thread(
                 self.summarizer.summarize, explanation, headlines=headlines
             )
-        except Exception as e:  # noqa: BLE001 — surfaced to the UI as an error state
+        except Exception as e:
             detail = self.query_one(DetailPanel)
             detail.brief_state = "error"
             detail.brief_text = str(e)
@@ -1403,7 +1401,7 @@ class DashboardApp(App[None]):
     async def _refresh_snapshot(self) -> None:
         try:
             snap = await self.controller.fetch_snapshot()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             self.query_one("#events", RichLog).write(
                 f"[red]controller error:[/] {e}"
             )

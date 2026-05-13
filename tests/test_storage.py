@@ -13,7 +13,6 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sqlalchemy.orm import Session
 
 from src.data.models import Bar, NewsArticle, TimeFrame
 from src.data.repositories import (

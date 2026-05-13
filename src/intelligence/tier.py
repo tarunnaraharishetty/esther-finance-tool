@@ -196,13 +196,12 @@ def _compute_signal_quality(
 
     # ---- Momentum strength (MACD score) ----
     macd = rec.indicator_scores.get("macd", 0.0)
-    if _is_finite(macd) and abs(macd) >= _MOMENTUM_STRONG:
-        # Only credit when momentum aligns with action.
-        if direction * macd > 0:
-            sub_scores.append(0.85)
-            reasons.append(
-                "Positive momentum" if direction > 0 else "Negative momentum"
-            )
+    # Only credit when momentum is strong AND aligns with action.
+    if _is_finite(macd) and abs(macd) >= _MOMENTUM_STRONG and direction * macd > 0:
+        sub_scores.append(0.85)
+        reasons.append(
+            "Positive momentum" if direction > 0 else "Negative momentum"
+        )
 
     if not sub_scores:
         return 0.0

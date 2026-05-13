@@ -71,7 +71,26 @@ select = [
     "ASYNC",
     "PTH",           # use pathlib
 ]
-ignore = ["E501"]    # handled by formatter
+ignore = [
+    "E501",          # line length — handled by formatter
+    # The dashboard prose deliberately uses typographic Unicode (× for
+    # counts, – / − for ranges and minus signs). Allow them in
+    # strings, docstrings, and comments rather than ASCII-flatten the
+    # output style.
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests intentionally use bare `pytest.raises(Exception)` when the only
+# guarantee they want to assert is "something blew up here" — narrowing
+# would over-couple to implementation details that are explicitly
+# free to change.
+"tests/**" = ["B017"]
+# main.py loads heavy third-party modules (anthropic, alpaca, transformers)
+# inside the per-command click handlers so that `esther --help` and
+# unrelated commands stay fast. The lazy-import pattern is deliberate
+# rather than a sign of tangled dependencies.
+"src/main.py" = ["E402"]
 
 [tool.ruff.format]
 quote-style = "double"

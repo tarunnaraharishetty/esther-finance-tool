@@ -18,10 +18,10 @@ class BollingerBands(Indicator):
     price_col: str = "close"
     name: str = "bollinger"
 
-    def compute(self, df: "pd.DataFrame") -> "pd.Series":
+    def compute(self, df: pd.DataFrame) -> pd.Series:
         return self.compute_full(df)["middle"]
 
-    def compute_full(self, df: "pd.DataFrame") -> "pd.DataFrame":
+    def compute_full(self, df: pd.DataFrame) -> pd.DataFrame:
         import pandas as pd
 
         close = df[self.price_col]
