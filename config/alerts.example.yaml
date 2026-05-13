@@ -40,3 +40,29 @@ rules:
   - type: sentiment_shift
     delta: 0.4
     severity: info
+
+# ---------------------------------------------------------------------------
+# Prioritizer — applied AFTER the rules above produce their raw firings.
+# Optional. If this block is omitted entirely, sensible defaults are used:
+#   - action_changed never debounces (a real flip is information)
+#   - confidence_threshold: 5 min cooldown to silence boundary oscillation
+#   - sentiment_shift: 10 min cooldown (sentiment moves slowly)
+#   - no composites, no per-tick cap
+# ---------------------------------------------------------------------------
+
+prioritizer:
+  cooldowns:
+    # Per-rule debounce in seconds. Same (symbol, rule) suppressed within window.
+    confidence_threshold: 300
+    sentiment_shift: 600
+
+  composites:
+    # When ALL `requires` rules fire for the same symbol in the same tick,
+    # emit ONE composite alert and suppress its constituents.
+    - name: high_conviction_reversal
+      requires: [action_changed, sentiment_shift]
+      severity: critical
+      message: "{symbol}: action flip + sentiment swing in same tick"
+
+  # Optional: cap alerts per tick after sort. Omit for no cap.
+  # max_per_tick: 10

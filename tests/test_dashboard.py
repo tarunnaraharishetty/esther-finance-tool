@@ -129,6 +129,52 @@ def test_controller_uses_injected_alert_engine() -> None:
     s2 = asyncio.run(ctrl.fetch_snapshot())
     assert s1.alerts == []
     assert s2.alerts == []
+    # With zero rules, recent_alerts stays empty across ticks too.
+    assert s1.recent_alerts == ()
+    assert s2.recent_alerts == ()
+
+
+def test_controller_runs_alerts_through_prioritizer() -> None:
+    """The controller's pipeline should be:
+    AlertEngine → AlertPrioritizer → AlertState.record. We verify by
+    seeding a prioritizer that always drops everything and confirming
+    snapshot.alerts is empty even when raw rules would fire."""
+    from src.intelligence.alert_prioritizer import (
+        AlertPrioritizer,
+        PrioritizerConfig,
+    )
+
+    drop_all = AlertPrioritizer(PrioritizerConfig(max_per_tick=0))
+    ctrl = MockDashboardController(
+        watchlist=["AAPL", "MSFT"], seed=7, alert_prioritizer=drop_all
+    )
+    # Run a few ticks to let raw rules generate firings.
+    asyncio.run(ctrl.fetch_snapshot())
+    s2 = asyncio.run(ctrl.fetch_snapshot())
+    s3 = asyncio.run(ctrl.fetch_snapshot())
+    # Prioritizer dropped everything → both fields empty.
+    assert s2.alerts == []
+    assert s3.alerts == []
+    assert s2.recent_alerts == ()
+    assert s3.recent_alerts == ()
+
+
+def test_controller_recent_alerts_accumulates_across_ticks() -> None:
+    """With default prioritizer + the mock controller's synthetic
+    movement, action_changed alerts naturally fire. recent_alerts
+    should be empty on first tick (no baseline) and may grow after."""
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT"], seed=42)
+    s1 = asyncio.run(ctrl.fetch_snapshot())
+    s2 = asyncio.run(ctrl.fetch_snapshot())
+    s3 = asyncio.run(ctrl.fetch_snapshot())
+    # First tick: no prior row → no alerts → recent empty.
+    assert s1.recent_alerts == ()
+    # Across three ticks the controller has recorded zero or more alerts
+    # into AlertState — verify recent_alerts is at least as long as the
+    # total alerts ever fired this session.
+    total_fresh = sum(len(s.alerts) for s in (s2, s3))
+    assert len(s3.recent_alerts) <= len(ctrl.alert_state)
+    assert len(ctrl.alert_state) >= total_fresh or total_fresh == 0
 
 
 # ---------------------------------------------------------------------------

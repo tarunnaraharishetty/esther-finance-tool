@@ -58,6 +58,7 @@ class DashboardSnapshot:
     rows: list[RecommendationRow]
     events: list[EventEntry] = field(default_factory=list)
     alerts: list[Alert] = field(default_factory=list)
+    recent_alerts: tuple[Alert, ...] = ()
     signal_history: dict[str, SignalHistorySummary] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 

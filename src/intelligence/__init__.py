@@ -5,6 +5,12 @@ produced by :mod:`src.strategy.recommendation` and the dashboard UI.
 Nothing here submits orders or makes autonomous decisions.
 """
 
+from src.intelligence.alert_prioritizer import (
+    AlertPrioritizer,
+    AlertState,
+    CompositeRule,
+    PrioritizerConfig,
+)
 from src.intelligence.alerts import (
     ActionChangedRule,
     Alert,
@@ -12,6 +18,7 @@ from src.intelligence.alerts import (
     ConfidenceThresholdRule,
     Rule,
     SentimentShiftRule,
+    load_prioritizer_config_from_yaml,
     load_rules_from_yaml,
 )
 from src.intelligence.explain import Contributor, Explanation, explain
@@ -30,11 +37,15 @@ __all__ = [
     "ActionChangedRule",
     "Alert",
     "AlertEngine",
+    "AlertPrioritizer",
+    "AlertState",
+    "CompositeRule",
     "ConfidenceThresholdRule",
     "Contributor",
     "Explanation",
     "LLMRecapGenerator",
     "LLMSummarizer",
+    "PrioritizerConfig",
     "RecapContext",
     "Rule",
     "SentimentShiftRule",
@@ -47,6 +58,7 @@ __all__ = [
     "action_breakdown",
     "diff_snapshots",
     "explain",
+    "load_prioritizer_config_from_yaml",
     "load_rules_from_yaml",
     "top_movers",
 ]

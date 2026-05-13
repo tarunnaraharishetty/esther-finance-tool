@@ -14,6 +14,7 @@ from src.intelligence.alerts import (
     AlertEngine,
     ConfidenceThresholdRule,
     SentimentShiftRule,
+    load_prioritizer_config_from_yaml,
     load_rules_from_yaml,
 )
 from src.strategy.base import SignalAction
@@ -232,6 +233,119 @@ def test_example_yaml_in_repo_parses() -> None:
         "ConfidenceThresholdRule",
         "SentimentShiftRule",
     }
+
+
+# ---------------------------------------------------------------------------
+# Prioritizer YAML loader
+# ---------------------------------------------------------------------------
+
+
+def test_prio_loader_returns_default_when_block_absent(tmp_path: Path) -> None:
+    """No `prioritizer:` block means the loader returns the default
+    config — so old alerts.yaml files keep working."""
+    from src.intelligence.alert_prioritizer import default_config
+
+    path = _write_yaml(
+        tmp_path,
+        """
+rules:
+  - type: action_changed
+""",
+    )
+    config = load_prioritizer_config_from_yaml(path)
+    assert config == default_config()
+
+
+def test_prio_loader_reads_cooldowns_and_composites(tmp_path: Path) -> None:
+    from src.intelligence.alert_prioritizer import CompositeRule, PrioritizerConfig
+
+    path = _write_yaml(
+        tmp_path,
+        """
+rules: []
+prioritizer:
+  cooldowns:
+    confidence_threshold: 120
+    sentiment_shift: 240
+  composites:
+    - name: combo
+      requires: [action_changed, sentiment_shift]
+      severity: critical
+      message: "{symbol}: combo"
+  max_per_tick: 5
+""",
+    )
+    config = load_prioritizer_config_from_yaml(path)
+    assert isinstance(config, PrioritizerConfig)
+    assert config.cooldowns == {"confidence_threshold": 120, "sentiment_shift": 240}
+    assert config.composites == (
+        CompositeRule(
+            name="combo",
+            requires=("action_changed", "sentiment_shift"),
+            severity="critical",
+            message="{symbol}: combo",
+        ),
+    )
+    assert config.max_per_tick == 5
+
+
+def test_prio_loader_rejects_negative_cooldown(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+prioritizer:
+  cooldowns:
+    confidence_threshold: -1
+""",
+    )
+    with pytest.raises(ValueError, match="non-negative"):
+        load_prioritizer_config_from_yaml(path)
+
+
+def test_prio_loader_rejects_bad_composite_severity(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+prioritizer:
+  composites:
+    - name: combo
+      requires: [action_changed, sentiment_shift]
+      severity: APOCALYPSE
+      message: "x"
+""",
+    )
+    with pytest.raises(ValueError, match="severity must be one of"):
+        load_prioritizer_config_from_yaml(path)
+
+
+def test_prio_loader_rejects_empty_requires(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        """
+prioritizer:
+  composites:
+    - name: combo
+      requires: []
+      severity: critical
+      message: "x"
+""",
+    )
+    with pytest.raises(ValueError, match="non-empty list"):
+        load_prioritizer_config_from_yaml(path)
+
+
+def test_prio_loader_example_yaml_in_repo_parses() -> None:
+    """The shipped example must always parse cleanly."""
+    from src.intelligence.alert_prioritizer import PrioritizerConfig
+
+    path = Path(__file__).resolve().parents[1] / "config" / "alerts.example.yaml"
+    if not path.exists():
+        pytest.skip(f"{path} not present")
+    config = load_prioritizer_config_from_yaml(path)
+    assert isinstance(config, PrioritizerConfig)
+    # The example ships at least one composite + the two documented cooldowns.
+    assert len(config.composites) >= 1
+    assert "confidence_threshold" in config.cooldowns
 
 
 # ---------------------------------------------------------------------------

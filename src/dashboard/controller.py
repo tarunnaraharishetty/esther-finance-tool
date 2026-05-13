@@ -30,6 +30,7 @@ from src.data.alpaca_client import AlpacaClient
 from src.data.market_data import MarketDataService
 from src.data.models import NewsArticle, TimeFrame
 from src.data.news_ingestion import NewsSource, get_news_source
+from src.intelligence.alert_prioritizer import AlertPrioritizer, AlertState
 from src.intelligence.alerts import AlertEngine
 from src.intelligence.history import SignalHistory, SignalHistorySummary
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
@@ -51,12 +52,16 @@ class BaseController(ABC):
         engine: RecommendationEngine,
         events: EventBuffer | None = None,
         alert_engine: AlertEngine | None = None,
+        alert_prioritizer: AlertPrioritizer | None = None,
+        alert_state: AlertState | None = None,
         signal_history: SignalHistory | None = None,
     ) -> None:
         self.watchlist = list(watchlist)
         self.engine = engine
         self.events = events or EventBuffer()
         self.alert_engine = alert_engine or AlertEngine()
+        self.alert_prioritizer = alert_prioritizer or AlertPrioritizer()
+        self.alert_state = alert_state or AlertState()
         self.signal_history = signal_history or SignalHistory()
         self._tick = 0
 
@@ -130,13 +135,18 @@ class DashboardController(BaseController):
             return_exceptions=False,
         )
         rows_list = list(rows)
-        alerts = self.alert_engine.evaluate(rows_list)
+        fresh_alerts = self.alert_engine.evaluate(rows_list)
+        alerts = self.alert_prioritizer.prioritize(
+            fresh_alerts, self.alert_state, now=now
+        )
+        self.alert_state.record(alerts)
         history = self._record_history(rows_list, now)
         return DashboardSnapshot(
             tick=self._tick,
             rows=rows_list,
             events=self.events.snapshot(),
             alerts=alerts,
+            recent_alerts=self.alert_state.recent(20),
             signal_history=history,
             timestamp=now,
         )
@@ -223,6 +233,8 @@ class MockDashboardController(BaseController):
         use_sentiment: bool = True,
         events: EventBuffer | None = None,
         alert_engine: AlertEngine | None = None,
+        alert_prioritizer: AlertPrioritizer | None = None,
+        alert_state: AlertState | None = None,
     ) -> None:
         watchlist = watchlist or ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
         rng = random.Random(seed)
@@ -233,6 +245,8 @@ class MockDashboardController(BaseController):
             engine=engine,
             events=events,
             alert_engine=alert_engine,
+            alert_prioritizer=alert_prioritizer,
+            alert_state=alert_state,
         )
         self._rng = rng
         self._np_rng = np.random.default_rng(seed)
@@ -247,13 +261,18 @@ class MockDashboardController(BaseController):
         now = datetime.now(UTC)
         self.events.info(f"mock tick {self._tick} ({len(self.watchlist)} symbols)")
         rows = [self._mock_row(sym, now) for sym in self.watchlist]
-        alerts = self.alert_engine.evaluate(rows)
+        fresh_alerts = self.alert_engine.evaluate(rows)
+        alerts = self.alert_prioritizer.prioritize(
+            fresh_alerts, self.alert_state, now=now
+        )
+        self.alert_state.record(alerts)
         history = self._record_history(rows, now)
         return DashboardSnapshot(
             tick=self._tick,
             rows=rows,
             events=self.events.snapshot(),
             alerts=alerts,
+            recent_alerts=self.alert_state.recent(20),
             signal_history=history,
             timestamp=now,
         )

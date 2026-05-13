@@ -236,3 +236,100 @@ def load_rules_from_yaml(path: Path) -> list[Rule]:
         except TypeError as e:
             raise ValueError(f"rules[{i}] ({rtype}): {e}") from e
     return out
+
+
+def load_prioritizer_config_from_yaml(path: Path) -> object:
+    """Parse an optional ``prioritizer:`` block from ``alerts.yaml``.
+
+    Returns a :class:`PrioritizerConfig` (imported lazily to avoid a
+    cycle). If the block is absent, returns the default config so the
+    dashboard wiring stays backward-compatible with old YAML files.
+
+    Schema::
+
+        prioritizer:
+          cooldowns:
+            confidence_threshold: 300
+            sentiment_shift: 600
+          composites:
+            - name: high_conviction_reversal
+              requires: [action_changed, sentiment_shift]
+              severity: critical
+              message: "{symbol}: action flip + sentiment swing"
+          max_per_tick: 10        # optional
+    """
+    from src.intelligence.alert_prioritizer import (
+        CompositeRule,
+        PrioritizerConfig,
+        default_config,
+    )
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"alerts config must be a mapping, got {type(raw).__name__}"
+        )
+    prio_raw = raw.get("prioritizer")
+    if prio_raw is None:
+        return default_config()
+    if not isinstance(prio_raw, dict):
+        raise ValueError("alerts config: 'prioritizer' must be a mapping")
+
+    # Cooldowns
+    cooldowns_raw = prio_raw.get("cooldowns", {}) or {}
+    if not isinstance(cooldowns_raw, dict):
+        raise ValueError("prioritizer.cooldowns must be a mapping")
+    cooldowns: dict[str, int] = {}
+    for rule_name, secs in cooldowns_raw.items():
+        if not isinstance(secs, int) or secs < 0:
+            raise ValueError(
+                f"prioritizer.cooldowns.{rule_name}: must be a non-negative int"
+            )
+        cooldowns[str(rule_name)] = secs
+
+    # Composites
+    composites_raw = prio_raw.get("composites", []) or []
+    if not isinstance(composites_raw, list):
+        raise ValueError("prioritizer.composites must be a list")
+    composites: list[CompositeRule] = []
+    for i, entry in enumerate(composites_raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f"prioritizer.composites[{i}] must be a mapping")
+        name = entry.get("name")
+        requires = entry.get("requires")
+        severity = entry.get("severity")
+        message = entry.get("message")
+        if not name or not isinstance(name, str):
+            raise ValueError(f"prioritizer.composites[{i}]: 'name' required (string)")
+        if not isinstance(requires, list) or not requires:
+            raise ValueError(
+                f"prioritizer.composites[{i}]: 'requires' must be a non-empty list"
+            )
+        if severity not in _VALID_SEVERITIES:
+            raise ValueError(
+                f"prioritizer.composites[{i}]: severity must be one of "
+                f"{sorted(_VALID_SEVERITIES)}, got {severity!r}"
+            )
+        if not message or not isinstance(message, str):
+            raise ValueError(
+                f"prioritizer.composites[{i}]: 'message' required (string)"
+            )
+        composites.append(
+            CompositeRule(
+                name=name,
+                requires=tuple(str(r) for r in requires),
+                severity=severity,
+                message=message,
+            )
+        )
+
+    # Optional cap
+    cap = prio_raw.get("max_per_tick")
+    if cap is not None and (not isinstance(cap, int) or cap <= 0):
+        raise ValueError("prioritizer.max_per_tick must be a positive integer or omitted")
+
+    return PrioritizerConfig(
+        cooldowns=cooldowns,
+        composites=tuple(composites),
+        max_per_tick=cap,
+    )

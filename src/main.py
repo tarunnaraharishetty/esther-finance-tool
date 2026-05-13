@@ -719,19 +719,26 @@ def dashboard(
         DashboardController,
         MockDashboardController,
     )
-    from src.intelligence.alerts import AlertEngine, load_rules_from_yaml
+    from src.intelligence.alert_prioritizer import AlertPrioritizer
+    from src.intelligence.alerts import (
+        AlertEngine,
+        load_prioritizer_config_from_yaml,
+        load_rules_from_yaml,
+    )
     from src.strategy.recommendation import RecommendationEngine
 
     settings = get_settings()
     watchlist = list(symbols) if symbols else ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
 
-    # Load user-defined alert rules from config/alerts.yaml if present;
-    # otherwise the AlertEngine uses its built-in defaults.
+    # Load user-defined alert rules + prioritizer knobs from
+    # config/alerts.yaml if present. Missing file = both default.
     alerts_path = settings.config_dir / "alerts.yaml"
     if alerts_path.exists():
         try:
             rules = load_rules_from_yaml(alerts_path)
+            prio_config = load_prioritizer_config_from_yaml(alerts_path)
             alert_engine = AlertEngine(rules=rules)
+            alert_prioritizer = AlertPrioritizer(config=prio_config)  # type: ignore[arg-type]
             console.print(
                 f"[dim]loaded {len(rules)} alert rule(s) from {alerts_path}[/dim]"
             )
@@ -740,12 +747,14 @@ def dashboard(
             raise click.exceptions.Exit(2) from None
     else:
         alert_engine = AlertEngine()
+        alert_prioritizer = AlertPrioritizer()
 
     if mock:
         controller = MockDashboardController(
             watchlist=watchlist,
             use_sentiment=not no_sentiment,
             alert_engine=alert_engine,
+            alert_prioritizer=alert_prioritizer,
         )
     else:
         if not skip_preflight:
@@ -790,6 +799,7 @@ def dashboard(
             lookback_days=lookback_days,
             news_hours=news_hours,
             alert_engine=alert_engine,
+            alert_prioritizer=alert_prioritizer,
         )
 
     # Try to build the LLM summarizer; if ANTHROPIC_API_KEY isn't set the
