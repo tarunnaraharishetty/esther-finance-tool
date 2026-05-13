@@ -25,6 +25,7 @@ from src.dashboard.state import (
     EventBuffer,
     RecommendationRow,
 )
+from src.data import cache as bar_cache
 from src.data.alpaca_client import AlpacaClient
 from src.data.market_data import MarketDataService
 from src.data.models import NewsArticle, TimeFrame
@@ -121,12 +122,15 @@ class DashboardController(BaseController):
         try:
             bars = await self.market.get_bars([symbol], self.timeframe, bars_start, now)
             df = self.market.to_dataframe(bars)
+            if not df.empty:
+                for c in ("open", "high", "low", "close"):
+                    df[c] = df[c].astype(float)
+                df["volume"] = df["volume"].astype(int)
+            # Prepend any cached history so first-launch indicators have warmup.
+            df = bar_cache.merge_with_cache(symbol, self.timeframe, df)
             if df.empty:
-                self.events.warn(f"{symbol}: no bars returned")
+                self.events.warn(f"{symbol}: no bars returned and no cache")
                 return _empty_row(symbol, now, error="no bars")
-            for c in ("open", "high", "low", "close"):
-                df[c] = df[c].astype(float)
-            df["volume"] = df["volume"].astype(int)
             news = await self.news_source.fetch([symbol], news_start, now, limit=20)
             rec = self.engine.recommend(symbol, df, news=news, now=now)
             self.events.info(

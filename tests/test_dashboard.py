@@ -184,6 +184,85 @@ def test_live_controller_handles_market_error() -> None:
     assert any(e.level == "error" for e in snap.events)
 
 
+def test_live_controller_merges_cached_bars(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory
+) -> None:
+    """If data/cache/ has bars for the symbol, the controller's df should
+    include them — verified by checking the row count exceeds what the
+    market mock returned alone."""
+    from pathlib import Path
+
+    from src.config import settings as settings_mod
+    from src.data import cache
+    from src.data.models import TimeFrame
+
+    settings_mod.get_settings.cache_clear()
+    s = settings_mod.get_settings()
+    monkeypatch.setattr(s, "data_dir", Path(str(tmp_path)), raising=False)
+
+    # Seed the cache with 50 daily bars dated well in the past.
+    cached = pd.DataFrame(
+        {
+            "open": np.linspace(100, 150, 50),
+            "high": np.linspace(101, 151, 50),
+            "low": np.linspace(99, 149, 50),
+            "close": np.linspace(100, 150, 50),
+            "volume": np.full(50, 1_000_000, dtype=int),
+        },
+        index=pd.date_range(
+            start=datetime(2026, 1, 1, tzinfo=UTC), periods=50, freq="D", tz="UTC"
+        ),
+    )
+    cache.write_bars("AAPL", TimeFrame.DAY_1, cached)
+
+    # Live mock returns just 5 fresh bars; engine should see 55 total.
+    live = pd.DataFrame(
+        {
+            "open": np.linspace(155, 160, 5),
+            "high": np.linspace(156, 161, 5),
+            "low": np.linspace(154, 159, 5),
+            "close": np.linspace(155, 160, 5),
+            "volume": np.full(5, 1_000_000, dtype=int),
+        },
+        index=pd.date_range(
+            start=datetime(2026, 3, 1, tzinfo=UTC), periods=5, freq="D", tz="UTC"
+        ),
+    )
+    captured: dict[str, int] = {}
+
+    def _capture_recommend(self: object, *args: object, **kwargs: object) -> object:
+        df = kwargs.get("df") if "df" in kwargs else (args[1] if len(args) > 1 else None)
+        if isinstance(df, pd.DataFrame):
+            captured["rows_seen_by_engine"] = len(df)
+        # Delegate to a minimal stub recommendation so the controller succeeds.
+        from datetime import datetime as _dt
+
+        from src.strategy.base import SignalAction
+        from src.strategy.recommendation import TradingRecommendation
+
+        return TradingRecommendation(
+            symbol="AAPL",
+            action=SignalAction.HOLD,
+            confidence=0.1,
+            combined_score=0.0,
+            technical_score=0.0,
+            sentiment_score=0.0,
+            indicator_scores={"rsi": 0.0, "macd": 0.0, "bollinger": 0.0},
+            reasoning="stub",
+            timestamp=_dt.now(UTC),
+            num_news_articles=0,
+        )
+
+    ctrl = _build_live_controller(df=live)
+    monkeypatch.setattr(
+        RecommendationEngine, "recommend", _capture_recommend, raising=True
+    )
+    snap = asyncio.run(ctrl.fetch_snapshot())
+    assert snap.rows[0].error is None
+    # Engine should have seen the merged dataframe: 50 cached + 5 live.
+    assert captured["rows_seen_by_engine"] == 55
+
+
 def test_live_controller_refuses_non_paper_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
     from src.config import settings as settings_mod

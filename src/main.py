@@ -71,6 +71,116 @@ def initdb() -> None:
     "--symbol",
     "symbols",
     multiple=True,
+    help="Symbol to backfill. Repeat for each ticker, e.g. -s AAPL -s MSFT. "
+    "Defaults to AAPL, MSFT, NVDA, SPY.",
+)
+@click.option("--days", default=90, show_default=True, help="OHLCV history window in days.")
+@click.option(
+    "--news-hours",
+    default=48,
+    show_default=True,
+    help="News lookback window in hours.",
+)
+@click.option(
+    "--skip-news",
+    is_flag=True,
+    help="Bars only — skip news fetch (useful on Alpaca tiers without news entitlement).",
+)
+def backfill(
+    symbols: tuple[str, ...],
+    days: int,
+    news_hours: int,
+    skip_news: bool,
+) -> None:
+    """Cache historical bars + news to ``data/cache/`` so the dashboard
+    has warm history on first tick.
+
+    Run once before ``esther dashboard`` for any symbol with sparse Alpaca
+    history. The cache is plain CSV + JSON — ``cat`` it any time to
+    inspect, ``rm -rf data/cache/`` to wipe.
+    """
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from src.data import cache
+    from src.data.market_data import MarketDataService
+    from src.data.models import TimeFrame
+    from src.data.news_ingestion import get_news_source
+
+    settings = get_settings()
+    log = get_logger("backfill")
+
+    if not settings.is_paper_trading:
+        console.print("[red]refusing to run: ALPACA_BASE_URL is not paper[/red]")
+        raise click.exceptions.Exit(1)
+
+    watchlist = [s.upper() for s in symbols] if symbols else ["AAPL", "MSFT", "NVDA", "SPY"]
+    end = datetime.now(UTC)
+    bars_start = end - timedelta(days=days)
+    news_start = end - timedelta(hours=news_hours)
+
+    market = MarketDataService()
+    news_source = None if skip_news else get_news_source()
+
+    async def _backfill_one(sym: str) -> tuple[int, int]:
+        log.info("backfill.symbol", symbol=sym)
+        bars = await market.get_bars([sym], TimeFrame.DAY_1, bars_start, end)
+        df = market.to_dataframe(bars)
+        bars_written = 0
+        if not df.empty:
+            for col in ("open", "high", "low", "close"):
+                df[col] = df[col].astype(float)
+            df["volume"] = df["volume"].astype(int)
+            cache.write_bars(sym, TimeFrame.DAY_1, df)
+            bars_written = len(df)
+
+        news_written = 0
+        if news_source is not None:
+            articles = await news_source.fetch([sym], news_start, end, limit=50)
+            cache.write_news(sym, articles)
+            news_written = len(articles)
+        return bars_written, news_written
+
+    async def _gather() -> list[tuple[str, int, int, Exception | None]]:
+        results: list[tuple[str, int, int, Exception | None]] = []
+        for sym in watchlist:
+            try:
+                bars_n, news_n = await _backfill_one(sym)
+                results.append((sym, bars_n, news_n, None))
+            except Exception as e:  # noqa: BLE001 — per-symbol surface
+                log.warning("backfill.error", symbol=sym, error=str(e))
+                results.append((sym, 0, 0, e))
+        return results
+
+    rows = asyncio.run(_gather())
+
+    table = Table(
+        title=f"Backfill ({days}d bars / {news_hours}h news -> data/cache/)",
+        header_style="bold cyan",
+    )
+    table.add_column("symbol")
+    table.add_column("bars", justify="right")
+    table.add_column("news", justify="right")
+    table.add_column("status")
+    for sym, bars_n, news_n, err in rows:
+        if err is not None:
+            table.add_row(sym, "-", "-", f"[red]error: {err}[/red]")
+        else:
+            table.add_row(
+                sym,
+                str(bars_n),
+                "-" if skip_news else str(news_n),
+                "[green]ok[/green]",
+            )
+    console.print(table)
+
+
+@cli.command()
+@click.option(
+    "-s",
+    "--symbol",
+    "symbols",
+    multiple=True,
     help="Symbol to evaluate. Repeat for multiple, e.g. -s AAPL -s MSFT. "
     "Defaults to AAPL, MSFT, NVDA, SPY.",
 )
@@ -566,6 +676,7 @@ def _print_banner(settings: object) -> None:
         "  esther status      show effective config\n"
         "  esther doctor      diagnose Alpaca + FinBERT setup\n"
         "  esther initdb      create database tables\n"
+        "  esther backfill    cache historical bars + news to data/cache/\n"
         "  esther recommend   show BUY/HOLD/SELL for a watchlist\n"
         "  esther summarize   AI-written brief for one symbol (needs ANTHROPIC_API_KEY)\n"
         "  esther dashboard   live Textual dashboard (use --mock for demo)\n"
