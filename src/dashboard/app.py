@@ -630,6 +630,64 @@ def _explain_row(r: RecommendationRow) -> Explanation:
     )
 
 
+class StatusLine(Static):
+    """One-line dense status anchored just above the footer.
+
+    Always-visible at-a-glance state: sentiment chip · top STRONG
+    symbol (if any) · critical alert count · tick + UTC time.
+    Stateless — renders directly from the snapshot reactive.
+    """
+
+    snapshot: reactive[DashboardSnapshot | None] = reactive(None)
+
+    def render(self) -> str:
+        snap = self.snapshot
+        if snap is None or not snap.rows:
+            return "[dim]status: idle[/dim]"
+        pulse = compute_pulse(snap)
+
+        chunks: list[str] = []
+
+        # Sentiment chip (color-coded by tier).
+        if not pulse.is_empty:
+            sent_style = {
+                "bullish": "bold green",
+                "bearish": "bold red",
+                "mixed": "bold yellow",
+                "neutral": "dim",
+            }.get(pulse.sentiment, "white")
+            chunks.append(f"[{sent_style}]{pulse.sentiment}[/]")
+
+        # Top STRONG tier symbol (if any). High-conviction signals
+        # deserve always-visible real estate.
+        strong = next(
+            (r for r in snap.rows if not r.error and r.tier.is_strong),
+            None,
+        )
+        if strong is not None:
+            tier_style = (
+                "bold green"
+                if strong.tier == RecommendationTier.STRONG_BUY
+                else "bold red"
+            )
+            chunks.append(
+                f"[{tier_style}]{strong.tier.display}[/] [bold]{strong.symbol}[/]"
+            )
+
+        # Critical alert count.
+        critical = sum(
+            1 for a in snap.recent_alerts if a.severity == "critical"
+        )
+        if critical:
+            chunks.append(f"[bold red]{critical} critical[/]")
+
+        # Tick + clock.
+        clock = snap.timestamp.strftime("%H:%M:%S")
+        chunks.append(f"[dim]tick {snap.tick} · {clock} UTC[/dim]")
+
+        return "  ·  ".join(chunks)
+
+
 class DashboardApp(App[None]):
     """Esther terminal dashboard — observational, no order submission."""
 
@@ -639,6 +697,7 @@ class DashboardApp(App[None]):
     #detail { height: auto; padding: 0 1 1 1; border-top: solid $primary 30%; }
     #alerts { height: 6; border-top: solid $warning 50%; }
     #events { height: 10; border-top: solid $primary 30%; }
+    #status { height: 1; padding: 0 1; background: $primary 8%; }
     DataTable { height: 1fr; }
     """
 
@@ -691,6 +750,7 @@ class DashboardApp(App[None]):
             yield DetailPanel(id="detail")
             yield RichLog(id="alerts", highlight=False, markup=True, wrap=False)
             yield RichLog(id="events", highlight=True, markup=True, wrap=False)
+            yield StatusLine(id="status")
         yield Footer()
 
     # -- lifecycle --------------------------------------------------------
@@ -871,6 +931,9 @@ class DashboardApp(App[None]):
     def _render_panels(self, snap: DashboardSnapshot) -> None:
         header = self.query_one(WatchlistHeader)
         header.snapshot = snap
+
+        status = self.query_one(StatusLine)
+        status.snapshot = snap
 
         detail = self.query_one(DetailPanel)
         detail.snapshot = snap

@@ -463,6 +463,7 @@ async def test_burst_fires_when_action_flips_vs_prev() -> None:
 
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
+        app._previous_actions = {}  # clear mock-controller's seeded baseline
         # First call seeds the baseline; can't flip yet.
         app._should_burst(DashboardSnapshot(tick=1, rows=[_row(SignalAction.HOLD)]))
         # Second call has a different action → burst.
@@ -499,6 +500,10 @@ async def test_burst_quiet_when_no_alerts_and_actions_stable() -> None:
 
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
+        # The mock controller's on_mount refresh seeded _previous_actions
+        # with whatever AAPL's initial mock action was; clear it so the
+        # test starts from a known no-prior state.
+        app._previous_actions = {}
         snap1 = DashboardSnapshot(tick=1, rows=[_row()])
         snap2 = DashboardSnapshot(tick=2, rows=[_row()])
         # First call: no prior, no alerts → no burst.
@@ -536,12 +541,127 @@ async def test_burst_ignores_error_rows_for_flip_detection() -> None:
 
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
+        app._previous_actions = {}  # clear mock-controller's seeded baseline
         app._should_burst(DashboardSnapshot(tick=1, rows=[_row(SignalAction.BUY)]))
         # Error row this tick — baseline preserved, no burst.
         result = app._should_burst(
             DashboardSnapshot(tick=2, rows=[_row(SignalAction.HOLD, error="boom")])
         )
         assert result is False
+
+
+async def test_status_line_idle_when_no_rows() -> None:
+    """Empty snapshot → status reads 'idle'."""
+    from src.dashboard.app import DashboardApp, StatusLine
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        status = app.query_one(StatusLine)
+        status.snapshot = None
+        assert "idle" in status.render().lower()
+
+
+async def test_status_line_shows_sentiment_and_tick() -> None:
+    """Healthy snapshot → status includes a sentiment chip + tick #."""
+    from src.dashboard.app import DashboardApp, StatusLine
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT", "NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        status = app.query_one(StatusLine)
+        text = status.render()
+        # One of the four sentiment tiers must appear.
+        assert any(s in text for s in ("bullish", "bearish", "mixed", "neutral"))
+        assert "tick" in text
+
+
+async def test_status_line_surfaces_strong_tier_symbol() -> None:
+    """A row promoted to STRONG_BUY/STRONG_SELL gets surfaced by symbol
+    in the status line — high-conviction signals deserve always-visible
+    real estate."""
+    from src.dashboard.app import DashboardApp, StatusLine
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.strategy.base import RecommendationTier
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="NVDA",
+        action=SignalAction.BUY,
+        confidence=0.78,
+        combined_score=0.7,
+        technical_score=0.6,
+        sentiment_score=0.5,
+        rsi=0.5, macd=0.6, bollinger=0.4,
+        last_price=520.0,
+        num_news_articles=8,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.STRONG_BUY,
+        signal_quality="high",
+        stability="stable",
+    )
+    snap = DashboardSnapshot(tick=42, rows=[row])
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        status = app.query_one(StatusLine)
+        status.snapshot = snap
+        text = status.render()
+        assert "STRONG BUY" in text
+        assert "NVDA" in text
+
+
+async def test_status_line_shows_critical_alert_count() -> None:
+    """Critical alerts in recent_alerts surface as a dedicated chunk."""
+    from src.dashboard.app import DashboardApp, StatusLine
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.intelligence.alerts import Alert
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.3,
+        combined_score=0.1,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0, macd=0.0, bollinger=0.0,
+        last_price=150.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    alerts = (
+        Alert(symbol="AAPL", rule="tier_changed", severity="critical",
+              message="x", fired_at=fired),
+        Alert(symbol="MSFT", rule="action_changed", severity="critical",
+              message="x", fired_at=fired),
+        Alert(symbol="NVDA", rule="confidence_threshold", severity="info",
+              message="x", fired_at=fired),
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row], recent_alerts=alerts)
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        status = app.query_one(StatusLine)
+        status.snapshot = snap
+        text = status.render()
+        assert "2 critical" in text
 
 
 async def test_app_renders_and_responds_to_keys() -> None:
