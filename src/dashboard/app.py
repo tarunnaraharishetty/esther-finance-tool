@@ -96,14 +96,24 @@ class WatchlistHeader(Static):
     def __init__(self, **kwargs: object) -> None:
         super().__init__(**kwargs)  # type: ignore[arg-type]
         self._prev_snapshot: DashboardSnapshot | None = None
+        self._last_signature: tuple | None = None
 
     def watch_snapshot(self, _old: object, new: object) -> None:
         """When a new snapshot arrives, render against the previous one,
-        then promote the new one to prev for the next refresh."""
+        then promote the new one to prev for the next refresh.
+
+        Skips ``self.refresh()`` when the rendered content would be
+        identical to the last frame — sidesteps a Rich-markup parse and
+        a Textual redraw cycle when rankings + alerts + diff are
+        stable.
+        """
         if new is None:
             return
-        self.refresh()  # trigger render
-        # Promote *after* render so the next tick diffs against this frame.
+        signature = _header_signature(new, self._prev_snapshot)  # type: ignore[arg-type]
+        if signature != self._last_signature:
+            self.refresh()
+            self._last_signature = signature
+        # Promote *after* signature check so the diff line keeps working.
         self._prev_snapshot = new  # type: ignore[assignment]
 
     def render(self) -> str:
@@ -165,6 +175,90 @@ def _section_label(text: str) -> str:
     return f"[bold dim]{text:<11}[/]"
 
 
+def _detail_signature(
+    row: RecommendationRow,
+    snap: DashboardSnapshot,
+    brief_state: str,
+    brief_text: str,
+) -> tuple:
+    """Stable signature of what DetailPanel.render() would produce.
+
+    Captures every input the render path reads. Rounded floats so
+    pandas-level float jitter doesn't bust the cache.
+    """
+    history = (snap.signal_history or {}).get(row.symbol)
+    hist_sig: tuple = ()
+    if history is not None:
+        hist_sig = (
+            history.current.action.value,
+            history.current.tick_count,
+            round(history.current.confidence_first, 3),
+            round(history.current.confidence_last, 3),
+            tuple(
+                (ep.action.value, ep.tick_count) for ep in history.recent
+            ),
+        )
+    # Per-symbol alert count signature.
+    symbol_alerts_sig = tuple(
+        (a.fired_at.isoformat(), a.severity, a.rule, a.message)
+        for a in snap.recent_alerts
+        if a.symbol == row.symbol
+    )
+    return (
+        row.symbol,
+        row.action.value,
+        round(row.confidence, 3),
+        round(row.combined_score, 3),
+        round(row.technical_score, 3),
+        round(row.sentiment_score, 3),
+        round(row.rsi if row.rsi == row.rsi else 0.0, 3),
+        round(row.macd if row.macd == row.macd else 0.0, 3),
+        round(row.bollinger if row.bollinger == row.bollinger else 0.0, 3),
+        round(row.last_price if row.last_price == row.last_price else 0.0, 2),
+        row.num_news_articles,
+        row.error,
+        hist_sig,
+        symbol_alerts_sig,
+        brief_state,
+        brief_text,
+    )
+
+
+def _header_signature(
+    snap: DashboardSnapshot,
+    prev_snap: DashboardSnapshot | None,
+) -> tuple:
+    """Stable signature of what the WatchlistHeader would render.
+
+    Two snapshots that produce the same signature would render byte-
+    identically, so we can short-circuit the redraw.
+    """
+    # Per-row identity for action mix + diff input.
+    rows_sig = tuple(
+        (r.symbol, r.action.value, round(r.confidence, 3), r.error)
+        for r in snap.rows
+    )
+    prev_sig = (
+        tuple(r.symbol + r.action.value for r in prev_snap.rows)
+        if prev_snap is not None
+        else None
+    )
+    # Recent-alerts count by severity drives the ALERTS line.
+    from src.intelligence.alerts import Alert
+
+    severity_counts: dict[str, int] = {"critical": 0, "warn": 0, "info": 0}
+    for a in snap.recent_alerts:
+        if isinstance(a, Alert):
+            severity_counts[a.severity] = severity_counts.get(a.severity, 0) + 1
+    # Round indicator scores so float noise doesn't bust the cache.
+    indicators_sig = tuple(
+        (r.symbol, round(r.macd if r.macd == r.macd else 0.0, 3),
+         round(r.sentiment_score, 3), r.num_news_articles)
+        for r in snap.rows
+    )
+    return (rows_sig, prev_sig, tuple(sorted(severity_counts.items())), indicators_sig)
+
+
 def _format_alert_counts(alerts: tuple[object, ...]) -> str:
     """Compact severity summary for the watchlist header alerts line.
 
@@ -222,12 +316,25 @@ class DetailPanel(Static):
     brief_state: reactive[str] = reactive("idle")  # idle | loading | ready | error
     brief_text: reactive[str] = reactive("")
 
+    # In-render cache: when the input signature matches the last frame,
+    # short-circuit and return the cached string. Saves a full Rich
+    # markup build (header / metrics / signals / history / alerts /
+    # brief) on every tick where the selected row hasn't changed.
+    _last_signature: tuple | None = None
+    _last_rendered: str = ""
+
     def render(self) -> str:
         snap = self.snapshot
         if snap is None or not snap.rows:
             return "[dim]select a row for details[/dim]"
         idx = max(0, min(self.row_index, len(snap.rows) - 1))
         r = snap.rows[idx]
+
+        signature = _detail_signature(
+            r, snap, self.brief_state, self.brief_text
+        )
+        if signature == self._last_signature:
+            return self._last_rendered
         if r.error:
             return f"[bold cyan]{r.symbol}[/]  [red]error:[/]  {rich_escape(r.error)}"
 
@@ -306,7 +413,10 @@ class DetailPanel(Static):
             sections.append(alerts_block)
         if brief_block:
             sections.append(brief_block)
-        return "\n".join(sections)
+        rendered = "\n".join(sections)
+        self._last_signature = signature
+        self._last_rendered = rendered
+        return rendered
 
 
 def _format_event_line(ev: object) -> str:

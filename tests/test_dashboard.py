@@ -456,6 +456,141 @@ async def test_app_watchlist_header_renders() -> None:
         assert "first frame" in text or "no changes" in text
 
 
+def test_header_signature_is_deterministic_for_identical_inputs() -> None:
+    """Pure-function helper: same inputs → same signature, so the
+    watch_snapshot guard can short-circuit identical renders."""
+    from src.dashboard.app import _header_signature
+    from src.dashboard.state import DashboardSnapshot
+
+    snap = DashboardSnapshot(tick=5, rows=[])
+    prev = DashboardSnapshot(tick=4, rows=[])
+    assert _header_signature(snap, prev) == _header_signature(snap, prev)
+
+
+def test_header_signature_changes_with_action_mix() -> None:
+    """A different row action under cursor must produce a new
+    signature — the watch guard otherwise wouldn't refresh."""
+    from datetime import datetime
+
+    from src.dashboard.app import _header_signature
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    def _row(action: SignalAction) -> RecommendationRow:
+        return RecommendationRow(
+            symbol="AAPL",
+            action=action,
+            confidence=0.5,
+            combined_score=0.5,
+            technical_score=0.5,
+            sentiment_score=0.0,
+            rsi=0.5,
+            macd=0.5,
+            bollinger=0.5,
+            last_price=150.0,
+            num_news_articles=0,
+            reasoning="",
+            timestamp=datetime.now(UTC),
+        )
+
+    snap_buy = DashboardSnapshot(tick=1, rows=[_row(SignalAction.BUY)])
+    snap_sell = DashboardSnapshot(tick=1, rows=[_row(SignalAction.SELL)])
+    assert _header_signature(snap_buy, None) != _header_signature(snap_sell, None)
+
+
+async def test_detail_panel_short_circuits_on_identical_inputs() -> None:
+    """When the selected row's data + brief state are unchanged across
+    renders, the second render must return the cached string by
+    reference (no recomputation)."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.BUY,
+        confidence=0.5,
+        combined_score=0.5,
+        technical_score=0.5,
+        sentiment_score=0.0,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
+        last_price=150.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        detail.row_index = 0
+        first = detail.render()
+        # Hand the same data again — should hit the cache.
+        second = detail.render()
+        assert first == second
+        # The cache hit returns the exact same string object by identity.
+        assert first is detail._last_rendered
+
+
+async def test_detail_panel_invalidates_cache_when_row_changes() -> None:
+    """Cache must invalidate when meaningful row data changes."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+
+    def _make_row(action: SignalAction, conf: float) -> RecommendationRow:
+        return RecommendationRow(
+            symbol="AAPL",
+            action=action,
+            confidence=conf,
+            combined_score=conf,
+            technical_score=conf,
+            sentiment_score=0.0,
+            rsi=0.5,
+            macd=0.5,
+            bollinger=0.5,
+            last_price=150.0,
+            num_news_articles=0,
+            reasoning="",
+            timestamp=fired,
+        )
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = DashboardSnapshot(
+            tick=1, rows=[_make_row(SignalAction.BUY, 0.5)]
+        )
+        detail.row_index = 0
+        first = detail.render()
+        sig_one = detail._last_signature
+
+        # Same inputs again — cached.
+        detail.render()
+        assert detail._last_signature == sig_one
+
+        # Now flip the action — cache must invalidate.
+        detail.snapshot = DashboardSnapshot(
+            tick=2, rows=[_make_row(SignalAction.SELL, 0.5)]
+        )
+        second = detail.render()
+        assert detail._last_signature != sig_one
+        assert "SELL" in second
+        assert "BUY" not in second or first != second
+
+
 async def test_watchlist_header_renders_alerts_summary_when_present() -> None:
     """When recent_alerts is non-empty, the header should show an
     ALERTS line with severity counts."""
