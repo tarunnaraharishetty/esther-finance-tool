@@ -16,8 +16,8 @@ import pytest
 
 from src.data.alpaca_client import AlpacaClient
 from src.data.market_data import MarketDataService
-from src.data.models import TimeFrame
-from src.data.news_ingestion import AlpacaNewsSource
+from src.data.models import NewsArticle, TimeFrame
+from src.data.news_ingestion import AlpacaNewsSource, dedup_articles
 
 
 def _stub_client(monkeypatch: pytest.MonkeyPatch, **subclients: object) -> AlpacaClient:
@@ -161,3 +161,106 @@ async def test_news_fetch_empty_response(monkeypatch: pytest.MonkeyPatch) -> Non
         end=datetime.now(UTC),
     )
     assert articles == []
+
+
+@pytest.mark.asyncio
+async def test_news_fetch_dedupes_duplicate_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Alpaca SDK can return the same article id more than once when
+    its internal pagination crosses an updated index. AlpacaNewsSource
+    must drop duplicates before returning so FinBERT doesn't score the
+    same headline twice downstream."""
+    now = datetime.now(UTC)
+
+    def _raw(article_id: int, headline: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=article_id,
+            headline=headline,
+            summary="",
+            author="reporter",
+            url="https://example.com",
+            source="benzinga",
+            symbols=["AAPL"],
+            created_at=now,
+            updated_at=None,
+        )
+
+    response = SimpleNamespace(
+        news=[
+            _raw(1, "AAPL beats earnings"),
+            _raw(2, "AAPL guidance raised"),
+            _raw(1, "AAPL beats earnings"),  # duplicate of #1
+            _raw(3, "AAPL supplier deal announced"),
+            _raw(2, "AAPL guidance raised"),  # duplicate of #2
+        ]
+    )
+    news_mock = MagicMock()
+    news_mock.get_news.return_value = response
+    client = _stub_client(monkeypatch, news=news_mock)
+
+    src = AlpacaNewsSource(client=client)
+    articles = await src.fetch(
+        symbols=["AAPL"],
+        start=now - timedelta(days=1),
+        end=now,
+    )
+    # Three unique ids, in first-seen order.
+    assert [a.id for a in articles] == ["1", "2", "3"]
+
+
+# ---------------------------------------------------------------------------
+# dedup_articles helper
+# ---------------------------------------------------------------------------
+
+
+def _article(article_id: str, headline: str = "headline") -> NewsArticle:
+    return NewsArticle(
+        id=article_id,
+        headline=headline,
+        source="test",
+        symbols=["AAPL"],
+        published_at=datetime.now(UTC),
+    )
+
+
+def test_dedup_articles_preserves_first_occurrence_order() -> None:
+    """Stable: first-seen wins, later duplicates dropped. Order of unique
+    articles matches the original sequence."""
+    articles = [
+        _article("1"),
+        _article("2"),
+        _article("1"),  # dup
+        _article("3"),
+        _article("2"),  # dup
+    ]
+    out = dedup_articles(articles)
+    assert [a.id for a in out] == ["1", "2", "3"]
+
+
+def test_dedup_articles_handles_empty_input() -> None:
+    assert dedup_articles([]) == []
+
+
+def test_dedup_articles_leaves_id_unset_articles_alone() -> None:
+    """Articles with falsy ids can't be deduplicated meaningfully —
+    each stays in the result rather than being silently dropped."""
+    articles = [
+        _article(""),
+        _article(""),
+        _article("1"),
+    ]
+    out = dedup_articles(articles)
+    # Both empty-id articles preserved; "1" appears once.
+    assert len(out) == 3
+    assert sum(1 for a in out if a.id == "") == 2
+    assert sum(1 for a in out if a.id == "1") == 1
+
+
+def test_dedup_articles_keeps_first_seen_instance_not_last() -> None:
+    """When two articles share an id but differ in other fields (e.g.,
+    a later updated_at), dedup keeps the FIRST seen — callers wanting
+    the freshest must order their input accordingly."""
+    first = _article("42", headline="initial headline")
+    second = _article("42", headline="updated headline")
+    out = dedup_articles([first, second])
+    assert len(out) == 1
+    assert out[0].headline == "initial headline"

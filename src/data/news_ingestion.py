@@ -55,7 +55,38 @@ class AlpacaNewsSource(NewsSource):
         )
         result = await asyncio.to_thread(self.client.news.get_news, request)
         raw_news = getattr(result, "news", None) or getattr(result, "data", []) or []
-        return [_article_from_alpaca(n) for n in raw_news]
+        articles = [_article_from_alpaca(n) for n in raw_news]
+        # Defensive in-memory dedup: the Alpaca SDK occasionally surfaces
+        # the same article id more than once when its internal pagination
+        # spans an updated index, and we don't want FinBERT scoring the
+        # same headline twice on the consumer side.
+        return dedup_articles(articles)
+
+
+def dedup_articles(articles: list[NewsArticle]) -> list[NewsArticle]:
+    """Drop articles whose id was already seen, preserving first occurrence.
+
+    Useful both inside a single :class:`NewsSource.fetch` (defensive
+    against provider-side pagination quirks) and across multiple
+    fetches (e.g., callers that combine results across symbol batches
+    and want to avoid double-scoring with FinBERT).
+
+    Order-preserving: the first article seen for a given id is kept;
+    later duplicates are dropped. Articles with falsy ids are left in
+    place since they can't be deduplicated meaningfully.
+    """
+    seen: dict[str, NewsArticle] = {}
+    out: list[NewsArticle] = []
+    for article in articles:
+        article_id = article.id
+        if not article_id:
+            out.append(article)
+            continue
+        if article_id in seen:
+            continue
+        seen[article_id] = article
+        out.append(article)
+    return out
 
 
 def get_news_source() -> NewsSource:
