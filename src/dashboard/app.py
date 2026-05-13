@@ -338,7 +338,11 @@ def _format_opportunity(opp: Opportunity) -> str:
 
 
 def _format_pulse(pulse: MarketPulse) -> str:
-    """One dense line: sentiment · conviction · activity (tier-colored)."""
+    """One dense line surfacing every pulse dimension.
+
+    Chunks (· separated, omitted when not applicable):
+      sentiment B/N  ·  conv  ·  mom %%  ·  sent %%  ·  vol  ·  ↻ revs  ·  ! alerts  ·  STRONG symbols
+    """
     sentiment_style = {
         "bullish": "bold green",
         "bearish": "bold red",
@@ -355,13 +359,68 @@ def _format_pulse(pulse: MarketPulse) -> str:
         "active": "yellow",
         "calm": "dim",
     }.get(pulse.activity, "white")
-    return (
-        f"[{sentiment_style}]{pulse.sentiment}[/]  "
-        f"[dim]·[/]  "
-        f"[{conviction_style}]{pulse.conviction}[/] conviction  "
-        f"[dim]·[/]  "
-        f"[{activity_style}]{pulse.activity}[/]"
-    )
+
+    chunks: list[str] = []
+
+    # Sentiment chip with the bullish/bearish count proportion.
+    directional = pulse.bullish_count + pulse.bearish_count
+    if directional > 0 and pulse.healthy_count > 0:
+        if pulse.sentiment == "bullish":
+            chip = f"[{sentiment_style}]{pulse.sentiment}[/] [dim]{pulse.bullish_count}/{pulse.healthy_count}[/dim]"
+        elif pulse.sentiment == "bearish":
+            chip = f"[{sentiment_style}]{pulse.sentiment}[/] [dim]{pulse.bearish_count}/{pulse.healthy_count}[/dim]"
+        else:
+            chip = f"[{sentiment_style}]{pulse.sentiment}[/] [dim]{pulse.bullish_count}b/{pulse.bearish_count}s[/dim]"
+    else:
+        chip = f"[{sentiment_style}]{pulse.sentiment}[/]"
+    chunks.append(chip)
+
+    # Conviction tier (always present).
+    chunks.append(f"[{conviction_style}]{pulse.conviction}[/] conv")
+
+    # Breadth fractions — only meaningful when there's a denominator.
+    if pulse.momentum_breadth > 0 or directional > 0:
+        mom_pct = int(round(pulse.momentum_breadth * 100))
+        mom_style = _breadth_style(pulse.momentum_breadth)
+        chunks.append(f"[dim]mom[/dim] [{mom_style}]{mom_pct}%[/]")
+    if pulse.sentiment_breadth > 0:
+        sent_pct = int(round(pulse.sentiment_breadth * 100))
+        sent_style = _breadth_style(pulse.sentiment_breadth)
+        chunks.append(f"[dim]sent[/dim] [{sent_style}]{sent_pct}%[/]")
+
+    # Volatility regime (always present — it's information even when calm).
+    chunks.append(f"[{activity_style}]{pulse.activity}[/]")
+
+    # Reversal intensity — surface only when non-zero (calm sessions stay tight).
+    if pulse.reversal_intensity > 0:
+        chunks.append(
+            f"[dim]revs[/dim] [yellow]{pulse.reversal_intensity}[/yellow]"
+        )
+
+    # Alert intensity — only when non-zero.
+    if pulse.alert_intensity > 0:
+        chunks.append(
+            f"[dim]alerts[/dim] [bold red]{pulse.alert_intensity}[/]"
+        )
+
+    # Strongest symbols — small inline list. Omitted entirely when none.
+    if pulse.strongest_symbols:
+        strong_chunks = [
+            f"[bold]{sym}[/] [dim]{display}[/dim]"
+            for sym, display in pulse.strongest_symbols
+        ]
+        chunks.append("STRONG " + " ".join(strong_chunks))
+
+    return "  [dim]·[/]  ".join(chunks)
+
+
+def _breadth_style(fraction: float) -> str:
+    """Color a breadth fraction by tier — high agreement gets bolder."""
+    if fraction >= 0.80:
+        return "bold green"
+    if fraction >= 0.50:
+        return "yellow"
+    return "dim"
 
 
 def _format_alert_counts(alerts: tuple[object, ...]) -> str:
@@ -658,21 +717,13 @@ class StatusLine(Static):
             }.get(pulse.sentiment, "white")
             chunks.append(f"[{sent_style}]{pulse.sentiment}[/]")
 
-        # Top STRONG tier symbol (if any). High-conviction signals
-        # deserve always-visible real estate.
-        strong = next(
-            (r for r in snap.rows if not r.error and r.tier.is_strong),
-            None,
-        )
-        if strong is not None:
-            tier_style = (
-                "bold green"
-                if strong.tier == RecommendationTier.STRONG_BUY
-                else "bold red"
-            )
-            chunks.append(
-                f"[{tier_style}]{strong.tier.display}[/] [bold]{strong.symbol}[/]"
-            )
+        # Top STRONG-tier symbol from the pulse's curated list. The pulse
+        # already ranks STRONG symbols by confidence and caps the list —
+        # the status line just picks the head.
+        if pulse.strongest_symbols:
+            sym, display = pulse.strongest_symbols[0]
+            tier_style = "bold green" if "BUY" in display else "bold red"
+            chunks.append(f"[{tier_style}]{display}[/] [bold]{sym}[/]")
 
         # Critical alert count.
         critical = sum(

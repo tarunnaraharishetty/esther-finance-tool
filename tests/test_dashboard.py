@@ -550,6 +550,159 @@ async def test_burst_ignores_error_rows_for_flip_detection() -> None:
         assert result is False
 
 
+async def test_pulse_line_surfaces_breadth_when_directional() -> None:
+    """When the watchlist has BUY rows with aligned MACD, momentum-breadth
+    should appear as a percentage chunk in the PULSE line."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+
+    def _aligned_buy(symbol: str) -> RecommendationRow:
+        return RecommendationRow(
+            symbol=symbol,
+            action=SignalAction.BUY,
+            confidence=0.5,
+            combined_score=0.5,
+            technical_score=0.5,
+            sentiment_score=0.5,
+            rsi=0.4, macd=0.5, bollinger=0.4,  # MACD aligned with BUY
+            last_price=100.0,
+            num_news_articles=3,  # news-bearing → sentiment_breadth counts
+            reasoning="",
+            timestamp=fired,
+        )
+
+    snap = DashboardSnapshot(
+        tick=1,
+        rows=[_aligned_buy("AAPL"), _aligned_buy("MSFT")],
+    )
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        # Both BUY rows have aligned MACD → momentum breadth 100%.
+        assert "mom" in text
+        assert "100%" in text
+        # Sentiment breadth — news-bearing rows aligned → also 100%.
+        assert "sent" in text
+
+
+async def test_pulse_line_omits_breadth_when_no_directional_rows() -> None:
+    """All-HOLD watchlist → no directional rows → breadth chunks omitted."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+    hold_row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.2,
+        combined_score=0.0,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0, macd=0.0, bollinger=0.0,
+        last_price=100.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    snap = DashboardSnapshot(tick=1, rows=[hold_row])
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        # No directional rows → momentum/sentiment breadth chunks absent.
+        # The "mom" / "sent" labels would appear only inside breadth chunks.
+        assert "mom" not in text
+        assert "sent" not in text
+
+
+async def test_pulse_line_surfaces_strong_tier_symbols() -> None:
+    """A STRONG_BUY row should produce a 'STRONG' chunk in the PULSE
+    line carrying the symbol + tier label."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.strategy.base import RecommendationTier
+
+    fired = datetime.now(UTC)
+    strong_row = RecommendationRow(
+        symbol="NVDA",
+        action=SignalAction.BUY,
+        confidence=0.85,
+        combined_score=0.8,
+        technical_score=0.6,
+        sentiment_score=0.5,
+        rsi=0.5, macd=0.6, bollinger=0.4,
+        last_price=520.0,
+        num_news_articles=5,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.STRONG_BUY,
+        signal_quality="high",
+        stability="stable",
+    )
+    snap = DashboardSnapshot(tick=1, rows=[strong_row])
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        assert "STRONG" in text
+        assert "NVDA" in text
+        assert "STRONG BUY" in text
+
+
+async def test_pulse_line_omits_alerts_chunk_when_zero() -> None:
+    """Quiet markets stay tight — no alerts chunk when alert_intensity is 0."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.3,
+        combined_score=0.0,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0, macd=0.0, bollinger=0.0,
+        last_price=100.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])  # no recent_alerts
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        assert "alerts" not in text
+
+
 async def test_status_line_idle_when_no_rows() -> None:
     """Empty snapshot → status reads 'idle'."""
     from src.dashboard.app import DashboardApp, StatusLine
@@ -1014,7 +1167,8 @@ async def test_watchlist_header_renders_pulse_line_when_rows_present() -> None:
         header = app.query_one(WatchlistHeader)
         text = header.render()
         assert "PULSE" in text
-        assert "conviction" in text
+        # Conviction abbreviated to "conv" in the dense single-line layout.
+        assert "conv" in text
         # One of the sentiment tiers must appear.
         assert any(s in text for s in ("bullish", "bearish", "mixed", "neutral"))
 
