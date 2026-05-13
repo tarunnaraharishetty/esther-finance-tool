@@ -452,6 +452,30 @@ def test_prio_loader_example_yaml_in_repo_parses() -> None:
     assert "confidence_threshold" in config.cooldowns
 
 
+def test_prio_loader_example_yaml_contains_opp_composites() -> None:
+    """The shipped example must define the OPP-related composites so users
+    who copy the file as-is get OPP-driven combos out of the box, AND the
+    triple-confirmation composite must come before its pair-composite
+    subsets so the most-specific match wins under the prioritizer's
+    first-match-wins ordering rule."""
+    path = Path(__file__).resolve().parents[1] / "config" / "alerts.example.yaml"
+    if not path.exists():
+        pytest.skip(f"{path} not present")
+    config = load_prioritizer_config_from_yaml(path)
+    names = [c.name for c in config.composites]
+    # All four OPP composites present.
+    assert "opp_flip_with_sentiment" in names
+    assert "fresh_opp_from_flip" in names
+    assert "fresh_opp_from_sentiment_swing" in names
+    assert "fresh_opp_from_tier_shift" in names
+    # Triple composite is listed BEFORE either of its pair subsets.
+    triple_idx = names.index("opp_flip_with_sentiment")
+    flip_idx = names.index("fresh_opp_from_flip")
+    sent_idx = names.index("fresh_opp_from_sentiment_swing")
+    assert triple_idx < flip_idx
+    assert triple_idx < sent_idx
+
+
 # ---------------------------------------------------------------------------
 # Engine error-row handling
 # ---------------------------------------------------------------------------

@@ -234,6 +234,156 @@ def test_composite_unrelated_alerts_pass_through() -> None:
 
 
 # ---------------------------------------------------------------------------
+# OPP-related composites
+# ---------------------------------------------------------------------------
+
+
+def test_opp_entry_with_action_flip_composes_into_fresh_opp_from_flip() -> None:
+    """The canonical (opportunity_entry, action_changed) pairing collapses
+    into one critical alert that suppresses both constituents — the
+    "fresh OPP from a flip" event the example YAML defines."""
+    config = PrioritizerConfig(
+        composites=(
+            CompositeRule(
+                name="fresh_opp_from_flip",
+                requires=("opportunity_entry", "action_changed"),
+                severity="critical",
+                message="{symbol}: fresh top-N opportunity from an action flip",
+            ),
+        ),
+    )
+    prio = AlertPrioritizer(config)
+    fresh = [
+        _alert(symbol="NVDA", rule="opportunity_entry", severity="info"),
+        _alert(symbol="NVDA", rule="action_changed", severity="warn"),
+    ]
+    out = prio.prioritize(fresh, AlertState())
+    assert len(out) == 1
+    assert out[0].rule == "fresh_opp_from_flip"
+    assert out[0].severity == "critical"
+    assert out[0].message == "NVDA: fresh top-N opportunity from an action flip"
+
+
+def test_opp_entry_with_sentiment_swing_composes_into_warn_alert() -> None:
+    """OPP entry + sentiment shift is the news-led composite — a step
+    below the action-flip composite (warn rather than critical)."""
+    config = PrioritizerConfig(
+        composites=(
+            CompositeRule(
+                name="fresh_opp_from_sentiment_swing",
+                requires=("opportunity_entry", "sentiment_shift"),
+                severity="warn",
+                message="{symbol}: fresh top-N opportunity on a sentiment swing",
+            ),
+        ),
+    )
+    prio = AlertPrioritizer(config)
+    fresh = [
+        _alert(symbol="AAPL", rule="opportunity_entry", severity="info"),
+        _alert(symbol="AAPL", rule="sentiment_shift", severity="info"),
+    ]
+    out = prio.prioritize(fresh, AlertState())
+    assert len(out) == 1
+    assert out[0].rule == "fresh_opp_from_sentiment_swing"
+    assert out[0].severity == "warn"
+
+
+def test_triple_opp_composite_wins_over_pair_composite_when_ordered_first() -> None:
+    """When the triple composite is listed before the pair subset, the
+    triple wins — the prioritizer's first-match-wins rule. This is the
+    ordering the shipped example YAML relies on so users get the
+    highest-conviction alert when all three constituents fire."""
+    config = PrioritizerConfig(
+        composites=(
+            # Triple FIRST so it gets first dibs on the constituents.
+            CompositeRule(
+                name="opp_flip_with_sentiment",
+                requires=("opportunity_entry", "action_changed", "sentiment_shift"),
+                severity="critical",
+                message="{symbol}: triple confirm",
+            ),
+            CompositeRule(
+                name="fresh_opp_from_flip",
+                requires=("opportunity_entry", "action_changed"),
+                severity="critical",
+                message="{symbol}: pair",
+            ),
+        ),
+    )
+    prio = AlertPrioritizer(config)
+    fresh = [
+        _alert(symbol="NVDA", rule="opportunity_entry"),
+        _alert(symbol="NVDA", rule="action_changed"),
+        _alert(symbol="NVDA", rule="sentiment_shift"),
+    ]
+    out = prio.prioritize(fresh, AlertState())
+    rules = {a.rule for a in out}
+    assert "opp_flip_with_sentiment" in rules
+    # The pair composite must NOT also fire — its constituents were
+    # consumed by the triple.
+    assert "fresh_opp_from_flip" not in rules
+
+
+def test_pair_composite_wins_when_triple_listed_after() -> None:
+    """Inverse: with the pair listed first, it consumes its constituents
+    and the triple never fires. This documents WHY the example YAML
+    orders triple-before-pair — to prevent this exact subset-shadowing."""
+    config = PrioritizerConfig(
+        composites=(
+            # Pair FIRST — eats opportunity_entry + action_changed.
+            CompositeRule(
+                name="fresh_opp_from_flip",
+                requires=("opportunity_entry", "action_changed"),
+                severity="critical",
+                message="{symbol}: pair",
+            ),
+            CompositeRule(
+                name="opp_flip_with_sentiment",
+                requires=("opportunity_entry", "action_changed", "sentiment_shift"),
+                severity="critical",
+                message="{symbol}: triple",
+            ),
+        ),
+    )
+    prio = AlertPrioritizer(config)
+    fresh = [
+        _alert(symbol="NVDA", rule="opportunity_entry"),
+        _alert(symbol="NVDA", rule="action_changed"),
+        _alert(symbol="NVDA", rule="sentiment_shift"),
+    ]
+    out = prio.prioritize(fresh, AlertState())
+    rules = {a.rule for a in out}
+    # Pair fired; triple did not. sentiment_shift survives as an
+    # unrelated alert because it wasn't consumed.
+    assert "fresh_opp_from_flip" in rules
+    assert "opp_flip_with_sentiment" not in rules
+    assert "sentiment_shift" in rules
+
+
+def test_opp_composite_is_per_symbol() -> None:
+    """opportunity_entry on NVDA and action_changed on AAPL must NOT
+    compose — composites only collapse same-symbol firings."""
+    config = PrioritizerConfig(
+        composites=(
+            CompositeRule(
+                name="fresh_opp_from_flip",
+                requires=("opportunity_entry", "action_changed"),
+                severity="critical",
+                message="x",
+            ),
+        ),
+    )
+    prio = AlertPrioritizer(config)
+    fresh = [
+        _alert(symbol="NVDA", rule="opportunity_entry"),
+        _alert(symbol="AAPL", rule="action_changed"),
+    ]
+    out = prio.prioritize(fresh, AlertState())
+    # Both originals preserved; no composite.
+    assert {a.rule for a in out} == {"opportunity_entry", "action_changed"}
+
+
+# ---------------------------------------------------------------------------
 # Severity sort
 # ---------------------------------------------------------------------------
 

@@ -96,6 +96,48 @@ prioritizer:
   composites:
     # When ALL `requires` rules fire for the same symbol in the same tick,
     # emit ONE composite alert and suppress its constituents.
+    #
+    # ORDER MATTERS: composites are matched top-down and the first match
+    # consumes its constituents. List MORE-SPECIFIC composites first so
+    # they have a chance to fire before less-specific ones absorb their
+    # constituents. The triple-confirmation block goes ahead of the
+    # pair composites for that reason.
+
+    # Triple confirmation — fresh OPP, action flip, AND sentiment swing
+    # in the same tick. The strongest possible read: a name just turned,
+    # the news flow turned with it, and the engine ranked it into the
+    # top-N opportunity list as a result.
+    - name: opp_flip_with_sentiment
+      requires: [opportunity_entry, action_changed, sentiment_shift]
+      severity: critical
+      message: "{symbol}: fresh top-N opportunity from a flip + sentiment swing"
+
+    # OPP entry born from a fresh action flip — high-conviction event,
+    # ring the bell. Pairs cleanly with the burst-refresh path so the
+    # follow-up tick lands quickly.
+    - name: fresh_opp_from_flip
+      requires: [opportunity_entry, action_changed]
+      severity: critical
+      message: "{symbol}: fresh top-N opportunity from an action flip"
+
+    # OPP entry born from a big news-sentiment swing. Different mechanism
+    # than the flip composite (sentiment-led, not price-led) — worth a
+    # warn so the trader sees it without the bell going off every time.
+    - name: fresh_opp_from_sentiment_swing
+      requires: [opportunity_entry, sentiment_shift]
+      severity: warn
+      message: "{symbol}: fresh top-N opportunity on a sentiment swing"
+
+    # OPP entry alongside a same-action tier shift (BUY -> STRONG BUY,
+    # STRONG_SELL -> SELL). Signals that the existing direction
+    # strengthened or weakened enough to push a ranking move.
+    - name: fresh_opp_from_tier_shift
+      requires: [opportunity_entry, tier_changed]
+      severity: warn
+      message: "{symbol}: fresh top-N opportunity from a tier shift"
+
+    # Existing pair composite (no opportunity_entry involved) — preserved
+    # so users upgrading to this version of the example don't lose it.
     - name: high_conviction_reversal
       requires: [action_changed, sentiment_shift]
       severity: critical
