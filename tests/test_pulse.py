@@ -242,3 +242,340 @@ def test_pulse_summary_is_observational_not_predictive() -> None:
     lower = pulse.summary.lower()
     for word in forbidden:
         assert word not in lower, f"summary should not contain '{word}': {pulse.summary}"
+
+
+# ---------------------------------------------------------------------------
+# Breadth / intensity extensions
+# ---------------------------------------------------------------------------
+
+
+def _row_full(
+    symbol: str,
+    *,
+    action: SignalAction = SignalAction.HOLD,
+    confidence: float = 0.3,
+    macd: float = 0.0,
+    sentiment: float = 0.0,
+    news: int = 0,
+    tier: object = None,
+    error: str | None = None,
+) -> RecommendationRow:
+    """Like _row but exposes macd + tier for breadth tests."""
+    from src.strategy.base import RecommendationTier
+
+    return RecommendationRow(
+        symbol=symbol,
+        action=action,
+        confidence=confidence,
+        combined_score=0.0,
+        technical_score=0.0,
+        sentiment_score=sentiment,
+        rsi=math.nan,
+        macd=macd,
+        bollinger=math.nan,
+        last_price=100.0,
+        num_news_articles=news,
+        reasoning="",
+        timestamp=datetime.now(UTC),
+        tier=tier if tier is not None else RecommendationTier.from_action(action),
+        error=error,
+    )
+
+
+def test_pulse_counts_bullish_and_bearish_rows() -> None:
+    pulse = compute_pulse(
+        _snap(
+            [
+                _row("AAPL", action=SignalAction.BUY),
+                _row("MSFT", action=SignalAction.BUY),
+                _row("NVDA", action=SignalAction.SELL),
+                _row("TSLA", action=SignalAction.HOLD),
+                _row("SPY", action=SignalAction.HOLD),
+            ]
+        )
+    )
+    assert pulse.bullish_count == 2
+    assert pulse.bearish_count == 1
+    assert pulse.healthy_count == 5
+
+
+def test_pulse_counts_exclude_error_rows() -> None:
+    pulse = compute_pulse(
+        _snap(
+            [
+                _row("AAPL", action=SignalAction.BUY),
+                _row("MSFT", action=SignalAction.BUY, error="boom"),
+            ]
+        )
+    )
+    assert pulse.bullish_count == 1
+    assert pulse.healthy_count == 1
+
+
+def test_momentum_breadth_full_alignment_returns_one() -> None:
+    """All BUY rows have positive MACD → breadth = 1.0."""
+    pulse = compute_pulse(
+        _snap(
+            [
+                _row_full("AAPL", action=SignalAction.BUY, macd=0.5),
+                _row_full("MSFT", action=SignalAction.BUY, macd=0.4),
+                _row_full("NVDA", action=SignalAction.SELL, macd=-0.3),
+            ]
+        )
+    )
+    assert pulse.momentum_breadth == 1.0
+
+
+def test_momentum_breadth_half_aligned() -> None:
+    pulse = compute_pulse(
+        _snap(
+            [
+                _row_full("AAPL", action=SignalAction.BUY, macd=0.5),  # aligned
+                _row_full("MSFT", action=SignalAction.BUY, macd=-0.4),  # opposed
+            ]
+        )
+    )
+    assert pulse.momentum_breadth == 0.5
+
+
+def test_momentum_breadth_excludes_hold_rows() -> None:
+    """HOLD has no direction to align with — those rows shouldn't be
+    in the denominator."""
+    pulse = compute_pulse(
+        _snap(
+            [
+                _row_full("AAPL", action=SignalAction.BUY, macd=0.5),
+                _row_full("MSFT", action=SignalAction.HOLD, macd=0.5),
+                _row_full("NVDA", action=SignalAction.HOLD, macd=-0.5),
+            ]
+        )
+    )
+    # Only AAPL counts in the directional pool; it's aligned → 1.0.
+    assert pulse.momentum_breadth == 1.0
+
+
+def test_momentum_breadth_handles_nan_macd_as_unaligned() -> None:
+    pulse = compute_pulse(
+        _snap(
+            [
+                _row_full("AAPL", action=SignalAction.BUY, macd=math.nan),
+                _row_full("MSFT", action=SignalAction.BUY, macd=0.4),
+            ]
+        )
+    )
+    # 1 of 2 is aligned (NaN doesn't qualify).
+    assert pulse.momentum_breadth == 0.5
+
+
+def test_momentum_breadth_zero_when_no_directional_rows() -> None:
+    pulse = compute_pulse(
+        _snap([_row_full("AAPL", action=SignalAction.HOLD, macd=0.5)])
+    )
+    assert pulse.momentum_breadth == 0.0
+
+
+def test_sentiment_breadth_only_counts_news_bearing_rows() -> None:
+    """A bullish row with no news shouldn't be in the denominator —
+    the sentiment score is meaningless without articles."""
+    pulse = compute_pulse(
+        _snap(
+            [
+                _row_full(
+                    "AAPL", action=SignalAction.BUY, sentiment=0.5, news=5
+                ),
+                _row_full(
+                    "MSFT", action=SignalAction.BUY, sentiment=0.5, news=0
+                ),
+            ]
+        )
+    )
+    # Only AAPL counts; aligned → 1.0.
+    assert pulse.sentiment_breadth == 1.0
+
+
+def test_sentiment_breadth_partial_alignment() -> None:
+    pulse = compute_pulse(
+        _snap(
+            [
+                _row_full("AAPL", action=SignalAction.BUY, sentiment=0.5, news=5),
+                _row_full("MSFT", action=SignalAction.BUY, sentiment=-0.5, news=5),
+            ]
+        )
+    )
+    assert pulse.sentiment_breadth == 0.5
+
+
+def test_sentiment_breadth_zero_when_no_news() -> None:
+    pulse = compute_pulse(
+        _snap([_row_full("AAPL", action=SignalAction.BUY, sentiment=0.5, news=0)])
+    )
+    assert pulse.sentiment_breadth == 0.0
+
+
+def test_reversal_intensity_sums_flips_across_symbols() -> None:
+    """A symbol with 3 episodes has flipped twice; sum across symbols."""
+    history = {
+        "AAPL": SignalHistorySummary(
+            current=_episode(SignalAction.BUY),
+            recent=(_episode(SignalAction.HOLD), _episode(SignalAction.SELL)),
+        ),
+        "MSFT": SignalHistorySummary(
+            current=_episode(SignalAction.HOLD),
+            recent=(_episode(SignalAction.BUY),),
+        ),
+    }
+    pulse = compute_pulse(_snap([_row("AAPL"), _row("MSFT")], history=history))
+    # AAPL: 2 flips, MSFT: 1 flip → total 3
+    assert pulse.reversal_intensity == 3
+
+
+def test_reversal_intensity_zero_without_history() -> None:
+    pulse = compute_pulse(_snap([_row("AAPL")]))
+    assert pulse.reversal_intensity == 0
+
+
+def test_alert_intensity_is_length_of_recent_alerts() -> None:
+    fired = datetime.now(UTC)
+    alerts = tuple(
+        Alert(
+            symbol="AAPL",
+            rule="action_changed",
+            severity="warn",
+            message="x",
+            fired_at=fired,
+        )
+        for _ in range(7)
+    )
+    pulse = compute_pulse(_snap([_row("AAPL")], alerts=alerts))
+    assert pulse.alert_intensity == 7
+
+
+def test_strongest_symbols_lists_only_strong_tier_rows() -> None:
+    from src.strategy.base import RecommendationTier
+
+    pulse = compute_pulse(
+        _snap(
+            [
+                _row_full(
+                    "NVDA",
+                    action=SignalAction.BUY,
+                    confidence=0.85,
+                    tier=RecommendationTier.STRONG_BUY,
+                ),
+                _row_full("AAPL", action=SignalAction.BUY, confidence=0.6),
+                _row_full(
+                    "TSLA",
+                    action=SignalAction.SELL,
+                    confidence=0.72,
+                    tier=RecommendationTier.STRONG_SELL,
+                ),
+            ]
+        )
+    )
+    syms = {sym for sym, _ in pulse.strongest_symbols}
+    assert syms == {"NVDA", "TSLA"}
+    # AAPL is BUY (not STRONG) → excluded.
+    assert "AAPL" not in syms
+
+
+def test_strongest_symbols_ranked_by_confidence_descending() -> None:
+    from src.strategy.base import RecommendationTier
+
+    pulse = compute_pulse(
+        _snap(
+            [
+                _row_full(
+                    "AAPL",
+                    action=SignalAction.BUY,
+                    confidence=0.66,
+                    tier=RecommendationTier.STRONG_BUY,
+                ),
+                _row_full(
+                    "NVDA",
+                    action=SignalAction.BUY,
+                    confidence=0.88,
+                    tier=RecommendationTier.STRONG_BUY,
+                ),
+                _row_full(
+                    "MSFT",
+                    action=SignalAction.BUY,
+                    confidence=0.71,
+                    tier=RecommendationTier.STRONG_BUY,
+                ),
+            ]
+        )
+    )
+    order = [sym for sym, _ in pulse.strongest_symbols]
+    assert order == ["NVDA", "MSFT", "AAPL"]
+
+
+def test_strongest_symbols_capped_at_module_limit() -> None:
+    from src.intelligence.pulse import _STRONGEST_LIMIT
+    from src.strategy.base import RecommendationTier
+
+    rows = [
+        _row_full(
+            f"S{i}",
+            action=SignalAction.BUY,
+            confidence=0.7 + i * 0.01,
+            tier=RecommendationTier.STRONG_BUY,
+        )
+        for i in range(_STRONGEST_LIMIT + 5)
+    ]
+    pulse = compute_pulse(_snap(rows))
+    assert len(pulse.strongest_symbols) == _STRONGEST_LIMIT
+
+
+def test_strongest_symbols_empty_when_no_strong_tier() -> None:
+    pulse = compute_pulse(
+        _snap(
+            [
+                _row("AAPL", action=SignalAction.BUY, confidence=0.5),
+                _row("MSFT", action=SignalAction.SELL, confidence=0.4),
+            ]
+        )
+    )
+    assert pulse.strongest_symbols == ()
+
+
+def test_strongest_symbols_carries_tier_display_strings() -> None:
+    """The render layer reads the tier display string directly — so the
+    tuple must carry the right human-readable label."""
+    from src.strategy.base import RecommendationTier
+
+    pulse = compute_pulse(
+        _snap(
+            [
+                _row_full(
+                    "NVDA",
+                    action=SignalAction.BUY,
+                    confidence=0.9,
+                    tier=RecommendationTier.STRONG_BUY,
+                ),
+                _row_full(
+                    "TSLA",
+                    action=SignalAction.SELL,
+                    confidence=0.7,
+                    tier=RecommendationTier.STRONG_SELL,
+                ),
+            ]
+        )
+    )
+    labels = dict(pulse.strongest_symbols)
+    assert labels["NVDA"] == "STRONG BUY"
+    assert labels["TSLA"] == "STRONG SELL"
+
+
+def test_empty_snapshot_returns_zero_breadth_and_empty_strongest() -> None:
+    """The is_empty fast-path bypasses all new fields — they should
+    keep their default zero / empty values."""
+    pulse = compute_pulse(_snap([]))
+    assert pulse.is_empty
+    assert pulse.bullish_count == 0
+    assert pulse.bearish_count == 0
+    assert pulse.healthy_count == 0
+    assert pulse.momentum_breadth == 0.0
+    assert pulse.sentiment_breadth == 0.0
+    assert pulse.reversal_intensity == 0
+    assert pulse.alert_intensity == 0
+    assert pulse.strongest_symbols == ()
