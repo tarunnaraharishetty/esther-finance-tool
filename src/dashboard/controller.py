@@ -133,7 +133,15 @@ class DashboardController(BaseController):
                 f"{symbol} → {rec.action.value.upper()} "
                 f"(conf {rec.confidence:.2f}, combined {rec.combined_score:+.2f})"
             )
-            return _row_from_recommendation(rec, last_price=float(df["close"].iloc[-1]))
+            top_headlines = tuple(
+                a.headline
+                for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
+            )
+            return _row_from_recommendation(
+                rec,
+                last_price=float(df["close"].iloc[-1]),
+                headlines=top_headlines,
+            )
         except Exception as e:
             self.events.error(f"{symbol}: {e}")
             return _empty_row(symbol, now, error=str(e))
@@ -266,7 +274,15 @@ class MockDashboardController(BaseController):
         self.events.info(
             f"{symbol} → {rec.action.value.upper()} (conf {rec.confidence:.2f})"
         )
-        return _row_from_recommendation(rec, last_price=float(df["close"].iloc[-1]))
+        top_headlines = tuple(
+            a.headline
+            for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
+        )
+        return _row_from_recommendation(
+            rec,
+            last_price=float(df["close"].iloc[-1]),
+            headlines=top_headlines,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +291,7 @@ class MockDashboardController(BaseController):
 
 
 def _row_from_recommendation(
-    rec: object, last_price: float
+    rec: object, last_price: float, headlines: tuple[str, ...] = ()
 ) -> RecommendationRow:
     """Convert a TradingRecommendation to a dashboard row."""
     indicators = getattr(rec, "indicator_scores", {}) or {}
@@ -293,6 +309,7 @@ def _row_from_recommendation(
         num_news_articles=int(rec.num_news_articles),  # type: ignore[attr-defined]
         reasoning=str(rec.reasoning),  # type: ignore[attr-defined]
         timestamp=rec.timestamp,  # type: ignore[attr-defined]
+        headlines=headlines,
     )
 
 

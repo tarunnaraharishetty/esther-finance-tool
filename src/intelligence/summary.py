@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Protocol
 from src.strategy.base import SignalAction
 
 if TYPE_CHECKING:
-    from src.data.models import NewsArticle
     from src.intelligence.explain import Explanation
 
 
@@ -24,7 +23,7 @@ class Summarizer(Protocol):
         self,
         explanation: Explanation,
         *,
-        headlines: list[NewsArticle] | None = None,
+        headlines: list[str] | None = None,
     ) -> str: ...
 
 
@@ -39,7 +38,7 @@ class TemplateSummarizer:
         self,
         explanation: Explanation,
         *,
-        headlines: list[NewsArticle] | None = None,
+        headlines: list[str] | None = None,
     ) -> str:
         parts = [explanation.headline]
 
@@ -61,8 +60,7 @@ class TemplateSummarizer:
                 parts.append(f"Inputs from {_join_names(neutral)} are inconclusive.")
 
         if headlines:
-            top = headlines[0]
-            parts.append(f'Latest headline: "{top.headline}".')
+            parts.append(f'Latest headline: "{headlines[0]}".')
 
         parts.append(_action_caveat(explanation.action))
         return " ".join(parts)

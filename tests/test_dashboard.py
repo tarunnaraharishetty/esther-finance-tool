@@ -231,3 +231,71 @@ async def test_app_renders_and_responds_to_keys() -> None:
         await pilot.press("r")
         await pilot.pause(0.2)
         assert table.row_count == 3
+
+
+async def test_app_watchlist_header_renders() -> None:
+    """The new header widget should mount and render at least the action mix."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        header = app.query_one(WatchlistHeader)
+        text = header.render()
+        assert "Action mix" in text
+        # First frame: no prior snapshot to diff.
+        assert "first frame" in text or "no changes" in text
+
+
+async def test_app_s_keypress_with_no_summarizer_surfaces_error() -> None:
+    """`s` with summarizer=None should put DetailPanel into an error state
+    pointing at ANTHROPIC_API_KEY — no crash, no network call."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT"]),
+        refresh_seconds=999.0,
+        summarizer=None,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("s")
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        assert detail.brief_state == "error"
+        assert "ANTHROPIC_API_KEY" in detail.brief_text
+
+
+async def test_app_s_keypress_with_mock_summarizer_loads_and_caches() -> None:
+    """`s` with a real Summarizer: spawn worker, brief lands, cache hit on re-press."""
+    from unittest.mock import MagicMock
+
+    from src.dashboard.app import DashboardApp, DetailPanel
+
+    summarizer = MagicMock()
+    summarizer.summarize = MagicMock(
+        return_value="AAPL leans bullish with high confidence."
+    )
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT"]),
+        refresh_seconds=999.0,
+        summarizer=summarizer,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("s")
+        # Let the worker complete.
+        await pilot.pause(0.3)
+        detail = app.query_one(DetailPanel)
+        assert detail.brief_state == "ready"
+        assert detail.brief_text == "AAPL leans bullish with high confidence."
+        assert summarizer.summarize.call_count == 1
+
+        # Re-press: same row, should hit cache, no second SDK call.
+        await pilot.press("s")
+        await pilot.pause(0.1)
+        assert summarizer.summarize.call_count == 1

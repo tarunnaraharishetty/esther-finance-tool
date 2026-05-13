@@ -5,13 +5,11 @@ Mocks the Anthropic client at the SDK boundary — no network in unit tests.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from src.data.models import NewsArticle
 from src.intelligence.explain import explain
 from src.intelligence.llm_summary import LLMSummarizer
 from src.strategy.base import SignalAction
@@ -50,16 +48,12 @@ def _explanation(action: SignalAction = SignalAction.BUY) -> object:
 # ---------------------------------------------------------------------------
 
 
-def test_constructor_raises_without_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    from src.config import settings as settings_mod
-
-    settings_mod.get_settings.cache_clear()
-    try:
-        with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-            LLMSummarizer()
-    finally:
-        settings_mod.get_settings.cache_clear()
+def test_constructor_raises_without_api_key() -> None:
+    # The conftest autouse fixture sets ANTHROPIC_API_KEY="" so the
+    # Settings load resolves the key to empty regardless of any local
+    # .env on the developer's machine.
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        LLMSummarizer()
 
 
 def test_constructor_accepts_explicit_client() -> None:
@@ -111,23 +105,10 @@ def test_summarize_user_message_includes_symbol_action_and_contributors() -> Non
 def test_summarize_user_message_lists_headlines_when_provided() -> None:
     client = _mock_client()
     summarizer = LLMSummarizer(client=client)
-    headlines = [
-        NewsArticle(
-            id="h1",
-            headline="AAPL beats earnings",
-            source="x",
-            symbols=["AAPL"],
-            published_at=datetime.now(UTC),
-        ),
-        NewsArticle(
-            id="h2",
-            headline="Apple supplier deal expands",
-            source="x",
-            symbols=["AAPL"],
-            published_at=datetime.now(UTC),
-        ),
-    ]
-    summarizer.summarize(_explanation(), headlines=headlines)
+    summarizer.summarize(
+        _explanation(),
+        headlines=["AAPL beats earnings", "Apple supplier deal expands"],
+    )
     user_text = client.messages.create.call_args.kwargs["messages"][0]["content"]
     assert "AAPL beats earnings" in user_text
     assert "Apple supplier deal expands" in user_text

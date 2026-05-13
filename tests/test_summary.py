@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
-from src.data.models import NewsArticle
 from src.intelligence.explain import explain
 from src.intelligence.summary import TemplateSummarizer
 from src.strategy.base import SignalAction
@@ -58,16 +55,10 @@ def test_summary_lists_mixed_inputs() -> None:
 
 def test_summary_quotes_latest_headline_when_provided() -> None:
     s = TemplateSummarizer()
-    headlines = [
-        NewsArticle(
-            id="x1",
-            headline="AAPL announces record Q3 revenue",
-            source="test",
-            symbols=["AAPL"],
-            published_at=datetime.now(UTC),
-        )
-    ]
-    text = s.summarize(_buy_explanation(), headlines=headlines)
+    text = s.summarize(
+        _buy_explanation(),
+        headlines=["AAPL announces record Q3 revenue"],
+    )
     assert "record Q3 revenue" in text
 
 

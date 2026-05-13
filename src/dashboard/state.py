@@ -34,6 +34,9 @@ class RecommendationRow:
     num_news_articles: int
     reasoning: str
     timestamp: datetime
+    # Most-recent headline strings (top ~5), kept on the row so the dashboard
+    # AI-brief worker can pass them to the LLM without a second Alpaca fetch.
+    headlines: tuple[str, ...] = ()
     error: str | None = None  # populated if the per-symbol fetch failed
 
 

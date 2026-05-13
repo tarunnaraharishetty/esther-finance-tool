@@ -31,10 +31,16 @@ from textual.widgets import DataTable, Footer, Header, RichLog, Static
 
 from src.dashboard.state import DashboardSnapshot, RecommendationRow
 from src.intelligence.explain import Explanation, explain
+from src.intelligence.watchlist import (
+    action_breakdown,
+    diff_snapshots,
+    top_movers,
+)
 from src.strategy.base import SignalAction
 
 if TYPE_CHECKING:
     from src.dashboard.controller import BaseController
+    from src.intelligence.summary import Summarizer
 
 
 _ACTION_STYLES = {
@@ -67,11 +73,84 @@ def _confidence_bar(conf: float, width: int = 10) -> str:
     return "█" * filled + "·" * (width - filled)
 
 
+class WatchlistHeader(Static):
+    """Three-line header above the watchlist: movers / action mix / diff.
+
+    Holds an internal reference to the previous snapshot so it can render
+    "Since last refresh" without coupling to the controller's state.
+    """
+
+    snapshot: reactive[DashboardSnapshot | None] = reactive(None)
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._prev_snapshot: DashboardSnapshot | None = None
+
+    def watch_snapshot(self, _old: object, new: object) -> None:
+        """When a new snapshot arrives, render against the previous one,
+        then promote the new one to prev for the next refresh."""
+        if new is None:
+            return
+        self.refresh()  # trigger render
+        # Promote *after* render so the next tick diffs against this frame.
+        self._prev_snapshot = new  # type: ignore[assignment]
+
+    def render(self) -> str:
+        snap = self.snapshot
+        if snap is None:
+            return "[dim]watchlist intel: loading…[/dim]"
+
+        # Line 1 — top movers (3 strongest abs(combined_score))
+        movers = top_movers(snap, n=3)
+        if movers:
+            mover_chunks = [
+                f"[bold]{m.symbol}[/bold] [{_score_style(m.combined_score)}]"
+                f"{m.combined_score:+.2f}[/]"
+                for m in movers
+            ]
+            line1 = "[dim]Top movers:[/dim]  " + "  |  ".join(mover_chunks)
+        else:
+            line1 = "[dim]Top movers: (none — all rows errored)[/dim]"
+
+        # Line 2 — action breakdown
+        counts = action_breakdown(snap)
+        line2 = (
+            "[dim]Action mix:[/dim]  "
+            f"[bold green]{counts[SignalAction.BUY]} BUY[/]  "
+            f"[bold yellow]{counts[SignalAction.HOLD]} HOLD[/]  "
+            f"[bold red]{counts[SignalAction.SELL]} SELL[/]"
+        )
+
+        # Line 3 — diff against prev
+        changes = diff_snapshots(snap, self._prev_snapshot)
+        if changes:
+            change_chunks = [
+                f"[bold]{c.symbol}[/bold] [dim]({c.kind})[/dim]" for c in changes[:4]
+            ]
+            line3 = "[dim]Since last refresh:[/dim]  " + "  ·  ".join(change_chunks)
+        elif self._prev_snapshot is None:
+            line3 = "[dim]Since last refresh: (first frame)[/dim]"
+        else:
+            line3 = "[dim]Since last refresh: no changes[/dim]"
+
+        return f"{line1}\n{line2}\n{line3}"
+
+
+def _score_style(score: float) -> str:
+    if score >= 0.3:
+        return "bold green"
+    if score <= -0.3:
+        return "bold red"
+    return "yellow"
+
+
 class DetailPanel(Static):
     """Reasoning + indicator detail for the selected row."""
 
     row_index: reactive[int] = reactive(0)
     snapshot: reactive[DashboardSnapshot | None] = reactive(None)
+    brief_state: reactive[str] = reactive("idle")  # idle | loading | ready | error
+    brief_text: reactive[str] = reactive("")
 
     def render(self) -> str:
         snap = self.snapshot
@@ -101,12 +180,25 @@ class DetailPanel(Static):
         )
         if not why:
             why = "  [dim]no contributing signals[/dim]"
-        return (
+
+        body = (
             f"{header}\n"
             f"{metrics}\n"
             f"[italic]{rich_escape(explanation.headline)}[/italic]\n"
             f"{why}"
         )
+
+        # AI brief footer (only shown once the user has pressed `s`).
+        if self.brief_state == "loading":
+            body += "\n\n[dim italic]loading AI brief…[/dim italic]"
+        elif self.brief_state == "ready":
+            body += (
+                f"\n\n[bold cyan]AI brief:[/bold cyan] "
+                f"[italic]{rich_escape(self.brief_text)}[/italic]"
+            )
+        elif self.brief_state == "error":
+            body += f"\n\n[red]AI brief failed:[/red] {rich_escape(self.brief_text)}"
+        return body
 
 
 def _explain_row(r: RecommendationRow) -> Explanation:
@@ -136,6 +228,7 @@ class DashboardApp(App[None]):
 
     CSS = """
     Screen { layout: vertical; }
+    #watchlist_header { height: 3; padding: 0 1; }
     #detail { height: auto; padding: 0 1 1 1; border-top: solid $primary 30%; }
     #alerts { height: 6; border-top: solid $warning 50%; }
     #events { height: 10; border-top: solid $primary 30%; }
@@ -146,23 +239,33 @@ class DashboardApp(App[None]):
         Binding("q", "quit", "quit"),
         Binding("r", "refresh_now", "refresh"),
         Binding("p", "toggle_pause", "pause/resume"),
+        Binding("s", "summarize_selected", "AI brief"),
         Binding("up,down", "noop", "select", show=False),
     ]
 
     paused: reactive[bool] = reactive(False)
 
-    def __init__(self, controller: "BaseController", refresh_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        controller: "BaseController",
+        refresh_seconds: float = 5.0,
+        summarizer: "Summarizer | None" = None,
+    ) -> None:
         super().__init__()
         self.controller = controller
         self.refresh_seconds = refresh_seconds
+        self.summarizer = summarizer
         self._snapshot: DashboardSnapshot | None = None
         self._tick_handle = None
+        # Brief cache keyed by (symbol, action_str). Action change invalidates.
+        self._brief_cache: dict[tuple[str, str], str] = {}
 
     # -- layout -----------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Vertical():
+            yield WatchlistHeader(id="watchlist_header")
             table = DataTable(zebra_stripes=True, cursor_type="row")
             table.add_columns(
                 "SYM", "ACTION", "CONF", "BAR", "TECH", "SENT",
@@ -197,6 +300,75 @@ class DashboardApp(App[None]):
 
     def action_noop(self) -> None:  # bound for footer hint only
         pass
+
+    def action_summarize_selected(self) -> None:
+        """`s`: load the LLM brief for the currently-highlighted row."""
+        row = self._selected_row()
+        if row is None or row.error:
+            return
+        detail = self.query_one(DetailPanel)
+        if self.summarizer is None:
+            detail.brief_state = "error"
+            detail.brief_text = (
+                "ANTHROPIC_API_KEY not configured — see ALPACA_SETUP.md."
+            )
+            detail.refresh()
+            return
+
+        cache_key = (row.symbol, row.action.value)
+        if cache_key in self._brief_cache:
+            detail.brief_state = "ready"
+            detail.brief_text = self._brief_cache[cache_key]
+            detail.refresh()
+            return
+
+        detail.brief_state = "loading"
+        detail.brief_text = ""
+        detail.refresh()
+        self.run_worker(
+            self._fetch_brief(row, cache_key),
+            exclusive=False,
+            group="brief",
+        )
+
+    def _selected_row(self) -> RecommendationRow | None:
+        snap = self._snapshot
+        if snap is None or not snap.rows:
+            return None
+        table = self.query_one(DataTable)
+        idx = table.cursor_row if table.row_count else 0
+        idx = max(0, min(idx, len(snap.rows) - 1))
+        return snap.rows[idx]
+
+    async def _fetch_brief(
+        self, row: RecommendationRow, cache_key: tuple[str, str]
+    ) -> None:
+        """Compute the AI brief off the UI thread, then push to DetailPanel."""
+        import asyncio
+
+        assert self.summarizer is not None  # checked by caller
+
+        explanation = _explain_row(row)
+        headlines = list(row.headlines) or None
+        try:
+            text = await asyncio.to_thread(
+                self.summarizer.summarize, explanation, headlines=headlines
+            )
+        except Exception as e:  # noqa: BLE001 — surfaced to the UI as an error state
+            detail = self.query_one(DetailPanel)
+            detail.brief_state = "error"
+            detail.brief_text = str(e)
+            detail.refresh()
+            return
+
+        self._brief_cache[cache_key] = text
+        # Only push if the user hasn't navigated away from this symbol.
+        current = self._selected_row()
+        detail = self.query_one(DetailPanel)
+        if current is not None and (current.symbol, current.action.value) == cache_key:
+            detail.brief_state = "ready"
+            detail.brief_text = text
+            detail.refresh()
 
     # -- refresh ----------------------------------------------------------
 
@@ -241,11 +413,36 @@ class DashboardApp(App[None]):
             table.add_row(*row_cells, key=r.symbol)
 
     def _render_panels(self, snap: DashboardSnapshot) -> None:
+        header = self.query_one(WatchlistHeader)
+        header.snapshot = snap
+
         detail = self.query_one(DetailPanel)
         detail.snapshot = snap
         # Sync with current cursor on the table.
         table = self.query_one(DataTable)
         detail.row_index = table.cursor_row if table.row_count else 0
+        self._sync_brief_for_cursor()
+
+    def _sync_brief_for_cursor(self) -> None:
+        """Reset / restore the AI brief footer based on the row under cursor.
+
+        If the cache has an entry for the currently-selected (symbol, action),
+        show it. Otherwise reset to idle so the previous brief doesn't linger
+        once the user has moved off that row.
+        """
+        detail = self.query_one(DetailPanel)
+        row = self._selected_row()
+        if row is None or row.error:
+            detail.brief_state = "idle"
+            detail.brief_text = ""
+            return
+        key = (row.symbol, row.action.value)
+        if key in self._brief_cache:
+            detail.brief_state = "ready"
+            detail.brief_text = self._brief_cache[key]
+        else:
+            detail.brief_state = "idle"
+            detail.brief_text = ""
 
     def _render_alerts(self, snap: DashboardSnapshot) -> None:
         if not snap.alerts:
@@ -287,3 +484,4 @@ class DashboardApp(App[None]):
     def on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         detail = self.query_one(DetailPanel)
         detail.row_index = event.cursor_row if event.cursor_row is not None else 0
+        self._sync_brief_for_cursor()

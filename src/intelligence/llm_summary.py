@@ -20,7 +20,6 @@ from src.strategy.base import SignalAction
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from src.data.models import NewsArticle
     from src.intelligence.explain import Explanation
 
 log = get_logger(__name__)
@@ -85,7 +84,7 @@ class LLMSummarizer:
         self,
         explanation: Explanation,
         *,
-        headlines: list[NewsArticle] | None = None,
+        headlines: list[str] | None = None,
     ) -> str:
         """Generate a 2–4 sentence brief for one symbol.
 
@@ -120,7 +119,7 @@ class LLMSummarizer:
 
 
 def _build_user_message(
-    explanation: Explanation, headlines: list[NewsArticle] | None
+    explanation: Explanation, headlines: list[str] | None
 ) -> str:
     """Render the structured Explanation as plain text for the user turn.
 
@@ -146,8 +145,8 @@ def _build_user_message(
     if headlines:
         lines.append("")
         lines.append("Recent headlines:")
-        for i, h in enumerate(headlines[:8], start=1):
-            lines.append(f'{i}. "{h.headline}"')
+        for i, headline in enumerate(headlines[:8], start=1):
+            lines.append(f'{i}. "{headline}"')
 
     if explanation.action == SignalAction.HOLD:
         lines.append("")

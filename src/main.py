@@ -284,7 +284,10 @@ def summarize(symbol: str, lookback_days: int, news_hours: int, no_sentiment: bo
     )
 
     try:
-        brief = summarizer.summarize(explanation, headlines=news)
+        brief = summarizer.summarize(
+            explanation,
+            headlines=[a.headline for a in news[:5]],
+        )
     except anthropic.AuthenticationError:
         console.print(
             "[red]Anthropic auth failed — check ANTHROPIC_API_KEY in .env.[/red]"
@@ -533,7 +536,25 @@ def dashboard(
             alert_engine=alert_engine,
         )
 
-    DashboardApp(controller, refresh_seconds=refresh_seconds).run()
+    # Try to build the LLM summarizer; if ANTHROPIC_API_KEY isn't set the
+    # dashboard still launches but the `s` keypress will surface a clean error.
+    summarizer: object | None
+    try:
+        from src.intelligence.llm_summary import LLMSummarizer
+
+        summarizer = LLMSummarizer(settings=settings)
+    except RuntimeError:
+        summarizer = None
+        console.print(
+            "[yellow]ANTHROPIC_API_KEY not set — AI briefs disabled. "
+            "Press `s` for setup hint.[/yellow]"
+        )
+
+    DashboardApp(
+        controller,
+        refresh_seconds=refresh_seconds,
+        summarizer=summarizer,  # type: ignore[arg-type]
+    ).run()
 
 
 def _print_banner(settings: object) -> None:
