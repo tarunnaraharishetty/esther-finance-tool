@@ -21,6 +21,11 @@ from src.indicators.bollinger import BollingerBands
 from src.indicators.macd import MACD
 from src.indicators.rsi import RSI
 from src.sentiment.analyzer import SentimentAnalyzer
+from src.sentiment.news_quality import (
+    NewsQualityWeights,
+    quality_weight,
+    weighted_sentiment_mean,
+)
 from src.strategy.base import RecommendationTier, SignalAction
 
 if TYPE_CHECKING:
@@ -113,6 +118,12 @@ class RecommendationEngine:
     rsi_oversold: float = 30.0
     rsi_overbought: float = 70.0
     sentiment_analyzer: SentimentAnalyzer | None = None
+    # News quality weighting (recency × source reputation) applied when
+    # aggregating per-article FinBERT scores into the per-symbol
+    # sentiment_score. Defaults are deliberately conservative — see
+    # src.sentiment.news_quality. ``None`` lazily builds defaults so
+    # call sites that don't customize sentiment stay one-liner.
+    news_quality_weights: NewsQualityWeights | None = None
 
     # -- top-level entry point ---------------------------------------------
 
@@ -129,9 +140,9 @@ class RecommendationEngine:
         indicator_scores = self._score_indicators(df)
         technical_score = self._combine_indicator_scores(indicator_scores)
 
-        article_scores = self._score_news(news or [])
+        scored_articles = self._score_news(news or [], now=ts)
         sentiment_score = (
-            sum(article_scores) / len(article_scores) if article_scores else 0.0
+            weighted_sentiment_mean(scored_articles) if scored_articles else 0.0
         )
 
         combined = _clip(
@@ -146,7 +157,7 @@ class RecommendationEngine:
             technical_score=technical_score,
             sentiment_score=sentiment_score,
             combined=combined,
-            num_news=len(article_scores),
+            num_news=len(scored_articles),
         )
 
         return TradingRecommendation(
@@ -159,7 +170,7 @@ class RecommendationEngine:
             indicator_scores=indicator_scores,
             reasoning=reasoning,
             timestamp=ts,
-            num_news_articles=len(article_scores),
+            num_news_articles=len(scored_articles),
             # Default tier = direct map from action. The promoter in
             # src.intelligence.tier upgrades to STRONG when conditions
             # are met; the engine itself doesn't have history access.
@@ -234,17 +245,30 @@ class RecommendationEngine:
 
     # -- sentiment ---------------------------------------------------------
 
-    def _score_news(self, news: list[NewsArticle]) -> list[float]:
+    def _score_news(
+        self,
+        news: list[NewsArticle],
+        *,
+        now: datetime,
+    ) -> list[tuple[float, float]]:
+        """Score each article and pair it with its quality weight.
+
+        Returns ``(signed_score, weight)`` for the latest
+        ``max_news_articles`` items, sorted most-recent first. ``now``
+        is threaded so the recency-decay component is deterministic
+        in tests.
+        """
         if not news:
             return []
-        # Pick most recent articles first.
         ordered = sorted(news, key=lambda a: a.published_at, reverse=True)
         ordered = ordered[: self.max_news_articles]
         analyzer = self.sentiment_analyzer or SentimentAnalyzer()
-        scored: list[float] = []
+        weights = self.news_quality_weights or NewsQualityWeights()
+        scored: list[tuple[float, float]] = []
         for article in ordered:
             score: SentimentScore = analyzer.score_article(article)
-            scored.append(score.signed)
+            weight = quality_weight(article, now, weights)
+            scored.append((score.signed, weight))
         return scored
 
     # -- decision + reasoning ---------------------------------------------

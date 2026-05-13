@@ -214,6 +214,89 @@ def test_max_news_articles_cap_is_respected() -> None:
     assert rec.num_news_articles == 3
 
 
+class HeadlineKeyedAnalyzer(SentimentAnalyzer):
+    """Routes each article to a different score by headline keyword.
+
+    Lets tests build a mixed-sentiment news set without depending on
+    the real FinBERT pipeline or on which keyword the model decides
+    is bullish.
+    """
+
+    def __init__(self, mapping: dict[str, SentimentScore]) -> None:
+        self._mapping = mapping
+
+    def score_text(self, text: str) -> SentimentScore:  # type: ignore[override]
+        return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+    def score_article(self, article: NewsArticle) -> SentimentScore:  # type: ignore[override]
+        for key, score in self._mapping.items():
+            if key in article.headline:
+                return score
+        return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+
+def test_quality_weighting_tilts_aggregate_toward_high_quality_article() -> None:
+    """Mixed news set: a fresh Reuters bullish article and a 48-hour-old
+    no-name blog bearish article. The aggregator should pull the
+    sentiment_score toward the Reuters value rather than averaging
+    them equally, because Reuters has both a higher source weight and
+    higher recency weight."""
+    fired = datetime.now(UTC)
+    fresh_reuters = NewsArticle(
+        id="r1",
+        headline="bullish-keyword",
+        source="Reuters",
+        symbols=["AAPL"],
+        published_at=fired - timedelta(hours=1),
+    )
+    old_blog = NewsArticle(
+        id="b1",
+        headline="bearish-keyword",
+        source="Random Blog",
+        symbols=["AAPL"],
+        published_at=fired - timedelta(hours=48),
+    )
+    analyzer = HeadlineKeyedAnalyzer(
+        {
+            "bullish-keyword": SentimentScore(SentimentLabel.POSITIVE, 0.9),
+            "bearish-keyword": SentimentScore(SentimentLabel.NEGATIVE, 0.9),
+        }
+    )
+    engine = RecommendationEngine(
+        technical_weight=0.0,
+        sentiment_weight=1.0,
+        sentiment_analyzer=analyzer,
+    )
+    rec = engine.recommend(
+        "AAPL", _flat_df(), news=[old_blog, fresh_reuters], now=fired
+    )
+    # Unweighted mean would be 0.0 (one +0.9, one -0.9). Quality
+    # weighting must push the result well into positive territory.
+    assert rec.sentiment_score > 0.5
+    # Both articles still count toward the news count.
+    assert rec.num_news_articles == 2
+
+
+def test_quality_weighting_preserves_score_for_single_article() -> None:
+    """Single-article aggregate equals the article's signed score
+    regardless of source / recency — preserves the behavior of every
+    prior single-article test."""
+    fake = FakeSentimentAnalyzer(SentimentLabel.POSITIVE, confidence=0.7)
+    engine = RecommendationEngine(
+        technical_weight=0.0, sentiment_weight=1.0, sentiment_analyzer=fake
+    )
+    # Old + unknown source, deliberately the lowest-weight combo.
+    article = NewsArticle(
+        id="z1",
+        headline="x",
+        source="Unknown Outlet",
+        symbols=["AAPL"],
+        published_at=datetime.now(UTC) - timedelta(hours=72),
+    )
+    rec = engine.recommend("AAPL", _flat_df(), news=[article])
+    assert rec.sentiment_score == pytest.approx(0.7)
+
+
 # ---------------------------------------------------------------------------
 # Action thresholds
 # ---------------------------------------------------------------------------

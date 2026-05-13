@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     sentiment_model: str = "ProsusAI/finbert"
     sentiment_device: SentimentDevice = SentimentDevice.CPU
 
+    # ---- News quality weighting ----
+    # Per-article weight = recency_decay * source_reputation. Both
+    # factors are bounded [0, 1]; the recency floor keeps stale
+    # articles contributing a non-zero share.
+    news_recency_half_life_hours: float = 24.0
+    news_recency_floor_weight: float = 0.05
+
     # ---- AI summaries (Anthropic) ----
     anthropic_api_key: SecretStr | None = None
     llm_model: str = "claude-opus-4-7"
