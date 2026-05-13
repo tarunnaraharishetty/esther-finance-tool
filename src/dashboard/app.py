@@ -32,8 +32,14 @@ from textual.widgets import DataTable, Footer, Header, RichLog, Static
 from src.dashboard.state import DashboardSnapshot, RecommendationRow
 from src.intelligence.explain import Explanation, explain
 from src.intelligence.history import SignalEpisode, SignalHistorySummary
-from src.intelligence.opportunities import Opportunity, detect_opportunities
+from src.intelligence.opportunities import (
+    Opportunity,
+    RankedOpportunity,
+    detect_opportunities,
+    rank_opportunities,
+)
 from src.intelligence.pulse import MarketPulse, compute_pulse
+from src.intelligence.signal_profile import SignalProfile
 from src.intelligence.rankings import Rankings
 from src.intelligence.rankings import compute as compute_rankings
 from src.intelligence.watchlist import (
@@ -207,10 +213,15 @@ class WatchlistHeader(Static):
         if alerts_summary:
             lines.append(f"{_section_label('ALERTS')}{alerts_summary}")
 
-        # --- Opportunities (skip when none qualify) --------------------
-        opportunities = detect_opportunities(snap, n=3)
+        # --- Top opportunities (skip when none qualify) ---------------
+        # Ranked-composite output replaces the older kind-based view —
+        # same screen real estate, richer per-line content. Skipped
+        # when no directional symbols rank.
+        opportunities = rank_opportunities(snap, n=3)
         for opp in opportunities:
-            lines.append(f"{_section_label('OPP')}{_format_opportunity(opp)}")
+            lines.append(
+                f"{_section_label('OPP')}{_format_ranked_opportunity(opp)}"
+            )
 
         return "\n".join(lines)
 
@@ -311,7 +322,8 @@ def _header_signature(
     pulse_sig = (pulse.sentiment, pulse.conviction, pulse.activity)
     # Opportunities drive the OPP lines.
     opp_sig = tuple(
-        (o.symbol, o.kind) for o in detect_opportunities(snap, n=3)
+        (o.symbol, round(o.composite_score, 3), o.profile)
+        for o in rank_opportunities(snap, n=3)
     )
     return (
         rows_sig,
@@ -321,6 +333,56 @@ def _header_signature(
         pulse_sig,
         opp_sig,
     )
+
+
+def _format_ranked_opportunity(opp: RankedOpportunity) -> str:
+    """One dense OPP line for the ranked-composite output.
+
+    Format:
+      SYMBOL  TIER         0.82   [stable·strengthening·persistent]   rationale phrases
+    """
+    tier_styled = _tier_text(opp.tier)
+    profile_chip = _format_profile_chip(opp.profile)
+    score = f"[bold]{opp.composite_score:.2f}[/bold]"
+    rationale = (
+        "  [dim]·[/]  ".join(opp.rationale)
+        if opp.rationale
+        else "[dim](no driver above floor)[/dim]"
+    )
+    return (
+        f"[bold]{opp.symbol:<6}[/]  {tier_styled}  {score}  "
+        f"{profile_chip}  [dim]{rich_escape(rationale)}[/dim]"
+    )
+
+
+_PROFILE_AXIS_STYLES: dict[str, dict[str, str]] = {
+    "stability": {"stable": "bold green", "noisy": "bold red"},
+    "trend": {
+        "strengthening": "bold green",
+        "weakening": "bold red",
+        "flat": "dim",
+    },
+    "persistence": {"persistent": "bold green", "flipping": "bold red"},
+}
+
+
+def _format_profile_chip(profile: SignalProfile) -> str:
+    """Three colored axis labels separated by middle dots.
+
+    Each axis is independently colored — green for the positive
+    bucket (stable / strengthening / persistent), red for the
+    negative (noisy / weakening / flipping), dim for flat. Compact
+    enough to fit on one OPP line.
+    """
+    parts = [
+        f"[{_PROFILE_AXIS_STYLES['stability'][profile.stability]}]"
+        f"{profile.stability}[/]",
+        f"[{_PROFILE_AXIS_STYLES['trend'][profile.trend]}]"
+        f"{profile.trend}[/]",
+        f"[{_PROFILE_AXIS_STYLES['persistence'][profile.persistence]}]"
+        f"{profile.persistence}[/]",
+    ]
+    return "[dim][[/dim]" + "[dim]·[/dim]".join(parts) + "[dim]][/dim]"
 
 
 def _format_opportunity(opp: Opportunity) -> str:

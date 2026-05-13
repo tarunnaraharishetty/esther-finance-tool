@@ -1032,9 +1032,100 @@ async def test_watchlist_header_renders_opp_lines_when_qualifying_rows_exist() -
         header = app.query_one(WatchlistHeader)
         header.snapshot = snap
         text = header.render()
-        # OPP section + at least one opportunity kind label.
+        # OPP section now renders the ranked-composite output: tier
+        # display + profile chip axes. At least one of the profile
+        # axis labels must appear.
         assert "OPP" in text
-        assert any(kind in text for kind in ("convergence", "high_conviction"))
+        assert any(
+            axis in text
+            for axis in (
+                "stable", "noisy",
+                "strengthening", "weakening", "flat",
+                "persistent", "flipping",
+            )
+        )
+
+
+async def test_opp_line_shows_composite_score_and_profile_chip() -> None:
+    """A qualifying directional row should produce an OPP line that
+    surfaces the composite score (formatted .NN) and a profile chip
+    with all three axis labels."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.strategy.base import RecommendationTier
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="NVDA",
+        action=SignalAction.BUY,
+        confidence=0.85,
+        combined_score=0.8,
+        technical_score=0.7,
+        sentiment_score=0.6,
+        rsi=0.5, macd=0.7, bollinger=0.4,
+        last_price=520.0,
+        num_news_articles=8,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.STRONG_BUY,
+        signal_quality="high",
+        stability="stable",
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        assert "OPP" in text
+        # Composite score formatted to two decimals appears somewhere.
+        import re
+        assert re.search(r"\b0\.\d{2}\b", text), f"expected composite score in {text}"
+        # Profile chip has all three axes.
+        assert "stable" in text
+        # NVDA is the symbol; STRONG BUY is the tier display.
+        assert "NVDA" in text
+        assert "STRONG BUY" in text
+
+
+async def test_opp_section_omitted_when_no_directional_rows() -> None:
+    """All-HOLD watchlist → no qualifying rows → OPP section absent."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+    hold_row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.2,
+        combined_score=0.0,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0, macd=0.0, bollinger=0.0,
+        last_price=100.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    snap = DashboardSnapshot(tick=1, rows=[hold_row])
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        # OPP label only appears as a row-section header — absent when
+        # no entries qualify.
+        assert "OPP        " not in text  # the padded label
 
 
 async def test_table_action_cell_renders_tier_display() -> None:
