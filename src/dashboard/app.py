@@ -39,6 +39,10 @@ from src.intelligence.opportunities import (
     RankedOpportunity,
     rank_opportunities,
 )
+from src.intelligence.opportunity_drilldown import (
+    OpportunityDrilldown,
+    build_drilldown,
+)
 from src.intelligence.opportunity_history import OpportunityHistory
 from src.intelligence.pulse import MarketPulse, compute_pulse
 from src.intelligence.pulse_history import PulseHistory
@@ -253,6 +257,7 @@ def _detail_signature(
     brief_state: str,
     brief_text: str,
     brief_kind: str = "row",
+    opp_match: tuple[int, RankedOpportunity] | None = None,
 ) -> tuple[object, ...]:
     """Stable signature of what DetailPanel.render() would produce.
 
@@ -277,6 +282,33 @@ def _detail_signature(
         for a in snap.recent_alerts
         if a.symbol == row.symbol
     )
+    # OPP membership signature — when the selected row ranks in top-N,
+    # the drilldown is part of the rendered output and must invalidate
+    # the cache when any driver score, profile axis, or history badge
+    # changes. Rounded to 3 places so tick-over-tick float jitter on a
+    # stable OPP doesn't bust the cache.
+    opp_sig: tuple[object, ...] = ()
+    if opp_match is not None:
+        rank, opp = opp_match
+        opp_history = snap.opp_history.get(row.symbol)
+        opp_sig = (
+            rank,
+            round(opp.composite_score, 3),
+            round(opp.technical_alignment, 3),
+            round(opp.sentiment_alignment, 3),
+            round(opp.confidence_acceleration, 3),
+            round(opp.momentum_persistence, 3),
+            round(opp.unusual_activity, 3),
+            round(opp.reversal_strength, 3),
+            round(opp.signal_quality_score, 3),
+            opp.profile.stability,
+            opp.profile.trend,
+            opp.profile.persistence,
+            opp.rationale,
+            (opp_history.streak, opp_history.appearances)
+            if opp_history is not None
+            else None,
+        )
     return (
         row.symbol,
         row.action.value,
@@ -296,6 +328,7 @@ def _detail_signature(
         row.error,
         hist_sig,
         symbol_alerts_sig,
+        opp_sig,
         brief_state,
         brief_text,
         brief_kind,
@@ -465,6 +498,96 @@ def _format_profile_chip(profile: SignalProfile) -> str:
         f"{profile.persistence}[/]",
     ]
     return "[dim][[/dim]" + "[dim]·[/dim]".join(parts) + "[dim]][/dim]"
+
+
+_QUALITY_LABEL_STYLES: dict[str, str] = {
+    "high conviction": "bold green",
+    "building momentum": "bold cyan",
+    "reversal candidate": "bold yellow",
+    "sentiment-driven": "bold magenta",
+    "unstable / choppy": "bold red",
+}
+
+
+def _quality_label_style(label: str) -> str:
+    return _QUALITY_LABEL_STYLES.get(label, "white")
+
+
+def _driver_bar(score: float, width: int = 10) -> str:
+    """Filled-block bar of width chars, proportional to score in ``[0, 1]``.
+
+    Out-of-range scores clamp — defensive against any future driver
+    whose normalization slips outside the bound.
+    """
+    filled = max(0, min(width, round(score * width)))
+    return "█" * filled + "·" * (width - filled)
+
+
+def _driver_style(score: float) -> str:
+    """Color a driver score by tier — green for strong, yellow for
+    moderate, dim for quiet. Mirrors the magnitude style used by the
+    watchlist-header rank cells so the eye learns one palette."""
+    if score >= 0.6:
+        return "bold green"
+    if score >= 0.3:
+        return "yellow"
+    return "dim"
+
+
+def _render_opportunity_drilldown(drilldown: OpportunityDrilldown) -> str:
+    """Multi-line render of the Opportunity Intelligence drilldown.
+
+    Layout (skipping empty subsections):
+
+      OPP #1  composite 0.78  NEW
+      high conviction  ·  building momentum
+      Drivers
+        signal quality       ██████████  1.00  high signal quality
+        momentum persistence ████████··  0.80  momentum holding across recent ticks
+        ...
+      Rationale
+        ·  indicators aligned with action
+        ·  high signal quality
+    """
+    header = (
+        f"  [bold]OPP #{drilldown.rank}[/]  "
+        f"[dim]composite[/] [bold]{drilldown.composite_score:.2f}[/]"
+    )
+    badge = _format_history_badge(drilldown.history)
+    if badge.strip():
+        header += f"  {badge}"
+
+    lines: list[str] = [header]
+
+    if drilldown.quality_labels:
+        chips = "  [dim]·[/]  ".join(
+            f"[{_quality_label_style(label)}]{label}[/]"
+            for label in drilldown.quality_labels
+        )
+        lines.append(f"  {chips}")
+
+    lines.append("  [bold dim]Drivers[/]")
+    for driver in drilldown.drivers:
+        bar = _driver_bar(driver.score)
+        style = _driver_style(driver.score)
+        descriptor = (
+            f"  [dim]{rich_escape(driver.descriptor)}[/dim]"
+            if driver.descriptor
+            else ""
+        )
+        lines.append(
+            f"    [dim]{driver.label:<22}[/dim]  "
+            f"[{style}]{bar}[/]  "
+            f"[{style}]{driver.score:.2f}[/]"
+            f"{descriptor}"
+        )
+
+    if drilldown.rationale:
+        lines.append("  [bold dim]Rationale[/]")
+        for phrase in drilldown.rationale:
+            lines.append(f"    [dim]·[/]  [dim]{rich_escape(phrase)}[/dim]")
+
+    return "\n".join(lines)
 
 
 def _format_opportunity(opp: Opportunity) -> str:
@@ -742,8 +865,19 @@ class DetailPanel(Static):
         idx = max(0, min(self.row_index, len(snap.rows) - 1))
         r = snap.rows[idx]
 
+        # OPP match: compute once so the signature builder and the
+        # drilldown render see the same RankedOpportunity. Pure call,
+        # negligible cost — same data the WatchlistHeader already
+        # recomputes on its own render.
+        opp_match: tuple[int, RankedOpportunity] | None = None
+        for rank, opp in enumerate(rank_opportunities(snap, n=3), start=1):
+            if opp.symbol == r.symbol:
+                opp_match = (rank, opp)
+                break
+
         signature = _detail_signature(
-            r, snap, self.brief_state, self.brief_text, self.brief_kind
+            r, snap, self.brief_state, self.brief_text, self.brief_kind,
+            opp_match=opp_match,
         )
         if signature == self._last_signature:
             return self._last_rendered
@@ -810,6 +944,19 @@ class DetailPanel(Static):
             else ""
         )
 
+        # Section: Opportunity Intelligence (only when this symbol ranks
+        # in the top-N). Additive — non-OPP rows render unchanged.
+        opp_block = ""
+        if opp_match is not None:
+            rank, opp = opp_match
+            drilldown = build_drilldown(
+                opp, rank, snap.opp_history.get(r.symbol)
+            )
+            opp_block = (
+                "[bold cyan]Opportunity Intelligence[/]\n"
+                + _render_opportunity_drilldown(drilldown)
+            )
+
         # Section: AI brief. Header reflects which kind of brief this is
         # so the trader can tell a per-row summary from an OPP brief at
         # a glance — the prose styles look similar enough otherwise.
@@ -837,6 +984,8 @@ class DetailPanel(Static):
             sections.append(history_block)
         if alerts_block:
             sections.append(alerts_block)
+        if opp_block:
+            sections.append(opp_block)
         if brief_block:
             sections.append(brief_block)
         rendered = "\n".join(sections)

@@ -1459,6 +1459,175 @@ async def test_detail_panel_omits_tier_section_when_no_reasons() -> None:
         assert "Why this tier" not in text
 
 
+async def test_detail_panel_renders_opportunity_intelligence_when_in_top_n() -> None:
+    """When the selected row's symbol ranks in the top-N opportunities,
+    the detail panel surfaces the Opportunity Intelligence drilldown:
+    rank, composite, driver bars (with names), and rationale phrases."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.intelligence.opportunity_history import OpportunityHistory
+    from src.strategy.base import RecommendationTier
+
+    fired = datetime.now(UTC)
+    # Strong directional row with high-quality drivers — guaranteed to
+    # rank in rank_opportunities(n=3): BUY action, high signal_quality,
+    # aligned indicators, supportive sentiment with news.
+    row = RecommendationRow(
+        symbol="NVDA",
+        action=SignalAction.BUY,
+        confidence=0.85,
+        combined_score=0.75,
+        technical_score=0.55,
+        sentiment_score=0.50,
+        rsi=0.55,
+        macd=0.60,
+        bollinger=0.45,
+        last_price=520.0,
+        num_news_articles=6,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.STRONG_BUY,
+        signal_quality="high",
+        stability="stable",
+    )
+    snap = DashboardSnapshot(
+        tick=1,
+        rows=[row],
+        opp_history={
+            "NVDA": OpportunityHistory(streak=3, appearances=4, window=10),
+        },
+    )
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        detail.row_index = 0
+        text = detail.render()
+        assert "Opportunity Intelligence" in text
+        assert "OPP #1" in text
+        assert "composite" in text
+        # Sticky 3x streak should surface the history badge.
+        assert "3x" in text
+        # All seven driver labels appear in the drivers block.
+        for label in (
+            "signal quality",
+            "technical alignment",
+            "sentiment alignment",
+            "momentum persistence",
+            "confidence acceleration",
+            "unusual activity",
+            "reversal strength",
+        ):
+            assert label in text
+        # High-magnitude drivers earn their observational descriptor.
+        assert "indicators aligned with action" in text
+        assert "high signal quality" in text
+
+
+async def test_detail_panel_omits_opportunity_section_for_non_opp_row() -> None:
+    """A HOLD row never ranks in rank_opportunities, so the drilldown
+    section must be absent. Non-OPP rows render unchanged."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.25,
+        combined_score=0.05,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0, macd=0.0, bollinger=0.0,
+        last_price=150.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        detail.row_index = 0
+        text = detail.render()
+        assert "Opportunity Intelligence" not in text
+
+
+async def test_detail_panel_quality_chips_render_for_high_conviction_row() -> None:
+    """Driver scores that meet the high-conviction gate should produce
+    a 'high conviction' chip in the rendered drilldown.
+
+    Requires both signal_quality=high (drives signal_quality_score=1.0)
+    and a composite north of 0.65 — supplied here via a multi-tick
+    rising-confidence episode that bumps momentum_persistence and
+    confidence_acceleration above their no-history defaults.
+    """
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.intelligence.history import SignalEpisode, SignalHistorySummary
+    from src.strategy.base import RecommendationTier
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="MSFT",
+        action=SignalAction.BUY,
+        confidence=0.90,
+        combined_score=0.80,
+        technical_score=0.60,
+        sentiment_score=0.55,
+        rsi=0.55,
+        macd=0.55,
+        bollinger=0.55,
+        last_price=420.0,
+        num_news_articles=5,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.STRONG_BUY,
+        signal_quality="high",
+        stability="stable",
+    )
+    current_episode = SignalEpisode(
+        action=SignalAction.BUY,
+        started_at=fired,
+        last_seen_at=fired,
+        tick_count=5,
+        confidence_first=0.60,
+        confidence_last=0.90,
+    )
+    snap = DashboardSnapshot(
+        tick=5,
+        rows=[row],
+        signal_history={
+            "MSFT": SignalHistorySummary(current=current_episode, recent=()),
+        },
+    )
+    app = DashboardApp(
+        MockDashboardController(watchlist=["MSFT"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        detail.row_index = 0
+        text = detail.render()
+        assert "high conviction" in text
+        # A multi-tick rising-confidence run should also surface the
+        # building-momentum chip — both labels co-fire on truly strong
+        # setups.
+        assert "building momentum" in text
+
+
 async def test_watchlist_header_renders_pulse_line_when_rows_present() -> None:
     """The pulse line is always at the top when any healthy rows
     exist. Tier values are stable schema (bullish/bearish/mixed/neutral
