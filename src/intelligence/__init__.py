@@ -24,8 +24,14 @@ from src.intelligence.alerts import (
 from src.intelligence.explain import Contributor, Explanation, explain
 from src.intelligence.history import SignalEpisode, SignalHistory, SignalHistorySummary
 from src.intelligence.llm_summary import LLMSummarizer
-from src.intelligence.opportunities import Opportunity, detect_opportunities
+from src.intelligence.opportunities import (
+    Opportunity,
+    RankedOpportunity,
+    detect_opportunities,
+    rank_opportunities,
+)
 from src.intelligence.pulse import MarketPulse, compute_pulse
+from src.intelligence.signal_profile import SignalProfile, compute_signal_profile
 from src.intelligence.recap import LLMRecapGenerator, RecapContext
 from src.intelligence.summary import Summarizer, TemplateSummarizer
 from src.intelligence.tier import promote_to_tier
@@ -51,22 +57,26 @@ __all__ = [
     "MarketPulse",
     "Opportunity",
     "PrioritizerConfig",
+    "RankedOpportunity",
     "RecapContext",
     "Rule",
     "SentimentShiftRule",
     "SignalEpisode",
     "SignalHistory",
     "SignalHistorySummary",
+    "SignalProfile",
     "Summarizer",
     "TemplateSummarizer",
     "WatchlistChange",
     "action_breakdown",
     "compute_pulse",
+    "compute_signal_profile",
     "detect_opportunities",
     "diff_snapshots",
     "explain",
     "load_prioritizer_config_from_yaml",
     "load_rules_from_yaml",
     "promote_to_tier",
+    "rank_opportunities",
     "top_movers",
 ]
