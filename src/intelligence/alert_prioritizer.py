@@ -108,6 +108,9 @@ _DEFAULT_COOLDOWNS = {
     "action_changed": 0,
     "confidence_threshold": 300,
     "sentiment_shift": 600,
+    # Tier changes can oscillate around the promotion gate when one
+    # quality driver hovers near a threshold; 5 min suppresses the noise.
+    "tier_changed": 300,
 }
 
 

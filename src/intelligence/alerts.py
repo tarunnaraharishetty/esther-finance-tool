@@ -137,6 +137,45 @@ class SentimentShiftRule:
         )
 
 
+@dataclass
+class TierChangedRule:
+    """Fires when the 5-tier recommendation shifts WITHIN the same base
+    action — i.e. a promote/demote like ``BUY -> STRONG_BUY`` or
+    ``STRONG_SELL -> SELL``.
+
+    Tier changes that come with an action flip (``BUY -> SELL``) are
+    already covered by :class:`ActionChangedRule`; this rule deliberately
+    skips them to avoid double-alerting on the same event. The result:
+    each rule emits distinct information.
+    """
+
+    severity: str = "info"
+    name: str = "tier_changed"
+
+    def evaluate(
+        self,
+        current: RecommendationRow,
+        previous: RecommendationRow | None,
+    ) -> Alert | None:
+        if previous is None or current.error or previous.error:
+            return None
+        if current.tier == previous.tier:
+            return None
+        # Base action change is ActionChangedRule's territory.
+        if current.action != previous.action:
+            return None
+        return Alert(
+            symbol=current.symbol,
+            rule=self.name,
+            severity=self.severity,
+            message=(
+                f"tier {previous.tier.display} -> {current.tier.display} "
+                f"(conf {current.confidence:.2f})"
+            ),
+            fired_at=datetime.now(UTC),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
@@ -172,6 +211,7 @@ def _default_rules() -> list[Rule]:
         ActionChangedRule(),
         ConfidenceThresholdRule(),
         SentimentShiftRule(),
+        TierChangedRule(),
     ]
 
 
@@ -184,6 +224,7 @@ _RULE_REGISTRY: dict[str, type[Rule]] = {
     "action_changed": ActionChangedRule,
     "confidence_threshold": ConfidenceThresholdRule,
     "sentiment_shift": SentimentShiftRule,
+    "tier_changed": TierChangedRule,
 }
 
 _VALID_SEVERITIES = {"info", "warn", "critical"}

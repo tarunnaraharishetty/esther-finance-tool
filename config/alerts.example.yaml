@@ -19,6 +19,13 @@
 #                          `delta` since the last tick.
 #                          delta    (default: 0.4)
 #                          severity (default: info)
+#
+#   tier_changed           Fires when the 5-tier recommendation shifts
+#                          within the same base action (e.g. BUY -> STRONG BUY,
+#                          STRONG_SELL -> SELL). Cross-action flips are
+#                          covered by `action_changed`, so this rule never
+#                          double-alerts.
+#                          severity (default: info)
 
 rules:
   # Any recommendation flip — most actionable signal for a discretionary trader.
@@ -41,6 +48,11 @@ rules:
     delta: 0.4
     severity: info
 
+  # Tier promotions/demotions within the same base action — e.g.,
+  # BUY -> STRONG BUY when the four STRONG gates all light up.
+  - type: tier_changed
+    severity: info
+
 # ---------------------------------------------------------------------------
 # Prioritizer — applied AFTER the rules above produce their raw firings.
 # Optional. If this block is omitted entirely, sensible defaults are used:
@@ -55,6 +67,7 @@ prioritizer:
     # Per-rule debounce in seconds. Same (symbol, rule) suppressed within window.
     confidence_threshold: 300
     sentiment_shift: 600
+    tier_changed: 300
 
   composites:
     # When ALL `requires` rules fire for the same symbol in the same tick,

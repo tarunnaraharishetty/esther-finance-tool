@@ -14,10 +14,11 @@ from src.intelligence.alerts import (
     AlertEngine,
     ConfidenceThresholdRule,
     SentimentShiftRule,
+    TierChangedRule,
     load_prioritizer_config_from_yaml,
     load_rules_from_yaml,
 )
-from src.strategy.base import SignalAction
+from src.strategy.base import RecommendationTier, SignalAction
 
 
 def _row(
@@ -26,6 +27,7 @@ def _row(
     action: SignalAction = SignalAction.HOLD,
     confidence: float = 0.3,
     sentiment: float = 0.0,
+    tier: RecommendationTier | None = None,
     error: str | None = None,
 ) -> RecommendationRow:
     return RecommendationRow(
@@ -42,6 +44,7 @@ def _row(
         num_news_articles=1,
         reasoning="",
         timestamp=datetime.now(UTC),
+        tier=tier if tier is not None else RecommendationTier.from_action(action),
         error=error,
     )
 
@@ -102,6 +105,87 @@ def test_sentiment_shift_fires_on_large_swing() -> None:
 def test_sentiment_shift_silent_below_delta() -> None:
     rule = SentimentShiftRule(delta=0.4)
     assert rule.evaluate(_row(sentiment=0.1), _row(sentiment=0.3)) is None
+
+
+# ---------------------------------------------------------------------------
+# TierChangedRule
+# ---------------------------------------------------------------------------
+
+
+def test_tier_changed_fires_on_buy_to_strong_buy_promotion() -> None:
+    rule = TierChangedRule()
+    prev = _row(action=SignalAction.BUY, tier=RecommendationTier.BUY, confidence=0.55)
+    curr = _row(
+        action=SignalAction.BUY, tier=RecommendationTier.STRONG_BUY, confidence=0.78
+    )
+    alert = rule.evaluate(curr, prev)
+    assert alert is not None
+    assert "BUY" in alert.message and "STRONG BUY" in alert.message
+
+
+def test_tier_changed_fires_on_strong_sell_to_sell_demotion() -> None:
+    rule = TierChangedRule()
+    prev = _row(
+        action=SignalAction.SELL, tier=RecommendationTier.STRONG_SELL, confidence=0.72
+    )
+    curr = _row(action=SignalAction.SELL, tier=RecommendationTier.SELL, confidence=0.55)
+    alert = rule.evaluate(curr, prev)
+    assert alert is not None
+    assert "STRONG SELL" in alert.message
+    assert "-> SELL" in alert.message
+
+
+def test_tier_changed_silent_when_action_flips() -> None:
+    """ActionChangedRule already covers cross-action transitions. The
+    tier rule should stay silent to avoid double-alerting."""
+    rule = TierChangedRule()
+    prev = _row(
+        action=SignalAction.BUY, tier=RecommendationTier.STRONG_BUY, confidence=0.70
+    )
+    curr = _row(
+        action=SignalAction.SELL, tier=RecommendationTier.STRONG_SELL, confidence=0.70
+    )
+    assert rule.evaluate(curr, prev) is None
+
+
+def test_tier_changed_silent_when_tier_unchanged() -> None:
+    rule = TierChangedRule()
+    prev = _row(action=SignalAction.BUY, tier=RecommendationTier.BUY, confidence=0.55)
+    curr = _row(action=SignalAction.BUY, tier=RecommendationTier.BUY, confidence=0.62)
+    assert rule.evaluate(curr, prev) is None
+
+
+def test_tier_changed_silent_on_first_sight() -> None:
+    rule = TierChangedRule()
+    assert rule.evaluate(_row(), None) is None
+
+
+def test_tier_changed_silent_on_error_rows() -> None:
+    rule = TierChangedRule()
+    prev = _row(action=SignalAction.BUY, tier=RecommendationTier.BUY)
+    err_curr = _row(action=SignalAction.BUY, tier=RecommendationTier.STRONG_BUY, error="boom")
+    assert rule.evaluate(err_curr, prev) is None
+    err_prev = _row(action=SignalAction.BUY, tier=RecommendationTier.BUY, error="boom")
+    curr_ok = _row(action=SignalAction.BUY, tier=RecommendationTier.STRONG_BUY)
+    assert rule.evaluate(curr_ok, err_prev) is None
+
+
+def test_tier_changed_default_severity_is_info() -> None:
+    """Same-direction tier shifts are notable but not urgent — info,
+    not warn or critical."""
+    assert TierChangedRule().severity == "info"
+
+
+def test_tier_changed_rule_in_default_rule_set() -> None:
+    """A fresh AlertEngine includes TierChangedRule out of the box."""
+    engine = AlertEngine()
+    rule_names = {r.name for r in engine.rules}
+    assert "tier_changed" in rule_names
+
+
+# ---------------------------------------------------------------------------
+# AlertEngine + Rule interaction
+# ---------------------------------------------------------------------------
 
 
 def test_engine_collects_alerts_from_all_rules() -> None:
@@ -232,7 +316,25 @@ def test_example_yaml_in_repo_parses() -> None:
         "ActionChangedRule",
         "ConfidenceThresholdRule",
         "SentimentShiftRule",
+        "TierChangedRule",
     }
+
+
+def test_yaml_loader_parses_tier_changed_rule(tmp_path: Path) -> None:
+    """The YAML registry should recognize tier_changed and instantiate
+    the right concrete rule class."""
+    path = _write_yaml(
+        tmp_path,
+        """
+rules:
+  - type: tier_changed
+    severity: warn
+""",
+    )
+    rules = load_rules_from_yaml(path)
+    assert len(rules) == 1
+    assert isinstance(rules[0], TierChangedRule)
+    assert rules[0].severity == "warn"
 
 
 # ---------------------------------------------------------------------------
