@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import anthropic
 
 from src.config import Settings, get_settings
+from src.intelligence.grounding import GROUNDING_RULES_PER_SYMBOL
 from src.strategy.base import SignalAction
 from src.utils.logging import get_logger
 
@@ -31,7 +32,7 @@ log = get_logger(__name__)
 # prompt currently won't actually hit the cache — the marker is in place so
 # that as we add more guidance and few-shot examples here, caching kicks in
 # automatically. See shared/prompt-caching.md.
-_SYSTEM_PROMPT = """You are Esther, an AI trading research assistant in a terminal dashboard. \
+_SYSTEM_PROMPT = f"""You are Esther, an AI trading research assistant in a terminal dashboard. \
 Your role is to help a human trader interpret market signals — not to trade on their behalf, \
 not to recommend specific actions to execute.
 
@@ -40,18 +41,7 @@ For each request you receive a structured analysis of one symbol: a directional 
 [-1, 1], and per-signal contributors (RSI, MACD, Bollinger Bands, news sentiment). \
 You may also receive recent news headlines.
 
-GROUNDING RULES — these are non-negotiable and override any instinct to be helpful:
-
-- Only summarize information present in the user message. Do not invent specific numbers, \
-prices, percentages, or events not in the data provided.
-- If a fact would require external knowledge (recent earnings beat, analyst price target, \
-company news beyond what's quoted) and that fact is not in the user message, do not \
-include it. Stay with what the data shows.
-- Quote headlines verbatim or do not reference them at all. Do not paraphrase a headline \
-into a stronger or weaker claim than its literal text. Do not extrapolate causation from a \
-headline.
-- Describe the current state — do not predict where the symbol will go. No forecasts, no \
-"likely to" language, no probability claims.
+{GROUNDING_RULES_PER_SYMBOL}
 
 Write a tight 2–4 sentence brief that:
 

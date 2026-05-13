@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import anthropic
 
 from src.config import Settings, get_settings
+from src.intelligence.grounding import GROUNDING_RULES_WATCHLIST
 from src.intelligence.rankings import Rankings
 from src.intelligence.rankings import compute as compute_rankings
 from src.strategy.base import SignalAction
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
-_SYSTEM_PROMPT = """You are Esther, an AI trading research assistant in a terminal dashboard. \
+_SYSTEM_PROMPT = f"""You are Esther, an AI trading research assistant in a terminal dashboard. \
 This task is the session recap: a high-level brief summarizing what's notable across the \
 trader's whole watchlist right now. The recap is decision support for a discretionary \
 trader — never execution advice, never autonomous instruction.
@@ -44,20 +45,7 @@ You receive a structured snapshot: action mix, ranked sections (top movers by mo
 sentiment / confidence, biggest reversals, unusual movers, most volatile), recent action \
 flips with how long each ran, top recent headlines per symbol, and alert counts.
 
-GROUNDING RULES — non-negotiable:
-
-- Only summarize information present in the user message. Do not invent numbers, prices, \
-percentages, events, ticker movements, or themes not in the data provided.
-- If a fact would require external knowledge (broad market action, sector themes, \
-analyst views, earnings calendars) and that fact is not in the user message, do not \
-include it.
-- Quote headlines verbatim or do not reference them at all. Do not paraphrase a headline \
-into a stronger claim. Do not assert causation between a headline and a price/signal \
-movement unless the data explicitly links them.
-- Describe state — do not predict. No forecasts, no probability language, no "likely to" \
-phrasing.
-- The recap covers ONLY the symbols in the data. Do not bring up symbols, sectors, \
-indices, or instruments outside the watchlist.
+{GROUNDING_RULES_WATCHLIST}
 
 Structure your output (4–8 short sentences, plain prose, no markdown):
 
