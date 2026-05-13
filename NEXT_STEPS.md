@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-13 (news quality scoring shipped).*
+*Last touched: 2026-05-13 (SessionStore persistence shipped).*
 
 ---
 
@@ -48,6 +48,9 @@ src/
 │                      # pulse_history · opportunities · signal_profile ·
 │                      # opportunity_history · opportunity_brief ·
 │                      # opportunity_drilldown
+├── persistence/       # SessionStore (JSON snapshot for cross-restart
+│                      # state: signal_history, opp_history,
+│                      # pulse_history, alert_state, tick counter)
 └── utils/             # logging, rate limiter, preflight
 ```
 
@@ -77,6 +80,16 @@ dashboard or exposed via the CLI.
   unknown = 0.3). Every downstream feature (alerts, pulse, ranking,
   opportunities, briefs) inherits the improvement via
   `row.sentiment_score`.
+
+**Persistence**
+- `SessionStore` — atomic JSON snapshot of intelligence-layer
+  trackers (signal history, OPP membership, pulse history, alert
+  state, tick counter). Written at the end of every tick; loaded at
+  controller startup. Corruption-resilient (missing / invalid /
+  schema-mismatched files cold-start cleanly). Opt-in via
+  `SessionStore` injection into the controller; tests stay
+  ephemeral by omitting it. Default path
+  `data/session_state.json`, env-overridable.
 
 **Strategy**
 - RSI / MACD / Bollinger indicators
@@ -128,28 +141,24 @@ dashboard or exposed via the CLI.
   · `o` cycle OPP · `b` OPP brief · `a` add symbol · `x` remove symbol
 
 **Quality baseline**
-- 534 passing tests, 1 deselected (`slow`/`integration`)
+- 552 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
-- `mypy src` (`--strict`) green across all 45 source files
+- `mypy src` (`--strict`) green across all 47 source files
 - Documented exceptions live in `pyproject.toml`
 
 ---
 
 ## Remaining high-priority roadmap
 
-Four themes for upcoming sessions. Listed with current understanding
-of scope and what they unlock; sequencing recommendation is in the
-next section. (Both prior roadmap items — expanded opportunity
-drilldown and news quality scoring — shipped on 2026-05-13.)
+Three themes for upcoming sessions. (Drilldown, news quality scoring,
+and controller-owned `SessionStore` persistence all shipped on
+2026-05-13.) One nice-to-have follow-up on persistence: brief caches
+(LLM row briefs + OPP briefs) currently live on `DashboardApp` and
+aren't persisted yet — a separate file-section or store hook can
+plug into the app layer cleanly. Leaving for now since brief
+re-generation is cheap once we have an API key.
 
-### 1. Persistence / history improvements
-Restart loses everything: alert history, signal history, opp tracker
-membership, pulse history, brief caches. A `SessionStore` interface
-(SQLite-backed or json-snapshot-per-session) would let the trader
-resume mid-day. This is foundational for anything that wants to span
-sessions — including multi-timeframe and smarter pulse evolution.
-
-### 2. Multi-timeframe intelligence
+### 1. Multi-timeframe intelligence
 Today the recommender runs on daily bars. Adding a second timeframe
 (e.g., 15-min intraday) would let alerts and the pulse react inside
 the trading day rather than tick-to-tick on daily-bar quirks.
@@ -159,14 +168,14 @@ recommender (per-timeframe scores combined), UI (timeframe toggle
 or both visible). Best done AFTER persistence so intraday state
 survives restarts.
 
-### 3. Smarter market pulse evolution
+### 2. Smarter market pulse evolution
 The pulse currently classifies one tick. With pulse_history we have
 trajectory data. Natural next steps: pattern detection ("breadth
 firming for 8 ticks"), regime classification (risk-on / risk-off /
 mixed), or an LLM-driven read of the trajectory tied into the recap
 brief. Build on top of pulse_history; doesn't add new state.
 
-### 4. Dashboard refinement
+### 3. Dashboard refinement
 Ongoing polish that doesn't fit a neat feature box: column tunables,
 help-overlay (`?`), better empty-state messages, configurable burst
 window, perhaps a command palette via Textual's built-in. Best done
@@ -215,20 +224,16 @@ when the surrounding code is touched.
 
 Sequenced for maximum compounding return.
 
-**1. Persistence (`SessionStore`)** *(start here tomorrow)*
-- Foundation for everything else. Multi-timeframe and smarter pulse
-  evolution both want session state to survive restarts. Doing it
-  here unblocks both.
+**1. Multi-timeframe intelligence** *(start here tomorrow)*
+- Biggest architectural lift; persistence is now in place so
+  intraday state will survive restarts cleanly. Plan the SessionStore
+  schema bump with the multi-timeframe data shape in mind.
 
-**2. Multi-timeframe intelligence**
-- Biggest architectural lift; do after persistence so intraday state
-  is durable. Plan the schema with persistence in mind.
+**2. Smarter market pulse evolution**
+- Builds naturally on the now-persistent pulse_history. Likely an
+  LLM-driven read of the trajectory tied into the recap brief.
 
-**3. Smarter market pulse evolution**
-- Builds naturally on persistence + multi-timeframe + existing
-  pulse_history. Likely an LLM-driven read of the trajectory.
-
-**4. Dashboard refinement**
+**3. Dashboard refinement**
 - In parallel with the above. Pick up small items between bigger
   features rather than as a dedicated session.
 
@@ -238,37 +243,39 @@ Sequenced for maximum compounding return.
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 534 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 552 passing
 ```
 
-Open this doc and start with **Persistence / `SessionStore`**
-(roadmap item #1, recommended order step 1). A storage interface
-(SQLite or json-snapshot) that lets the dashboard survive restarts:
-alert history, signal history, opp-tracker membership, pulse
-history, brief caches. Foundation for multi-timeframe + smarter
-pulse evolution downstream.
+Open this doc and start with **Multi-timeframe intelligence**
+(roadmap item #1, recommended order step 1). Today the recommender
+runs on daily bars only. Adding a second timeframe (15-min intraday
+is the natural pick) lets alerts and the pulse react inside the
+trading day rather than tick-to-tick on daily-bar quirks. Touches
+the data layer (separate cache buckets), the recommender (per-
+timeframe scores combined), and the UI (a toggle or simultaneous
+view).
 
 Suggested opening prompt to Claude:
 
-> Design and implement `SessionStore` — a storage interface that
-> survives restarts. Persist: signal_history per symbol, opp_history
-> per symbol, pulse_history, recent alerts (last N), brief caches
-> (row + OPP). Pick SQLite (already a dep) or json-per-session.
-> The controller writes on each tick; on startup it hydrates the
-> trackers. Keep the file path configurable via Settings. Don't
-> persist live Alpaca data — only intelligence-layer state.
+> Design multi-timeframe support: add 15-min intraday alongside
+> the existing daily bars. Indicators are already pure functions
+> so they work for any timeframe — the lift is data-layer caching,
+> per-timeframe recommender outputs, snapshot schema for both
+> timeframes, and a dashboard surface (toggle or split view). Plan
+> the SessionStore schema bump (schema_version=2) so intraday
+> state persists across restarts.
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `e517980` (push to `origin/main`
+- **Branch:** `main` is clean at `422a234` (push to `origin/main`
   pending — harness blocks direct push to default branch unless
   the user runs it themselves).
-- **Tests:** 534 passing, 1 deselected (`slow`/`integration` mark).
+- **Tests:** 552 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
-  across all 45 source files.
+  across all 47 source files.
 - **Dependencies installed in `.venv/`** (Python 3.14): all of
   `pyproject.toml`'s base set, plus `anthropic`, `pyyaml`, `textual`,
   `ruff`, `mypy`, `pytest`. `alembic` and `backtrader` removed.
