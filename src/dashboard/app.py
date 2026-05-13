@@ -32,6 +32,7 @@ from textual.widgets import DataTable, Footer, Header, RichLog, Static
 from src.dashboard.state import DashboardSnapshot, RecommendationRow
 from src.intelligence.explain import Explanation, explain
 from src.intelligence.history import SignalEpisode, SignalHistorySummary
+from src.intelligence.pulse import MarketPulse, compute_pulse
 from src.intelligence.rankings import Rankings
 from src.intelligence.rankings import compute as compute_rankings
 from src.intelligence.watchlist import (
@@ -122,7 +123,12 @@ class WatchlistHeader(Static):
             return "[dim]watchlist intel: loading…[/dim]"
 
         rankings = compute_rankings(snap, n=3)
+        pulse = compute_pulse(snap)
         lines: list[str] = []
+
+        # --- Pulse line (skip when no healthy rows) --------------------
+        if not pulse.is_empty:
+            lines.append(f"{_section_label('PULSE')}{_format_pulse(pulse)}")
 
         # --- Status line: action mix + changes since last refresh -------
         counts = action_breakdown(snap)
@@ -256,7 +262,43 @@ def _header_signature(
          round(r.sentiment_score, 3), r.num_news_articles)
         for r in snap.rows
     )
-    return (rows_sig, prev_sig, tuple(sorted(severity_counts.items())), indicators_sig)
+    # Pulse output drives the PULSE line.
+    pulse = compute_pulse(snap)
+    pulse_sig = (pulse.sentiment, pulse.conviction, pulse.activity)
+    return (
+        rows_sig,
+        prev_sig,
+        tuple(sorted(severity_counts.items())),
+        indicators_sig,
+        pulse_sig,
+    )
+
+
+def _format_pulse(pulse: MarketPulse) -> str:
+    """One dense line: sentiment · conviction · activity (tier-colored)."""
+    sentiment_style = {
+        "bullish": "bold green",
+        "bearish": "bold red",
+        "mixed": "bold yellow",
+        "neutral": "dim",
+    }.get(pulse.sentiment, "white")
+    conviction_style = {
+        "strong": "bold",
+        "moderate": "white",
+        "weak": "dim",
+    }.get(pulse.conviction, "white")
+    activity_style = {
+        "volatile": "bold red",
+        "active": "yellow",
+        "calm": "dim",
+    }.get(pulse.activity, "white")
+    return (
+        f"[{sentiment_style}]{pulse.sentiment}[/]  "
+        f"[dim]·[/]  "
+        f"[{conviction_style}]{pulse.conviction}[/] conviction  "
+        f"[dim]·[/]  "
+        f"[{activity_style}]{pulse.activity}[/]"
+    )
 
 
 def _format_alert_counts(alerts: tuple[object, ...]) -> str:

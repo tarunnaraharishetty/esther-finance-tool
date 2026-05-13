@@ -591,6 +591,27 @@ async def test_detail_panel_invalidates_cache_when_row_changes() -> None:
         assert "BUY" not in second or first != second
 
 
+async def test_watchlist_header_renders_pulse_line_when_rows_present() -> None:
+    """The pulse line is always at the top when any healthy rows
+    exist. Tier values are stable schema (bullish/bearish/mixed/neutral
+    × strong/moderate/weak × volatile/active/calm) so we can assert
+    that at least one of each tier shows up."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT", "NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        header = app.query_one(WatchlistHeader)
+        text = header.render()
+        assert "PULSE" in text
+        assert "conviction" in text
+        # One of the sentiment tiers must appear.
+        assert any(s in text for s in ("bullish", "bearish", "mixed", "neutral"))
+
+
 async def test_watchlist_header_renders_alerts_summary_when_present() -> None:
     """When recent_alerts is non-empty, the header should show an
     ALERTS line with severity counts."""
