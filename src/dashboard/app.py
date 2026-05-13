@@ -309,6 +309,21 @@ class DetailPanel(Static):
         return "\n".join(sections)
 
 
+def _format_event_line(ev: object) -> str:
+    """One line for the events RichLog. Appends ``× N`` when count > 1."""
+    level = getattr(ev, "level", "info")
+    message = getattr(ev, "message", "")
+    timestamp = getattr(ev, "timestamp", None)
+    count = getattr(ev, "count", 1)
+    colour = {"info": "green", "warn": "yellow", "error": "red"}.get(level, "white")
+    ts = timestamp.strftime("%H:%M:%S") if timestamp is not None else "?"
+    suffix = f"  [dim]× {count}[/dim]" if count > 1 else ""
+    return (
+        f"[dim]{ts}[/] [{colour}]{level.upper():5}[/] "
+        f"{rich_escape(message)}{suffix}"
+    )
+
+
 def _render_symbol_alerts(alerts: list[object], *, limit: int = 4) -> str:
     """Render up to ``limit`` recent alerts for one symbol, newest-first.
 
@@ -634,15 +649,35 @@ class DashboardApp(App[None]):
 
     def _render_events(self, snap: DashboardSnapshot) -> None:
         log = self.query_one("#events", RichLog)
-        # Render only new events since last frame to avoid duplicate noise.
-        existing = getattr(self, "_last_event_count", 0)
-        for ev in snap.events[existing:]:
-            colour = {"info": "green", "warn": "yellow", "error": "red"}.get(ev.level, "white")
-            log.write(
-                f"[dim]{ev.timestamp.strftime('%H:%M:%S')}[/] "
-                f"[{colour}]{ev.level.upper():5}[/] {rich_escape(ev.message)}"
-            )
-        self._last_event_count = len(snap.events)
+        events = snap.events
+        if not events:
+            return
+        last_count: int = getattr(self, "_last_event_count", 0)
+        last_top_count: int = getattr(self, "_last_top_count", 0)
+
+        new_entries = events[last_count:]
+        if new_entries:
+            # The previous top (if any) is now "finalized" — its dedup
+            # window closed when the new entry arrived. If its count grew
+            # since we last rendered it, write an updated line first so
+            # the trader sees the final count before the new entry below.
+            if last_count > 0 and last_count <= len(events):
+                prev_top = events[last_count - 1]
+                if prev_top.count > last_top_count:
+                    log.write(_format_event_line(prev_top))
+            for ev in new_entries:
+                log.write(_format_event_line(ev))
+        else:
+            # No new entries this frame, but the current top's count may
+            # have bumped since last render. Show it once with the new
+            # count; subsequent bumps stay silent until something else
+            # finalizes or the next render catches up.
+            top = events[-1]
+            if top.count > last_top_count:
+                log.write(_format_event_line(top))
+
+        self._last_event_count = len(events)
+        self._last_top_count = events[-1].count
 
     # -- track row cursor for the detail pane ----------------------------
 

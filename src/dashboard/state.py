@@ -7,7 +7,7 @@ controller layer be unit-tested without spinning up a TUI.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -43,11 +43,18 @@ class RecommendationRow:
 
 @dataclass(frozen=True)
 class EventEntry:
-    """A single line in the events / log panel."""
+    """A single line in the events / log panel.
+
+    ``count`` tracks how many times this same (level, message) was
+    pushed consecutively; the buffer collapses duplicates into one
+    entry instead of accumulating them, and the dashboard renders an
+    "× N" suffix when ``count > 1``.
+    """
 
     timestamp: datetime
     level: str  # "info" | "warn" | "error"
     message: str
+    count: int = 1
 
 
 @dataclass
@@ -64,13 +71,31 @@ class DashboardSnapshot:
 
 
 class EventBuffer:
-    """Bounded FIFO of EventEntry — used by the controller to accumulate log lines."""
+    """Bounded FIFO of EventEntry — used by the controller to accumulate log lines.
+
+    Consecutive duplicate pushes (same level + message as the most-recent
+    entry) are collapsed: the buffer's last entry has its ``count``
+    bumped and ``timestamp`` advanced to the latest occurrence. The
+    dashboard's events pane is then responsible for showing the updated
+    count — see ``DashboardApp._render_events``.
+    """
 
     def __init__(self, capacity: int = 200) -> None:
         self._buf: deque[EventEntry] = deque(maxlen=capacity)
 
     def push(self, level: str, message: str) -> EventEntry:
-        ev = EventEntry(timestamp=datetime.now(UTC), level=level, message=message)
+        now = datetime.now(UTC)
+        if (
+            self._buf
+            and self._buf[-1].level == level
+            and self._buf[-1].message == message
+        ):
+            # Collapse the duplicate: bump count, advance timestamp.
+            last = self._buf[-1]
+            bumped = replace(last, count=last.count + 1, timestamp=now)
+            self._buf[-1] = bumped
+            return bumped
+        ev = EventEntry(timestamp=now, level=level, message=message)
         self._buf.append(ev)
         return ev
 

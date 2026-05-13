@@ -29,6 +29,60 @@ from src.strategy.recommendation import RecommendationEngine
 # ---------------------------------------------------------------------------
 
 
+def test_event_buffer_dedups_consecutive_identical_pushes() -> None:
+    """Same (level, message) in a row should collapse into one entry
+    with the count bumped, not three separate entries."""
+    buf = EventBuffer()
+    buf.info("tick 5 start")
+    buf.info("tick 5 start")
+    buf.info("tick 5 start")
+    snap = buf.snapshot()
+    assert len(snap) == 1
+    assert snap[0].count == 3
+    assert snap[0].message == "tick 5 start"
+
+
+def test_event_buffer_dedup_updates_timestamp() -> None:
+    """When a duplicate is collapsed, the entry's timestamp advances to
+    the latest occurrence."""
+    import time
+
+    buf = EventBuffer()
+    first = buf.info("foo")
+    time.sleep(0.01)
+    second = buf.info("foo")
+    assert second.timestamp > first.timestamp
+    assert second.count == 2
+
+
+def test_event_buffer_different_message_breaks_dedup() -> None:
+    """A different message ends the dedup run; the next identical push
+    starts a fresh entry, not a bump of an older one."""
+    buf = EventBuffer()
+    buf.info("a")
+    buf.info("a")  # bumps to count=2
+    buf.info("b")  # new entry
+    buf.info("a")  # NEW entry, count=1 (not 3 — the old "a" is no longer the tail)
+    snap = buf.snapshot()
+    assert [(e.message, e.count) for e in snap] == [
+        ("a", 2),
+        ("b", 1),
+        ("a", 1),
+    ]
+
+
+def test_event_buffer_different_level_breaks_dedup() -> None:
+    """Same message at a different level is not a duplicate."""
+    buf = EventBuffer()
+    buf.info("AAPL slow tick")
+    buf.warn("AAPL slow tick")
+    snap = buf.snapshot()
+    assert len(snap) == 2
+    assert snap[0].level == "info"
+    assert snap[1].level == "warn"
+    assert all(e.count == 1 for e in snap)
+
+
 def test_event_buffer_is_bounded() -> None:
     buf = EventBuffer(capacity=3)
     for i in range(5):
