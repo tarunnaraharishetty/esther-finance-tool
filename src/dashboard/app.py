@@ -859,6 +859,7 @@ class DashboardApp(App[None]):
         Binding("r", "refresh_now", "refresh"),
         Binding("p", "toggle_pause", "pause/resume"),
         Binding("s", "summarize_selected", "AI brief"),
+        Binding("o", "cycle_opportunity", "next OPP"),
         Binding("up,down", "noop", "select", show=False),
     ]
 
@@ -929,6 +930,44 @@ class DashboardApp(App[None]):
 
     def action_noop(self) -> None:  # bound for footer hint only
         pass
+
+    def action_cycle_opportunity(self) -> None:
+        """`o`: drill into the next ranked OPP by moving the table cursor.
+
+        Behavior is keyed off the currently-selected row rather than an
+        instance counter so the cycle stays predictable across snapshot
+        refreshes:
+
+        * Not on an OPP (or no row selected) → jump to OPP #1.
+        * On OPP #N (N < last) → jump to OPP #N+1.
+        * On the last OPP → wrap back to OPP #1.
+
+        No-op when the snapshot has no rows or no symbols rank. Cursor
+        movement triggers ``on_row_highlighted`` which refreshes the
+        DetailPanel + AI brief sync — same cascade as arrow-key nav.
+        """
+        snap = self._snapshot
+        if snap is None or not snap.rows:
+            return
+        ranked = rank_opportunities(snap, n=3)
+        if not ranked:
+            return
+
+        opp_symbols = [opp.symbol for opp in ranked]
+        selected = self._selected_row()
+        if selected is not None and selected.symbol in opp_symbols:
+            next_idx = (opp_symbols.index(selected.symbol) + 1) % len(opp_symbols)
+        else:
+            next_idx = 0
+        target_symbol = opp_symbols[next_idx]
+
+        row_idx = next(
+            (i for i, r in enumerate(snap.rows) if r.symbol == target_symbol),
+            None,
+        )
+        if row_idx is None:
+            return
+        self.query_one(DataTable).move_cursor(row=row_idx)
 
     def action_summarize_selected(self) -> None:
         """`s`: load the LLM brief for the currently-highlighted row."""

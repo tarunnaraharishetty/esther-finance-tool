@@ -1493,3 +1493,168 @@ async def test_app_s_keypress_with_mock_summarizer_loads_and_caches() -> None:
         await pilot.press("s")
         await pilot.pause(0.1)
         assert summarizer.summarize.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# OPP drill-down: `o` key cycles through ranked opportunities
+# ---------------------------------------------------------------------------
+
+
+def _opp_drill_row(symbol: str, *, action: SignalAction = SignalAction.BUY) -> "RecommendationRow":  # type: ignore[name-defined]
+    """A row with strong, news-bearing directional signals so it ranks
+    high in `rank_opportunities` — the OPP drill tests need predictable
+    top-N membership."""
+    from src.dashboard.state import RecommendationRow
+    from src.strategy.base import RecommendationTier
+
+    return RecommendationRow(
+        symbol=symbol,
+        action=action,
+        confidence=0.7,
+        combined_score=0.6 if action == SignalAction.BUY else -0.6,
+        technical_score=0.5,
+        sentiment_score=0.5 if action == SignalAction.BUY else -0.5,
+        rsi=0.5, macd=0.5, bollinger=0.5,
+        last_price=100.0,
+        num_news_articles=3,
+        reasoning="",
+        timestamp=datetime.now(UTC),
+        tier=RecommendationTier.from_action(action),
+        signal_quality="high",
+        stability="stable",
+    )
+
+
+def _opp_drill_hold_row(symbol: str) -> "RecommendationRow":  # type: ignore[name-defined]
+    """A HOLD row — never ranks as an opportunity."""
+    from src.dashboard.state import RecommendationRow
+    from src.strategy.base import RecommendationTier
+
+    return RecommendationRow(
+        symbol=symbol,
+        action=SignalAction.HOLD,
+        confidence=0.2,
+        combined_score=0.0,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0, macd=0.0, bollinger=0.0,
+        last_price=100.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=datetime.now(UTC),
+        tier=RecommendationTier.HOLD,
+        signal_quality="low",
+        stability="stable",
+    )
+
+
+async def test_cycle_opportunity_walks_through_ranked_opps_in_order() -> None:
+    """Pressing `o` jumps cursor to OPP #1, #2, #3, then wraps to #1.
+
+    Verifies the cycle uses the same ranking the renderer shows so the
+    user's mental "OPP #1, #2, #3" map matches the keyboard sequence.
+    """
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+    from src.dashboard.state import DashboardSnapshot
+    from src.intelligence.opportunities import rank_opportunities
+
+    rows = [
+        _opp_drill_row("AAPL"),
+        _opp_drill_row("MSFT"),
+        _opp_drill_row("NVDA"),
+        _opp_drill_hold_row("SPY"),  # never ranks; cycle should skip it
+    ]
+    snap = DashboardSnapshot(tick=1, rows=rows)
+    expected = [opp.symbol for opp in rank_opportunities(snap, n=3)]
+    # Sanity check: at least 2 OPPs so cycling is meaningful.
+    assert len(expected) >= 2
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=[r.symbol for r in rows]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        # Inject our deterministic snapshot + sync the table so cursor
+        # indices line up with snap.rows.
+        app._snapshot = snap
+        app._render_table(snap)
+        table = app.query_one(DataTable)
+        # Park cursor on the HOLD row so the first `o` reads as
+        # "not on an OPP → jump to OPP #1" rather than "advance from
+        # whichever OPP happens to be at row 0".
+        table.move_cursor(row=3)  # SPY
+
+        # First press → OPP #1.
+        await pilot.press("o")
+        assert rows[table.cursor_row].symbol == expected[0]
+        # Each subsequent press advances through the ranking.
+        for sym in expected[1:]:
+            await pilot.press("o")
+            assert rows[table.cursor_row].symbol == sym
+        # One more press wraps back to OPP #1.
+        await pilot.press("o")
+        assert rows[table.cursor_row].symbol == expected[0]
+
+
+async def test_cycle_opportunity_jumps_to_first_when_off_an_opp() -> None:
+    """Cursor sitting on a non-OPP row → next `o` press jumps to OPP #1
+    rather than 'wherever the counter says'."""
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+    from src.dashboard.state import DashboardSnapshot
+    from src.intelligence.opportunities import rank_opportunities
+
+    rows = [
+        _opp_drill_hold_row("SPY"),  # index 0: never ranks
+        _opp_drill_row("AAPL"),
+        _opp_drill_row("MSFT"),
+    ]
+    snap = DashboardSnapshot(tick=1, rows=rows)
+    expected = [opp.symbol for opp in rank_opportunities(snap, n=3)]
+    assert len(expected) >= 1
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=[r.symbol for r in rows]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        app._snapshot = snap
+        app._render_table(snap)
+        table = app.query_one(DataTable)
+        # Park cursor on the non-OPP row.
+        table.move_cursor(row=0)
+        assert rows[table.cursor_row].symbol == "SPY"
+
+        await pilot.press("o")
+        assert rows[table.cursor_row].symbol == expected[0]
+
+
+async def test_cycle_opportunity_noop_when_no_ranked_opps() -> None:
+    """All-HOLD watchlist → `o` is a silent no-op (cursor stays put)."""
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+    from src.dashboard.state import DashboardSnapshot
+    from src.intelligence.opportunities import rank_opportunities
+
+    rows = [_opp_drill_hold_row("AAPL"), _opp_drill_hold_row("MSFT")]
+    snap = DashboardSnapshot(tick=1, rows=rows)
+    assert rank_opportunities(snap, n=3) == []  # premise check
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        app._snapshot = snap
+        app._render_table(snap)
+        table = app.query_one(DataTable)
+        before = table.cursor_row
+        await pilot.press("o")
+        assert table.cursor_row == before
