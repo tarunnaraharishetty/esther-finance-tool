@@ -21,7 +21,7 @@ from src.indicators.bollinger import BollingerBands
 from src.indicators.macd import MACD
 from src.indicators.rsi import RSI
 from src.sentiment.analyzer import SentimentAnalyzer
-from src.strategy.base import SignalAction
+from src.strategy.base import RecommendationTier, SignalAction
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -36,11 +36,17 @@ if TYPE_CHECKING:
 
 
 class TradingRecommendation(BaseModel):
-    """A single BUY / HOLD / SELL recommendation for one symbol.
+    """A single recommendation for one symbol.
 
-    ``confidence`` is the absolute value of the weighted combined score and
-    sits in [0, 1]. ``combined_score`` is signed: positive = bullish,
-    negative = bearish.
+    ``action`` is the base 3-tier label (BUY / HOLD / SELL).
+    ``tier`` is the 5-tier label surfaced to the trader; defaults to the
+    same value as ``action`` and is upgraded to STRONG_BUY / STRONG_SELL
+    only when :func:`src.intelligence.tier.promote_to_tier` confirms
+    multi-system alignment, stability, and high confidence.
+
+    ``confidence`` is the absolute value of the weighted combined score
+    and sits in [0, 1]. ``combined_score`` is signed: positive =
+    bullish, negative = bearish.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -55,6 +61,12 @@ class TradingRecommendation(BaseModel):
     reasoning: str
     timestamp: datetime
     num_news_articles: int = 0
+    # ---- 5-tier surface (filled by promote_to_tier; defaults stay sane
+    # for callers that bypass the promoter) ----
+    tier: RecommendationTier = RecommendationTier.HOLD
+    signal_quality: str = "moderate"  # "high" | "moderate" | "low"
+    stability: str = "stable"  # "stable" | "moderate" | "volatile"
+    quality_reasons: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +160,10 @@ class RecommendationEngine:
             reasoning=reasoning,
             timestamp=ts,
             num_news_articles=len(article_scores),
+            # Default tier = direct map from action. The promoter in
+            # src.intelligence.tier upgrades to STRONG when conditions
+            # are met; the engine itself doesn't have history access.
+            tier=RecommendationTier.from_action(action),
         )
 
     # -- technicals --------------------------------------------------------

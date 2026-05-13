@@ -28,6 +28,7 @@ from src.intelligence.opportunities import Opportunity, detect_opportunities
 from src.intelligence.pulse import MarketPulse, compute_pulse
 from src.intelligence.recap import LLMRecapGenerator, RecapContext
 from src.intelligence.summary import Summarizer, TemplateSummarizer
+from src.intelligence.tier import promote_to_tier
 from src.intelligence.watchlist import (
     WatchlistChange,
     action_breakdown,
@@ -66,5 +67,6 @@ __all__ = [
     "explain",
     "load_prioritizer_config_from_yaml",
     "load_rules_from_yaml",
+    "promote_to_tier",
     "top_movers",
 ]
