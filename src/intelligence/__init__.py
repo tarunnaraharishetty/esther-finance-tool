@@ -15,6 +15,7 @@ from src.intelligence.alerts import (
     load_rules_from_yaml,
 )
 from src.intelligence.explain import Contributor, Explanation, explain
+from src.intelligence.history import SignalEpisode, SignalHistory, SignalHistorySummary
 from src.intelligence.llm_summary import LLMSummarizer
 from src.intelligence.summary import Summarizer, TemplateSummarizer
 from src.intelligence.watchlist import (
@@ -34,6 +35,9 @@ __all__ = [
     "LLMSummarizer",
     "Rule",
     "SentimentShiftRule",
+    "SignalEpisode",
+    "SignalHistory",
+    "SignalHistorySummary",
     "Summarizer",
     "TemplateSummarizer",
     "WatchlistChange",

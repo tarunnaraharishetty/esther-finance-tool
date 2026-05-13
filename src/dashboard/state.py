@@ -15,6 +15,7 @@ from src.strategy.base import SignalAction
 
 if TYPE_CHECKING:
     from src.intelligence.alerts import Alert
+    from src.intelligence.history import SignalHistorySummary
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class DashboardSnapshot:
     rows: list[RecommendationRow]
     events: list[EventEntry] = field(default_factory=list)
     alerts: list[Alert] = field(default_factory=list)
+    signal_history: dict[str, SignalHistorySummary] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 

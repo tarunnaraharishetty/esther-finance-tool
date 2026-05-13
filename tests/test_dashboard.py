@@ -94,6 +94,31 @@ def test_mock_controller_surfaces_alerts_across_ticks() -> None:
     assert isinstance(s2.alerts, list)
 
 
+def test_mock_controller_signal_history_grows_across_ticks() -> None:
+    """The signal_history field on the snapshot should populate after the
+    first tick and accumulate episode metadata over subsequent ticks."""
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT"], seed=7)
+    s1 = asyncio.run(ctrl.fetch_snapshot())
+    assert set(s1.signal_history.keys()) == {"AAPL", "MSFT"}
+    # First tick: each symbol has one episode, tick_count == 1.
+    for sym in ("AAPL", "MSFT"):
+        summary = s1.signal_history[sym]
+        assert summary.current.tick_count == 1
+        assert summary.recent == ()
+
+    s2 = asyncio.run(ctrl.fetch_snapshot())
+    # Second tick: tick_count grew (if action stayed) OR a new episode
+    # started (if action flipped). Either way, the engine accumulated.
+    for sym in ("AAPL", "MSFT"):
+        summary = s2.signal_history[sym]
+        # Either tick_count >= 2 in current episode, or a prior episode appeared.
+        assert summary.current.tick_count >= 1
+        # Total observation count across episodes should be exactly 2.
+        eps = ctrl.signal_history.episodes_for(sym)
+        total_ticks = sum(ep.tick_count for ep in eps)
+        assert total_ticks == 2
+
+
 def test_controller_uses_injected_alert_engine() -> None:
     """The controller should hand rows to whatever AlertEngine was injected."""
     engine = AlertEngine(rules=[])  # zero rules → never any alerts

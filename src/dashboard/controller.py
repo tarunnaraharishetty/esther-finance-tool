@@ -31,6 +31,7 @@ from src.data.market_data import MarketDataService
 from src.data.models import NewsArticle, TimeFrame
 from src.data.news_ingestion import NewsSource, get_news_source
 from src.intelligence.alerts import AlertEngine
+from src.intelligence.history import SignalHistory, SignalHistorySummary
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import SignalAction
 from src.strategy.recommendation import RecommendationEngine
@@ -50,16 +51,37 @@ class BaseController(ABC):
         engine: RecommendationEngine,
         events: EventBuffer | None = None,
         alert_engine: AlertEngine | None = None,
+        signal_history: SignalHistory | None = None,
     ) -> None:
         self.watchlist = list(watchlist)
         self.engine = engine
         self.events = events or EventBuffer()
         self.alert_engine = alert_engine or AlertEngine()
+        self.signal_history = signal_history or SignalHistory()
         self._tick = 0
 
     @abstractmethod
     async def fetch_snapshot(self) -> DashboardSnapshot:
         """Produce one frame of dashboard state."""
+
+    def _record_history(
+        self, rows: list[RecommendationRow], now: datetime
+    ) -> dict[str, SignalHistorySummary]:
+        """Append healthy rows to history and return per-symbol summaries.
+
+        Error rows are intentionally NOT recorded — a transient fetch
+        failure shouldn't reset the episode counter for that symbol.
+        """
+        for row in rows:
+            if row.error:
+                continue
+            self.signal_history.record(row.symbol, row.action, row.confidence, now)
+        summaries: dict[str, SignalHistorySummary] = {}
+        for row in rows:
+            summary = self.signal_history.summary_for(row.symbol)
+            if summary is not None:
+                summaries[row.symbol] = summary
+        return summaries
 
 
 # ---------------------------------------------------------------------------
@@ -107,12 +129,15 @@ class DashboardController(BaseController):
             *(self._row_for(sym, now) for sym in self.watchlist),
             return_exceptions=False,
         )
-        alerts = self.alert_engine.evaluate(list(rows))
+        rows_list = list(rows)
+        alerts = self.alert_engine.evaluate(rows_list)
+        history = self._record_history(rows_list, now)
         return DashboardSnapshot(
             tick=self._tick,
-            rows=list(rows),
+            rows=rows_list,
             events=self.events.snapshot(),
             alerts=alerts,
+            signal_history=history,
             timestamp=now,
         )
 
@@ -223,11 +248,13 @@ class MockDashboardController(BaseController):
         self.events.info(f"mock tick {self._tick} ({len(self.watchlist)} symbols)")
         rows = [self._mock_row(sym, now) for sym in self.watchlist]
         alerts = self.alert_engine.evaluate(rows)
+        history = self._record_history(rows, now)
         return DashboardSnapshot(
             tick=self._tick,
             rows=rows,
             events=self.events.snapshot(),
             alerts=alerts,
+            signal_history=history,
             timestamp=now,
         )
 

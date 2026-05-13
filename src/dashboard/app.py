@@ -31,6 +31,7 @@ from textual.widgets import DataTable, Footer, Header, RichLog, Static
 
 from src.dashboard.state import DashboardSnapshot, RecommendationRow
 from src.intelligence.explain import Explanation, explain
+from src.intelligence.history import SignalEpisode, SignalHistorySummary
 from src.intelligence.watchlist import (
     action_breakdown,
     diff_snapshots,
@@ -51,9 +52,14 @@ _ACTION_STYLES = {
 
 
 def _fmt_signed(x: float) -> str:
+    """Signed score rendered with sign-based color markup.
+
+    Positive = green, negative = red, near-zero = yellow. NaN renders as
+    a plain dim dash so empty cells stay visually quiet.
+    """
     if x != x:  # NaN
-        return "  -  "
-    return f"{x:+.2f}"
+        return "[dim]  -  [/dim]"
+    return f"[{_score_style(x)}]{x:+.2f}[/]"
 
 
 def _fmt_price(x: float) -> str:
@@ -159,46 +165,103 @@ class DetailPanel(Static):
         idx = max(0, min(self.row_index, len(snap.rows) - 1))
         r = snap.rows[idx]
         if r.error:
-            return f"[bold]{r.symbol}[/bold] — [red]error:[/red] {rich_escape(r.error)}"
+            return f"[bold cyan]{r.symbol}[/]  [red]error:[/]  {rich_escape(r.error)}"
+
         explanation = _explain_row(r)
+        history = (snap.signal_history or {}).get(r.symbol)
+
+        # Header line — symbol + action + confidence, tightly packed.
         header = (
-            f"[bold]{r.symbol}[/bold]  →  {_action_text(r.action)}  "
-            f"(combined [bold]{r.combined_score:+.2f}[/bold], "
-            f"confidence [bold]{r.confidence:.2f}[/bold] "
-            f"[dim]{explanation.confidence_label}[/dim])"
-        )
-        metrics = (
-            f"[dim]rsi[/dim] {_fmt_signed(r.rsi)}  "
-            f"[dim]macd[/dim] {_fmt_signed(r.macd)}  "
-            f"[dim]bollinger[/dim] {_fmt_signed(r.bollinger)}  "
-            f"[dim]news[/dim] {r.num_news_articles}  "
-            f"[dim]last[/dim] {_fmt_price(r.last_price)}"
-        )
-        why = "\n".join(
-            f"  • [bold]{c.name}[/bold] ({c.score:+.2f}): {rich_escape(c.note)}"
-            for c in explanation.contributors
-        )
-        if not why:
-            why = "  [dim]no contributing signals[/dim]"
-
-        body = (
-            f"{header}\n"
-            f"{metrics}\n"
-            f"[italic]{rich_escape(explanation.headline)}[/italic]\n"
-            f"{why}"
+            f"[bold cyan]{r.symbol}[/]  {_action_text(r.action)}  "
+            f"[dim]conf[/] [bold]{r.confidence:.2f}[/] "
+            f"[dim]({explanation.confidence_label}, combined "
+            f"[/][{_score_style(r.combined_score)}]{r.combined_score:+.2f}[/][dim])[/]"
         )
 
-        # AI brief footer (only shown once the user has pressed `s`).
+        # Tagline — the engine's plain-English verdict.
+        tagline = f"[italic dim]{rich_escape(explanation.headline)}[/italic dim]"
+
+        # Numeric line — price first (most-asked datum), then indicators, then news.
+        numbers = (
+            f"[dim]price[/] [bold]{_fmt_price(r.last_price)}[/]  "
+            f"[dim]·[/]  "
+            f"[dim]rsi[/] {_fmt_signed(r.rsi)}  "
+            f"[dim]macd[/] {_fmt_signed(r.macd)}  "
+            f"[dim]bb[/] {_fmt_signed(r.bollinger)}  "
+            f"[dim]·[/]  "
+            f"[dim]news[/] [bold]{r.num_news_articles}[/]"
+        )
+
+        # Section: Signals (contributing factors).
+        if explanation.contributors:
+            signals_lines = [
+                f"  • [bold]{c.name:<14}[/] {_fmt_signed(c.score)}  "
+                f"[dim]{rich_escape(c.note)}[/dim]"
+                for c in explanation.contributors
+            ]
+        else:
+            signals_lines = ["  [dim]no contributing signals[/dim]"]
+        signals_block = "[bold cyan]Signals[/]\n" + "\n".join(signals_lines)
+
+        # Section: History (this session).
+        history_block = (
+            "[bold cyan]History[/]\n" + _render_history_block(history)
+            if history is not None
+            else ""
+        )
+
+        # Section: AI brief.
+        brief_block = ""
         if self.brief_state == "loading":
-            body += "\n\n[dim italic]loading AI brief…[/dim italic]"
+            brief_block = (
+                "[bold cyan]AI brief[/]\n  [dim italic]loading…[/dim italic]"
+            )
         elif self.brief_state == "ready":
-            body += (
-                f"\n\n[bold cyan]AI brief:[/bold cyan] "
+            brief_block = (
+                "[bold cyan]AI brief[/]\n  "
                 f"[italic]{rich_escape(self.brief_text)}[/italic]"
             )
         elif self.brief_state == "error":
-            body += f"\n\n[red]AI brief failed:[/red] {rich_escape(self.brief_text)}"
-        return body
+            brief_block = (
+                "[bold cyan]AI brief[/]\n  "
+                f"[red]failed:[/] {rich_escape(self.brief_text)}"
+            )
+
+        sections = [header, tagline, numbers, signals_block]
+        if history_block:
+            sections.append(history_block)
+        if brief_block:
+            sections.append(brief_block)
+        return "\n".join(sections)
+
+
+def _render_history_block(h: SignalHistorySummary) -> str:
+    """Render the 'Now / Was / Was' history lines for the detail panel."""
+    lines: list[str] = []
+    current = h.current
+    lines.append(_render_episode_line(current, "Now ", show_trend=True))
+    for ep in h.recent:
+        lines.append(_render_episode_line(ep, "Was ", show_trend=False))
+    return "\n".join(lines)
+
+
+def _render_episode_line(ep: SignalEpisode, label: str, *, show_trend: bool) -> str:
+    """One episode row in the History section."""
+    action_cell = _action_text(ep.action)
+    tick_word = "tick" if ep.tick_count == 1 else "ticks"
+    base = f"  [dim]{label}[/] {action_cell}  [dim]for[/] {ep.tick_count} {tick_word}"
+    if show_trend:
+        trend = ep.confidence_trend
+        trend_style = {
+            "rising": "green",
+            "falling": "red",
+            "flat": "dim",
+        }[trend]
+        base += (
+            f"  [dim]·[/]  [dim]conf[/] [{trend_style}]{trend}[/] "
+            f"{ep.confidence_first:.2f} → {ep.confidence_last:.2f}"
+        )
+    return base
 
 
 def _explain_row(r: RecommendationRow) -> Explanation:
