@@ -153,6 +153,24 @@ def test_summarize_strips_whitespace() -> None:
     assert out == "AAPL leans bullish."
 
 
+def test_system_prompt_contains_grounding_rules() -> None:
+    """Regression guard: the explicit anti-hallucination clauses must
+    remain in the system prompt. If a future refactor silently removes
+    them, the LLM goes back to inventing details — this test fails
+    loudly first.
+    """
+    client = _mock_client()
+    summarizer = LLMSummarizer(client=client)
+    summarizer.summarize(_explanation())
+    system = client.messages.create.call_args.kwargs["system"]
+    # Core grounding rules
+    assert "Only summarize information present in the user message" in system
+    assert "Do not invent" in system
+    assert "Quote headlines verbatim" in system
+    # No-prediction framing
+    assert "do not predict" in system.lower()
+
+
 def test_summarize_propagates_sdk_exceptions() -> None:
     import anthropic
 
