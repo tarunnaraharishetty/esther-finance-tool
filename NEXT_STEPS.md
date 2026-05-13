@@ -2,265 +2,274 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-13 (second refresh — most of the prior punch list shipped this session).*
+*Last touched: 2026-05-13 (end-of-session wrap).*
 
 ---
 
-## 1. What Esther is now
+## What Esther is
 
-An **AI-powered trading dashboard and research assistant** that helps a
-human trader understand what's happening in their watchlist — not an
-autonomous trader. The earlier ambitions (Backtrader cerebro,
-hedge-fund infrastructure, autonomous order submission, Monte Carlo VaR)
-have been deliberately cut. Anything in this doc that nudges back
-toward "beat SPY" or "submit orders for the user" is wrong.
+**An AI market intelligence workstation, a trader productivity system,
+and a research assistant.** It helps a discretionary trader understand
+what's happening across their watchlist faster and with more grounded
+context than they could assemble by hand.
 
-The product is built around five feature axes:
-
-1. **Market monitoring** — live Alpaca paper bars per watchlist symbol.
-2. **Sentiment analysis** — FinBERT scoring on recent news, surfaced
-   alongside technicals.
-3. **Decision support** — RSI / MACD / Bollinger + sentiment fed into a
-   `RecommendationEngine` that emits a 5-tier recommendation
-   (`STRONG_BUY` / `BUY` / `HOLD` / `SELL` / `STRONG_SELL`) with
-   confidence, signal-quality grade, stability tier, and a structured
-   explanation.
-4. **Explanation and alerts** — Claude-written prose briefs (per-symbol
-   `s` brief, watchlist-wide `recap`, per-OPP `b` brief), rule-based
-   alerts (action change, confidence cross, sentiment shift, tier
-   change, opportunity-entry) prioritized through cooldowns + composite
-   detection, surfaced in a dedicated dashboard pane with a terminal
-   bell on critical.
-5. **Pulse + opportunities** — a one-glance `PULSE` line
-   (sentiment/conviction/activity + breadth + intensity + STRONG
-   symbols), a `HIST` line of rolling sparklines for momentum /
-   sentiment breadth and reversal / alert intensity, a ranked OPP list
-   using a 7-driver composite with three-axis profile chips and
-   top-N membership history badges (NEW / Nx), and `o` / `b` / `a` /
-   `x` keyboard shortcuts to cycle through ranked OPPs, generate AI
-   briefs on them, and edit the watchlist live.
+It is **not** an autonomous trading AI, a hedge-fund engine, or a
+prediction machine. There is no order submission anywhere in the
+codebase, the data layer points at `paper-api.alpaca.markets`, and
+every LLM-driven feature ships with anti-hallucination grounding rules
+that forbid forecasts and require headlines to be quoted verbatim.
+Anything that nudges back toward those framings is wrong.
 
 ---
 
-## 2. What got done this session
+## Current architecture status
 
-The prior NEXT_STEPS punch list ran 9 items deep; 8 of 9 shipped.
-Bucketed by theme:
-
-**LLM quality**
-- `070f42c` — Padded all three LLM system prompts (`llm_summary`,
-  `recap`, `opportunity_brief`) past Opus 4.7's ~4K-token cache
-  minimum with 7–10 worked few-shot examples each. Anchors output
-  format AND lets the cache marker actually pay off. Done when:
-  verify in production by checking `cache_read_input_tokens > 0` on
-  the second call within a session.
-
-**Alerts**
-- `6ed57ad` — Documented four OPP-related composites in the example
-  YAML: `opp_flip_with_sentiment` (triple-confirm, critical),
-  `fresh_opp_from_flip` (critical), `fresh_opp_from_sentiment_swing`
-  (warn), `fresh_opp_from_tier_shift` (warn). Pinned the
-  triple-before-pair ordering with regression tests so future edits
-  can't silently break the contract.
-
-**Intelligence**
-- `b02d6e8` — `PulseHistoryTracker` rolling-window state on the
-  controller; renderer adds a HIST line below PULSE with Unicode
-  block-element sparklines. Drive-by: fixed a latent
-  cache-invalidation gap where the header signature only hashed three
-  categorical pulse fields.
-- `e1e2b65` — `dedup_articles()` helper + defensive dedup pass inside
-  `AlpacaNewsSource.fetch` to cut FinBERT inference cost when the
-  SDK's pagination surfaces the same article id twice.
-
-**UX**
-- `58616e5` — In-app watchlist editing: `a` opens an `AddSymbolModal`
-  with a focused Input, `x` removes the cursor row's symbol. Both
-  trigger an immediate refresh; sub-title and brief caches stay in
-  sync; per-symbol session state preserved across re-adds.
-
-**Polish bundle**
-- `dd42969` — Dropped `alembic` (deferred Postgres path) and the
-  long-dead `backtrader` from requirements; synced `requirements.txt`
-  with `pyproject.toml` for `anthropic` + `pyyaml`.
-- `de008db` — Ruff: 102 findings → 0. Auto-fixed 70; manual fixes
-  for the rest; added per-file ignores for deliberate patterns
-  (typographic Unicode in dashboard prose, lazy E402 imports in
-  `main.py`, blind asserts in tests).
-- `34442fc` — Mypy `--strict`: 62 errors → 0. Found and fixed two
-  latent bugs masked by `# type: ignore` comments:
-  1. `DashboardController` was silently dropping
-     `alert_prioritizer` and `alert_state` kwargs even though
-     `main.py` was passing them — the live dashboard wasn't
-     applying user-configured cooldowns or composites.
-  2. `AlertPrioritizer` was using `set[Alert]` for a set of
-     `id(a)` ints; would have broken if `Alert` ever became
-     hash-incompatible.
-
-**Test counts:** 488 passing, 1 deselected (`slow`/`integration`).
-
----
-
-## 3. Repo layout (as of this handoff)
-
-The detailed map lives in `CLAUDE.md`. Quick summary:
+Stable. The intelligence layer has settled into a coherent set of
+modules with one clear responsibility each, and the dashboard renders
+all of them through a small set of named widgets.
 
 ```
 src/
-├── main.py            # esther CLI: status / doctor / initdb / backfill /
+├── main.py            # CLI: status / doctor / initdb / backfill /
 │                      # recommend / summarize / recap / dashboard
 ├── config/            # Pydantic Settings (Alpaca + Anthropic + sentiment)
-├── data/              # Alpaca client, market/news/streaming, ORM, repositories,
-│                      # filesystem cache for warm dashboard start
+├── data/              # Alpaca client, market data, news (deduped),
+│                      # ORM, repositories, filesystem cache
 ├── sentiment/         # FinBERT scorer
 ├── indicators/        # RSI / MACD / Bollinger
-├── strategy/          # base Signal + SignalAction + RecommendationEngine +
-│                      # SignalAggregator + RecommendationTier (5-tier)
-├── risk/              # Sharpe + max-drawdown (for future watchlist intel)
+├── strategy/          # Signal + RecommendationEngine + 5-tier promoter
+├── risk/              # Sharpe + max-drawdown
 ├── dashboard/         # Textual app + controller + snapshot state +
 │                      # WatchlistHeader / DetailPanel / StatusLine /
 │                      # AddSymbolModal
-├── intelligence/      # explain / summary / llm_summary / alerts /
-│                      # alert_prioritizer / watchlist / history / tier /
-│                      # rankings / recap / grounding / pulse /
-│                      # pulse_history / opportunities / signal_profile /
-│                      # opportunity_history / opportunity_brief
+├── intelligence/      # explain · summary · llm_summary · alerts ·
+│                      # alert_prioritizer · watchlist · history · tier ·
+│                      # rankings · recap · grounding · pulse ·
+│                      # pulse_history · opportunities · signal_profile ·
+│                      # opportunity_history · opportunity_brief
 └── utils/             # logging, rate limiter, preflight
-
-config/
-├── strategies.example.yaml   # universe + signals + indicators
-└── alerts.example.yaml       # alert rules + snapshot_rules + prioritizer
-                              # (now includes 4 OPP composites)
 ```
 
-Layering still holds: `intelligence` depends on `strategy` + `data`; it
-does not import from `dashboard` or `main`. The `Summarizer` protocol
-lets the dashboard / CLI consume either `TemplateSummarizer` (offline
+**Layering invariant:** `intelligence` depends on `strategy` + `data`;
+it never imports from `dashboard` or `main`. The `Summarizer` protocol
+lets the dashboard / CLI consume either `TemplateSummarizer` (offline,
 deterministic) or `LLMSummarizer` (Claude-backed) without caring which.
-`LLMRecapGenerator` and `LLMOpportunityBriefer` follow the same wire
-shape.
+`LLMRecapGenerator` and `LLMOpportunityBriefer` follow the same shape.
 
 ---
 
-## 4. Punch list for the next session
+## Completed systems
 
-The prior punch list has been worked down to one item. Anything below
-that is forward-looking — not blocking, take or leave based on what's
-interesting next.
+Everything below is shipped, tested, and either rendered in the
+dashboard or exposed via the CLI.
 
-### Critical path
+**Data + sentiment**
+- Alpaca paper-feed client with rate limiting + retry
+- Bars + news ingestion with filesystem cache (warm-start via `esther backfill`)
+- News dedup at the source — defensive against SDK pagination quirks
+- FinBERT sentiment scoring per article
 
-1. **End-to-end smoke against real Alpaca paper.** Still never run
-   live in one go. Set `ALPACA_API_KEY`, `ALPACA_API_SECRET`, and
-   `ANTHROPIC_API_KEY` in `.env`, then run:
+**Strategy**
+- RSI / MACD / Bollinger indicators
+- Signal aggregator + `RecommendationEngine`
+- 5-tier promoter (`STRONG_BUY` / `BUY` / `HOLD` / `SELL` / `STRONG_SELL`)
+  with signal-quality grade and stability tier
 
-   ```
-   esther doctor                # all green?
-   esther backfill -s AAPL -s MSFT --days 60   # warm the cache
-   esther recommend             # real bars + news, no orders
-   esther summarize AAPL        # Claude per-symbol brief
-   esther recap                 # Claude watchlist-wide brief
-   esther dashboard             # live TUI — exercise s, b, o, a, x, r, p
-   ```
+**Intelligence layer**
+- Per-row explanation builder (`explain.py`)
+- Per-symbol Claude brief (`LLMSummarizer`) — `s` key in dashboard,
+  `esther summarize` CLI
+- Watchlist-wide Claude recap (`LLMRecapGenerator`) — `esther recap` CLI
+- Per-OPP Claude brief (`LLMOpportunityBriefer`) — `b` key in dashboard
+- All three LLM modules pad past Opus 4.7's 4K-token cache minimum
+  with worked few-shot examples
+- Anti-hallucination grounding rules centralized in `grounding.py`
+- Signal history (`history.py`) — per-symbol episode tracking
+- Watchlist diff + top-movers + action breakdown (`watchlist.py`)
+- Six ranked sections (momentum / sentiment / confidence / reversals
+  / unusual / volatile)
+- Market pulse: sentiment / conviction / activity + breadth + intensity
+  + STRONG-symbol callouts (`pulse.py`)
+- Pulse history with rolling-window sparklines (`pulse_history.py`)
+- Opportunity detection (`opportunities.py`) — kind-based +
+  composite-ranked with 7 drivers
+- Three-axis signal profile chip (stability · trend · persistence)
+- Opportunity history badges (NEW / Nx) — top-N membership tracking
+- Alert engine with 4 per-row rules + 1 snapshot rule (opportunity_entry)
+- Alert prioritizer with cooldowns + composites + per-tick cap
+- 4 OPP-related composite alerts shipped in the example YAML
 
-   *Done when:* every command completes without an unhandled
-   exception and the dashboard runs through three or four ticks
-   cleanly, including pressing `s`, `b`, `o`, `a`, `x` against real
-   symbols. **Bonus:** verify `cache_read_input_tokens > 0` on the
-   second `s`/`b`/`recap` call within a session — confirms the
-   prompt-cache padding from `070f42c` is firing.
+**Dashboard**
+- Textual TUI with adaptive refresh (5s base, 1.5s burst on flips/alerts)
+- Render-skip cache on `WatchlistHeader` and `DetailPanel`
+- Always-visible `StatusLine` at the bottom
+- `EventBuffer` collapses consecutive duplicate log lines
+- Per-symbol alerts surfaced inside `DetailPanel` for the cursor row
+- Keyboard shortcuts: `q` quit · `r` refresh · `p` pause · `s` brief
+  · `o` cycle OPP · `b` OPP brief · `a` add symbol · `x` remove symbol
 
-### Forward-looking — high signal, no precondition
-
-2. **Session persistence.** Restart loses everything: alert history,
-   signal history, opp tracker membership, pulse history, brief
-   caches. A small SQLite schema (or json snapshot per session) would
-   let the trader resume mid-day. Touches: introduce a
-   `SessionStore` interface in `src/intelligence/`, wire
-   load/save into controller startup/teardown, decide what gets
-   persisted vs is genuinely ephemeral.
-
-3. **Multi-watchlist support.** Today the watchlist is fixed at
-   launch (CLI flag, default, or runtime via `a`/`x`). A
-   `--watchlist <name>` flag plus a `config/watchlists/*.yaml`
-   directory would let the trader maintain themed sets (megacap,
-   semis, banks, my-positions). Pairs naturally with item #2 — each
-   watchlist could persist its own session state.
-
-4. **OPP detail expansion.** When an OPP is selected, the DetailPanel
-   shows row data. It could ALSO surface the seven-driver score
-   breakdown — bar chart per driver (technical_alignment 1.0 ████ |
-   sentiment_alignment 0.5 ██) so the trader sees WHY the composite
-   is what it is, not just the rationale phrases. The drivers are
-   already on `RankedOpportunity`; just needs render plumbing.
-
-5. **News quality / freshness scoring.** All news sources are
-   currently treated equally. A small heuristic that weights by
-   recency (newer = more weight) and source reputation (Reuters >
-   Benzinga > "blog") would tighten the FinBERT-driven sentiment
-   scores. Lives in `src/sentiment/` as a pre-FinBERT weighting pass.
-
-6. **OPP brief uses pulse history context.** The OPP briefer already
-   gets the symbol's seven drivers + history; it could ALSO be
-   handed the recent pulse trajectory ("the watchlist has been
-   firming up over the last 8 ticks"). Free signal already on the
-   snapshot; just thread it into `OpportunityBriefContext`.
-
-### Small cleanups
-
-7. **CLAUDE.md refresh.** The repo guide still describes the older
-   shape (no `pulse_history`, no `opportunity_brief`, no `a`/`x`
-   keys). Bring it current so a fresh onboarding agent doesn't have
-   to reverse-engineer the layout.
-
-8. **README.** There isn't one. A short README with screenshots /
-   `asciinema` recording would make the project legible to anyone
-   who lands on the GitHub page.
-
-### Deferred (do NOT start without discussion)
-
-- WebSocket streaming pipeline (replace polling). Real-time delivery
-  is nice but the current 5-second poll plus adaptive burst is
-  responsive enough for a discretionary trader.
-- Multi-strategy framework. One good strategy first.
-- Postgres migration. SQLite is fine for a local terminal tool
-  (and `alembic` was just removed from deps for that reason).
+**Quality baseline**
+- 488 passing tests, 1 deselected (`slow`/`integration`)
+- `ruff check .` green across the repo
+- `mypy src` (`--strict`) green across all 43 source files
+- Documented exceptions live in `pyproject.toml`
 
 ---
 
-## 5. Day-one recipe for tomorrow
+## Remaining high-priority roadmap
 
-If you only have one hour:
+Six themes for upcoming sessions. Listed with current understanding of
+scope and what they unlock; sequencing recommendation is in the next
+section.
+
+### 1. Expanded opportunity drilldown
+The DetailPanel currently shows row data when an OPP is selected. It
+could surface the seven-driver score breakdown (per-driver bar chart),
+the rationale phrases inline, and a side-by-side of "what changed
+since this symbol entered top-N." All of this data is already on
+`RankedOpportunity` and `OpportunityHistory` — this is render
+plumbing, not new state. Highest UX impact for lowest cost.
+
+### 2. News quality scoring
+All news sources currently feed FinBERT with equal weight. A small
+pre-FinBERT pass that weights by recency (newer = more) and source
+reputation (Reuters > Benzinga > blogs) would tighten every
+sentiment-driven feature: alerts, briefs, ranking, pulse. Multiplier
+effect across the rest of the system. Lives in `src/sentiment/`.
+
+### 3. Persistence / history improvements
+Restart loses everything: alert history, signal history, opp tracker
+membership, pulse history, brief caches. A `SessionStore` interface
+(SQLite-backed or json-snapshot-per-session) would let the trader
+resume mid-day. This is foundational for anything that wants to span
+sessions — including multi-timeframe and smarter pulse evolution.
+
+### 4. Multi-timeframe intelligence
+Today the recommender runs on daily bars. Adding a second timeframe
+(e.g., 15-min intraday) would let alerts and the pulse react inside
+the trading day rather than tick-to-tick on daily-bar quirks.
+Architectural lift — touches data layer (separate cache buckets),
+indicators (already pure functions, work for any timeframe),
+recommender (per-timeframe scores combined), UI (timeframe toggle
+or both visible). Best done AFTER persistence so intraday state
+survives restarts.
+
+### 5. Smarter market pulse evolution
+The pulse currently classifies one tick. With pulse_history we have
+trajectory data. Natural next steps: pattern detection ("breadth
+firming for 8 ticks"), regime classification (risk-on / risk-off /
+mixed), or an LLM-driven read of the trajectory tied into the recap
+brief. Build on top of pulse_history; doesn't add new state.
+
+### 6. Dashboard refinement
+Ongoing polish that doesn't fit a neat feature box: column tunables,
+help-overlay (`?`), better empty-state messages, configurable burst
+window, perhaps a command palette via Textual's built-in. Best done
+in parallel with feature work — pick up small items between bigger
+features.
+
+---
+
+## Technical debt
+
+Real items, not manufactured ones. None block the product; clean them
+when the surrounding code is touched.
+
+- **SDK-boundary `# type: ignore` comments** in `market_data.py` and
+  `news_ingestion.py`. They're legitimate (alpaca-py's `feed=` kwarg
+  is typed too narrowly, BarSet's `.data` is loose, the
+  `with_async_retry` decorator confuses override-checking, Textual's
+  `run_worker` is typed `Callable[..., Never]`). Could be wrapped in
+  a thin typed adapter layer if it grows.
+- **`requirements.txt` and `pyproject.toml` are both maintained.**
+  They're now in sync but drift is possible. Consider deleting
+  `requirements.txt` in favor of `pip install -e .` only.
+- **`detect_opportunities` (kind-based)** is exported but shadowed by
+  `rank_opportunities` (composite). Decide whether to keep both as a
+  dual-view or remove the kind-based one.
+- **Brief cache keyed on `(symbol, action)`** — invalidates on action
+  flip but not on, say, a sentiment swing that doesn't change action.
+  Acceptable today; might want finer invalidation if briefs become
+  more expensive.
+- **`DashboardSnapshot` is a mutable `@dataclass`** — controller
+  fills `pulse`, `pulse_history`, `opp_history`, `alerts`,
+  `recent_alerts` after construction. Works, but a frozen variant
+  with `replace()` would make snapshot identity safer to reason about.
+- **The bare `tuple[object, ...]` signature type** for the render-skip
+  cache keys is loose; a `NamedTuple` per signature kind would be
+  more explicit + give autocomplete.
+- **Two `compute_pulse(snap)` fallbacks remain** in
+  `WatchlistHeader.render()` and `StatusLine.render()` for the
+  case where `snap.pulse is None` (unit-test fixtures). The fallback
+  is deliberate; a follow-up could either require all snapshots to
+  carry pre-computed pulse OR factor the recompute into one helper.
+
+---
+
+## Recommended next implementation order
+
+Sequenced for maximum compounding return.
+
+**1. Expanded opportunity drilldown** *(start here tomorrow)*
+- Cheapest. Pure render plumbing on top of existing `RankedOpportunity`
+  data. Highest immediate UX win — the OPP surface is the thing the
+  trader looks at most.
+
+**2. News quality scoring**
+- Multiplier across every sentiment-driven feature (alerts, briefs,
+  ranking, pulse). Contained to `src/sentiment/`. Can ship without
+  touching anything downstream.
+
+**3. Persistence (`SessionStore`)**
+- Foundation for everything else. Multi-timeframe and smarter pulse
+  evolution both want session state to survive restarts. Doing it
+  here unblocks both.
+
+**4. Multi-timeframe intelligence**
+- Biggest architectural lift; do after persistence so intraday state
+  is durable. Plan the schema with persistence in mind.
+
+**5. Smarter market pulse evolution**
+- Builds naturally on persistence + multi-timeframe + existing
+  pulse_history. Likely an LLM-driven read of the trajectory.
+
+**6. Dashboard refinement**
+- In parallel with the above. Pick up small items between bigger
+  features rather than as a dedicated session.
+
+---
+
+## Resume here tomorrow
 
 ```
-git pull                       # sync with the current main
-pip install -e ".[dev]"        # in case a dep moved
-cp config/alerts.example.yaml config/alerts.yaml
-# (edit .env with real ALPACA paper keys + ANTHROPIC_API_KEY)
-esther doctor                  # confirm green
-esther backfill -s AAPL -s MSFT -s NVDA --days 60
-esther summarize AAPL          # confirm the Claude path works
-esther recap                   # confirm the watchlist recap works
-esther dashboard               # exercise s / b / o / a / x / r / p
+git pull                                  # confirm sync
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 488 passing
 ```
 
-That validates everything currently shipped. After that, work the
-punch list top-down — the smoke test (step 1) usually surfaces at
-least one bug worth fixing before any new feature work.
+Open this doc and start with **Expanded opportunity drilldown**
+(roadmap item #1, recommended order step 1). Render plumbing on the
+DetailPanel — surface the seven-driver scores + rationale + history
+delta when the cursor row is in the top-N. Data is already on
+`RankedOpportunity` and `snap.opp_history`; no new state needed.
+
+Suggested opening prompt to Claude:
+
+> Do the expanded OPP drilldown. When the selected row is in the
+> top-N OPPs, the DetailPanel should show the 7-driver score
+> breakdown (per-driver bar), the rationale phrases inline, and how
+> long the OPP has been in the top-N. Keep the existing per-row
+> sections (header, signals, history, alerts) — the OPP block is
+> additive when applicable.
 
 ---
 
-## 6. Repo state at handoff
+## Repo state at handoff
 
-- **Branch:** `main` is clean and pushed to `origin/main` at
-  `34442fc`.
+- **Branch:** `main` is clean and pushed to `origin/main` at `10ce4e0`.
 - **Tests:** 488 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
-- **Lint/type:** `ruff check .` is **green** across the repo;
-  `mypy src` (`--strict`) is **green** across all 43 source files.
-  Documented exceptions live in `pyproject.toml` (typographic
-  Unicode in dashboard prose, lazy `E402` imports in `main.py`,
-  blind `pytest.raises(Exception)` in tests).
+- **Lint/type:** `ruff check .` green; `mypy src --strict` green
+  across all 43 source files.
 - **Dependencies installed in `.venv/`** (Python 3.14): all of
   `pyproject.toml`'s base set, plus `anthropic`, `pyyaml`, `textual`,
   `ruff`, `mypy`, `pytest`. `alembic` and `backtrader` removed.
