@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-13 (expanded opportunity drilldown shipped).*
+*Last touched: 2026-05-13 (news quality scoring shipped).*
 
 ---
 
@@ -69,6 +69,14 @@ dashboard or exposed via the CLI.
 - Bars + news ingestion with filesystem cache (warm-start via `esther backfill`)
 - News dedup at the source — defensive against SDK pagination quirks
 - FinBERT sentiment scoring per article
+- **News quality weighting** — per-article weight = recency_decay ×
+  source_reputation feeds `weighted_sentiment_mean()` when
+  aggregating per-symbol sentiment. Half-life + floor configurable
+  via Settings; curated source-tier map (Reuters/AP/Bloomberg = 1.0,
+  WSJ/FT/CNBC = 0.8, Benzinga/Motley Fool = 0.6, blogs = 0.4,
+  unknown = 0.3). Every downstream feature (alerts, pulse, ranking,
+  opportunities, briefs) inherits the improvement via
+  `row.sentiment_score`.
 
 **Strategy**
 - RSI / MACD / Bollinger indicators
@@ -120,35 +128,28 @@ dashboard or exposed via the CLI.
   · `o` cycle OPP · `b` OPP brief · `a` add symbol · `x` remove symbol
 
 **Quality baseline**
-- 514 passing tests, 1 deselected (`slow`/`integration`)
+- 534 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
-- `mypy src` (`--strict`) green across all 44 source files
+- `mypy src` (`--strict`) green across all 45 source files
 - Documented exceptions live in `pyproject.toml`
 
 ---
 
 ## Remaining high-priority roadmap
 
-Five themes for upcoming sessions. Listed with current understanding
+Four themes for upcoming sessions. Listed with current understanding
 of scope and what they unlock; sequencing recommendation is in the
-next section. (Roadmap item #1 — expanded opportunity drilldown —
-shipped on 2026-05-13.)
+next section. (Both prior roadmap items — expanded opportunity
+drilldown and news quality scoring — shipped on 2026-05-13.)
 
-### 1. News quality scoring
-All news sources currently feed FinBERT with equal weight. A small
-pre-FinBERT pass that weights by recency (newer = more) and source
-reputation (Reuters > Benzinga > blogs) would tighten every
-sentiment-driven feature: alerts, briefs, ranking, pulse. Multiplier
-effect across the rest of the system. Lives in `src/sentiment/`.
-
-### 2. Persistence / history improvements
+### 1. Persistence / history improvements
 Restart loses everything: alert history, signal history, opp tracker
 membership, pulse history, brief caches. A `SessionStore` interface
 (SQLite-backed or json-snapshot-per-session) would let the trader
 resume mid-day. This is foundational for anything that wants to span
 sessions — including multi-timeframe and smarter pulse evolution.
 
-### 3. Multi-timeframe intelligence
+### 2. Multi-timeframe intelligence
 Today the recommender runs on daily bars. Adding a second timeframe
 (e.g., 15-min intraday) would let alerts and the pulse react inside
 the trading day rather than tick-to-tick on daily-bar quirks.
@@ -158,14 +159,14 @@ recommender (per-timeframe scores combined), UI (timeframe toggle
 or both visible). Best done AFTER persistence so intraday state
 survives restarts.
 
-### 4. Smarter market pulse evolution
+### 3. Smarter market pulse evolution
 The pulse currently classifies one tick. With pulse_history we have
 trajectory data. Natural next steps: pattern detection ("breadth
 firming for 8 ticks"), regime classification (risk-on / risk-off /
 mixed), or an LLM-driven read of the trajectory tied into the recap
 brief. Build on top of pulse_history; doesn't add new state.
 
-### 5. Dashboard refinement
+### 4. Dashboard refinement
 Ongoing polish that doesn't fit a neat feature box: column tunables,
 help-overlay (`?`), better empty-state messages, configurable burst
 window, perhaps a command palette via Textual's built-in. Best done
@@ -214,25 +215,20 @@ when the surrounding code is touched.
 
 Sequenced for maximum compounding return.
 
-**1. News quality scoring** *(start here tomorrow)*
-- Multiplier across every sentiment-driven feature (alerts, briefs,
-  ranking, pulse). Contained to `src/sentiment/`. Can ship without
-  touching anything downstream. Cheapest unshipped win.
-
-**2. Persistence (`SessionStore`)**
+**1. Persistence (`SessionStore`)** *(start here tomorrow)*
 - Foundation for everything else. Multi-timeframe and smarter pulse
   evolution both want session state to survive restarts. Doing it
   here unblocks both.
 
-**3. Multi-timeframe intelligence**
+**2. Multi-timeframe intelligence**
 - Biggest architectural lift; do after persistence so intraday state
   is durable. Plan the schema with persistence in mind.
 
-**4. Smarter market pulse evolution**
+**3. Smarter market pulse evolution**
 - Builds naturally on persistence + multi-timeframe + existing
   pulse_history. Likely an LLM-driven read of the trajectory.
 
-**5. Dashboard refinement**
+**4. Dashboard refinement**
 - In parallel with the above. Pick up small items between bigger
   features rather than as a dedicated session.
 
@@ -242,38 +238,37 @@ Sequenced for maximum compounding return.
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 514 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 534 passing
 ```
 
-Open this doc and start with **News quality scoring** (roadmap item
-#1, recommended order step 1). A small pre-FinBERT pass in
-`src/sentiment/` that weights articles by recency + source
-reputation; the per-article weight multiplies into the existing
-sentiment aggregation. No data-layer changes, no new state — every
-downstream feature (alerts, briefs, ranking, pulse) inherits the
-improvement automatically.
+Open this doc and start with **Persistence / `SessionStore`**
+(roadmap item #1, recommended order step 1). A storage interface
+(SQLite or json-snapshot) that lets the dashboard survive restarts:
+alert history, signal history, opp-tracker membership, pulse
+history, brief caches. Foundation for multi-timeframe + smarter
+pulse evolution downstream.
 
 Suggested opening prompt to Claude:
 
-> Implement news quality scoring. Add a per-article weight in
-> `src/sentiment/` that combines recency (newer headlines weigh
-> more) and source reputation (Reuters > major outlets > blogs).
-> Apply the weight when aggregating per-symbol sentiment so the
-> recommendation engine, pulse, and ranking all benefit. Keep the
-> default weights configurable via `Settings`; deterministic
-> behavior in unit tests.
+> Design and implement `SessionStore` — a storage interface that
+> survives restarts. Persist: signal_history per symbol, opp_history
+> per symbol, pulse_history, recent alerts (last N), brief caches
+> (row + OPP). Pick SQLite (already a dep) or json-per-session.
+> The controller writes on each tick; on startup it hydrates the
+> trackers. Keep the file path configurable via Settings. Don't
+> persist live Alpaca data — only intelligence-layer state.
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `773355a` (push to `origin/main`
-  pending — harness blocked direct push to default branch; previous
-  three drilldown commits are also queued locally).
-- **Tests:** 514 passing, 1 deselected (`slow`/`integration` mark).
+- **Branch:** `main` is clean at `e517980` (push to `origin/main`
+  pending — harness blocks direct push to default branch unless
+  the user runs it themselves).
+- **Tests:** 534 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
-  across all 44 source files.
+  across all 45 source files.
 - **Dependencies installed in `.venv/`** (Python 3.14): all of
   `pyproject.toml`'s base set, plus `anthropic`, `pyyaml`, `textual`,
   `ruff`, `mypy`, `pytest`. `alembic` and `backtrader` removed.
