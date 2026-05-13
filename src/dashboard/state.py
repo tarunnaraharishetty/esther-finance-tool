@@ -16,6 +16,7 @@ from src.strategy.base import RecommendationTier, SignalAction
 if TYPE_CHECKING:
     from src.intelligence.alerts import Alert
     from src.intelligence.history import SignalHistorySummary
+    from src.intelligence.opportunity_history import OpportunityHistory
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,11 @@ class DashboardSnapshot:
     alerts: list[Alert] = field(default_factory=list)
     recent_alerts: tuple[Alert, ...] = ()
     signal_history: dict[str, SignalHistorySummary] = field(default_factory=dict)
+    # Per-symbol top-N opportunity-membership history, populated by the
+    # controller for symbols currently in top-N. Symbols outside top-N
+    # are intentionally absent (the renderer only consults this for OPP
+    # lines it's already drawing).
+    opp_history: dict[str, OpportunityHistory] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 

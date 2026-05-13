@@ -38,6 +38,7 @@ from src.intelligence.opportunities import (
     detect_opportunities,
     rank_opportunities,
 )
+from src.intelligence.opportunity_history import OpportunityHistory
 from src.intelligence.pulse import MarketPulse, compute_pulse
 from src.intelligence.signal_profile import SignalProfile
 from src.intelligence.rankings import Rankings
@@ -219,8 +220,10 @@ class WatchlistHeader(Static):
         # when no directional symbols rank.
         opportunities = rank_opportunities(snap, n=3)
         for opp in opportunities:
+            history = snap.opp_history.get(opp.symbol)
             lines.append(
-                f"{_section_label('OPP')}{_format_ranked_opportunity(opp)}"
+                f"{_section_label('OPP')}"
+                f"{_format_ranked_opportunity(opp, history)}"
             )
 
         return "\n".join(lines)
@@ -320,9 +323,21 @@ def _header_signature(
     # Pulse output drives the PULSE line.
     pulse = compute_pulse(snap)
     pulse_sig = (pulse.sentiment, pulse.conviction, pulse.activity)
-    # Opportunities drive the OPP lines.
+    # Opportunities + their history badges drive the OPP lines.
     opp_sig = tuple(
-        (o.symbol, round(o.composite_score, 3), o.profile)
+        (
+            o.symbol,
+            round(o.composite_score, 3),
+            o.profile,
+            # History badge is part of the rendered line — without it a
+            # streak bump (2x → 3x) wouldn't invalidate the cache.
+            (
+                snap.opp_history[o.symbol].streak,
+                snap.opp_history[o.symbol].appearances,
+            )
+            if o.symbol in snap.opp_history
+            else None,
+        )
         for o in rank_opportunities(snap, n=3)
     )
     return (
@@ -335,13 +350,22 @@ def _header_signature(
     )
 
 
-def _format_ranked_opportunity(opp: RankedOpportunity) -> str:
+def _format_ranked_opportunity(
+    opp: RankedOpportunity,
+    history: OpportunityHistory | None = None,
+) -> str:
     """One dense OPP line for the ranked-composite output.
 
     Format:
-      SYMBOL  TIER         0.82   [stable·strengthening·persistent]   rationale phrases
+      SYMBOL  TIER         BADGE  0.82   [stable·strengthening·persistent]   rationale phrases
+
+    The history badge ("NEW" or "Nx") sits between the tier and the
+    composite score so the eye picks up "fresh vs sticky" alongside the
+    symbol identity. Width is fixed so OPP lines column-align even when
+    badges differ in length.
     """
     tier_styled = _tier_text(opp.tier)
+    history_badge = _format_history_badge(history)
     profile_chip = _format_profile_chip(opp.profile)
     score = f"[bold]{opp.composite_score:.2f}[/bold]"
     rationale = (
@@ -350,9 +374,25 @@ def _format_ranked_opportunity(opp: RankedOpportunity) -> str:
         else "[dim](no driver above floor)[/dim]"
     )
     return (
-        f"[bold]{opp.symbol:<6}[/]  {tier_styled}  {score}  "
+        f"[bold]{opp.symbol:<6}[/]  {tier_styled}  {history_badge}  {score}  "
         f"{profile_chip}  [dim]{rich_escape(rationale)}[/dim]"
     )
+
+
+def _format_history_badge(history: OpportunityHistory | None) -> str:
+    """Fixed-width chip describing top-N membership recency.
+
+    Width 4 keeps OPP lines column-aligned regardless of streak digits:
+      None / streak == 0 → blank pad (no info)
+      streak == 1        → "NEW " in bold yellow (fresh entry)
+      streak >= 2        → "{N}x{pad}" in dim (sticky run)
+    """
+    if history is None or history.streak == 0:
+        return "    "
+    if history.streak == 1:
+        return "[bold yellow]NEW [/]"
+    label = f"{history.streak}x"
+    return f"[dim]{label:<4}[/]"
 
 
 _PROFILE_AXIS_STYLES: dict[str, dict[str, str]] = {

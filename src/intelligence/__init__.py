@@ -33,6 +33,10 @@ from src.intelligence.opportunities import (
     detect_opportunities,
     rank_opportunities,
 )
+from src.intelligence.opportunity_history import (
+    OpportunityHistory,
+    OpportunityMembershipTracker,
+)
 from src.intelligence.pulse import MarketPulse, compute_pulse
 from src.intelligence.signal_profile import SignalProfile, compute_signal_profile
 from src.intelligence.recap import LLMRecapGenerator, RecapContext
@@ -60,6 +64,8 @@ __all__ = [
     "MarketPulse",
     "Opportunity",
     "OpportunityEntryRule",
+    "OpportunityHistory",
+    "OpportunityMembershipTracker",
     "PrioritizerConfig",
     "RankedOpportunity",
     "RecapContext",

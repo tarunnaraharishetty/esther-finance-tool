@@ -33,6 +33,11 @@ from src.data.news_ingestion import NewsSource, get_news_source
 from src.intelligence.alert_prioritizer import AlertPrioritizer, AlertState
 from src.intelligence.alerts import AlertEngine
 from src.intelligence.history import SignalHistory, SignalHistorySummary
+from src.intelligence.opportunities import rank_opportunities
+from src.intelligence.opportunity_history import (
+    OpportunityHistory,
+    OpportunityMembershipTracker,
+)
 from src.intelligence.tier import promote_to_tier
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import SignalAction
@@ -41,6 +46,14 @@ from src.strategy.recommendation import RecommendationEngine
 # ---------------------------------------------------------------------------
 # Base controller
 # ---------------------------------------------------------------------------
+
+
+_OPP_TOP_N = 3
+"""Canonical top-N for opportunity ranking. Matches the renderer's
+:func:`rank_opportunities` call and OpportunityEntryRule's default.
+Picking one source of truth here means the membership tracker, the
+entry-alert rule, and the rendered OPP lines all agree on what
+"top-N" means within a session."""
 
 
 class BaseController(ABC):
@@ -56,6 +69,7 @@ class BaseController(ABC):
         alert_prioritizer: AlertPrioritizer | None = None,
         alert_state: AlertState | None = None,
         signal_history: SignalHistory | None = None,
+        opp_tracker: OpportunityMembershipTracker | None = None,
     ) -> None:
         self.watchlist = list(watchlist)
         self.engine = engine
@@ -64,11 +78,33 @@ class BaseController(ABC):
         self.alert_prioritizer = alert_prioritizer or AlertPrioritizer()
         self.alert_state = alert_state or AlertState()
         self.signal_history = signal_history or SignalHistory()
+        self.opp_tracker = opp_tracker or OpportunityMembershipTracker()
         self._tick = 0
 
     @abstractmethod
     async def fetch_snapshot(self) -> DashboardSnapshot:
         """Produce one frame of dashboard state."""
+
+    def _record_opp_history(
+        self, snap: DashboardSnapshot
+    ) -> dict[str, OpportunityHistory]:
+        """Update the membership tracker for this tick + return per-symbol
+        summaries for the symbols currently in top-N.
+
+        Symbols outside top-N are intentionally excluded from the result
+        — the renderer only consults this for OPP lines it draws, and
+        carrying summaries for absent symbols would just be dead weight
+        on the snapshot.
+        """
+        ranked = rank_opportunities(snap, n=_OPP_TOP_N)
+        top_symbols = [opp.symbol for opp in ranked]
+        self.opp_tracker.record(top_symbols)
+        out: dict[str, OpportunityHistory] = {}
+        for symbol in top_symbols:
+            summary = self.opp_tracker.summary_for(symbol)
+            if summary is not None:
+                out[symbol] = summary
+        return out
 
     def _record_history(
         self, rows: list[RecommendationRow], now: datetime
@@ -147,6 +183,7 @@ class DashboardController(BaseController):
             signal_history=history,
             timestamp=now,
         )
+        snap.opp_history = self._record_opp_history(snap)
         fresh_alerts = self.alert_engine.evaluate(rows_list)
         fresh_alerts.extend(self.alert_engine.evaluate_snapshot(snap))
         snap.alerts = self.alert_prioritizer.prioritize(
@@ -277,6 +314,7 @@ class MockDashboardController(BaseController):
             signal_history=history,
             timestamp=now,
         )
+        snap.opp_history = self._record_opp_history(snap)
         fresh_alerts = self.alert_engine.evaluate(rows)
         fresh_alerts.extend(self.alert_engine.evaluate_snapshot(snap))
         snap.alerts = self.alert_prioritizer.prioritize(

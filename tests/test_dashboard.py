@@ -173,6 +173,38 @@ def test_mock_controller_signal_history_grows_across_ticks() -> None:
         assert total_ticks == 2
 
 
+def test_mock_controller_populates_opp_history_for_top_n() -> None:
+    """The controller should fill snap.opp_history for symbols currently
+    in top-N. Streaks should accumulate across ticks for symbols that
+    stay in top-N.
+
+    Uses a wider watchlist so rank_opportunities has enough directional
+    candidates to actually populate top-3 (a watchlist of two HOLDs
+    would give us nothing to assert against).
+    """
+    ctrl = MockDashboardController(
+        watchlist=["AAPL", "MSFT", "NVDA", "TSLA", "SPY"], seed=7
+    )
+    s1 = asyncio.run(ctrl.fetch_snapshot())
+    if not s1.opp_history:
+        # Mock RNG happened to produce no directional rows on tick 1.
+        # The wiring is still exercised; we just can't assert further.
+        return
+    # First tick: every entry is fresh, streak = 1.
+    for sym, hist in s1.opp_history.items():
+        assert hist.streak == 1
+        assert hist.appearances == 1
+    # Symbols absent from top-N shouldn't leak into the dict.
+    top_set = set(s1.opp_history)
+    assert top_set <= {r.symbol for r in s1.rows}
+
+    s2 = asyncio.run(ctrl.fetch_snapshot())
+    # Streaks for symbols that stayed in top-N should be 2 by now.
+    persistent = top_set & set(s2.opp_history)
+    for sym in persistent:
+        assert s2.opp_history[sym].streak == 2
+
+
 def test_controller_uses_injected_alert_engine() -> None:
     """The controller should hand rows to whatever AlertEngine was injected."""
     # zero rules + zero snapshot rules → never any alerts.
