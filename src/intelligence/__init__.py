@@ -37,6 +37,11 @@ from src.intelligence.opportunity_brief import (
     LLMOpportunityBriefer,
     OpportunityBriefContext,
 )
+from src.intelligence.opportunity_drilldown import (
+    DriverBreakdown,
+    OpportunityDrilldown,
+    build_drilldown,
+)
 from src.intelligence.opportunity_history import (
     OpportunityHistory,
     OpportunityMembershipTracker,
@@ -63,6 +68,7 @@ __all__ = [
     "CompositeRule",
     "ConfidenceThresholdRule",
     "Contributor",
+    "DriverBreakdown",
     "Explanation",
     "LLMOpportunityBriefer",
     "LLMRecapGenerator",
@@ -70,6 +76,7 @@ __all__ = [
     "MarketPulse",
     "Opportunity",
     "OpportunityBriefContext",
+    "OpportunityDrilldown",
     "OpportunityEntryRule",
     "OpportunityHistory",
     "OpportunityMembershipTracker",
@@ -89,6 +96,7 @@ __all__ = [
     "TemplateSummarizer",
     "WatchlistChange",
     "action_breakdown",
+    "build_drilldown",
     "compute_pulse",
     "compute_signal_profile",
     "detect_opportunities",
