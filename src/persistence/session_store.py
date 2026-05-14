@@ -37,16 +37,17 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 """Bumped when the snapshot shape changes in a way that warrants
 calling it out — even when the change is additive. Old snapshots
-go through ``_MIGRATIONS`` to upgrade in memory; any version we
-don't recognize cold-starts cleanly."""
+go through in-memory migration (pydantic defaults fill new
+fields); any version we don't recognize cold-starts cleanly."""
 
-_SUPPORTED_LOAD_VERSIONS: frozenset[int] = frozenset({1, 2})
-"""Versions ``load()`` knows how to read. v1 lacked intraday
-fields; pydantic defaults fill them on load and the controller
-re-persists as v2."""
+_SUPPORTED_LOAD_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
+"""Versions ``load()`` knows how to read. v1 = pre-MT2; v2 added
+``intraday_signal_episodes``; v3 added intraday opp tracker
+fields. Pydantic defaults fill missing fields on load and the
+controller re-persists at the current version."""
 
 
 class PulseRecord(BaseModel):
@@ -123,6 +124,12 @@ class SessionSnapshot(BaseModel):
     # land here as an empty dict, which is what we'd record for any
     # session that ran without the intraday feature.
     intraday_signal_episodes: dict[str, list[SignalEpisode]] = Field(default_factory=dict)
+
+    # Intraday opportunity membership (schema v3). Parallel to the
+    # daily ``opp_membership`` field — populated only when intraday
+    # is enabled. Older snapshots load with an empty dict.
+    intraday_opp_membership: dict[str, list[bool]] = Field(default_factory=dict)
+    intraday_opp_window: int = 10
 
 
 class SessionStore:

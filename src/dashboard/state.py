@@ -108,6 +108,11 @@ class DashboardSnapshot:
     # IntradayRead. MT2 phase 2a foundation; downstream phases will
     # surface this alongside the daily ``signal_history`` field.
     intraday_signal_history: dict[str, SignalHistorySummary] = field(default_factory=dict)
+    # Parallel intraday top-N opportunity history (MT2 phase 2b).
+    # Same shape as the daily ``opp_history`` but populated from
+    # ``rank_opportunities_intraday`` + the controller's parallel
+    # intraday tracker.
+    intraday_opp_history: dict[str, OpportunityHistory] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 

@@ -2018,6 +2018,65 @@ async def test_view_toggle_renders_intraday_chip_in_header() -> None:
         assert "intraday" in text_intraday
 
 
+async def test_watchlist_header_opp_lines_flip_to_intraday_on_view_toggle() -> None:
+    """MT2 phase 2b: the OPP block in the header reads from
+    rank_opportunities_intraday when view is intraday, surfacing
+    the intraday ranker's output. The label flips from `OPP` to
+    `OPP-I` so the trader can tell at a glance."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.data.models import TimeFrame
+    from src.strategy.base import RecommendationTier
+    from src.strategy.multi_timeframe import IntradayRead
+
+    fired = datetime.now(UTC)
+    # Daily action is BUY with weak technicals (no daily OPP).
+    # Intraday action is SELL with strong intraday technical score
+    # → intraday OPP ranks.
+    row = RecommendationRow(
+        symbol="NVDA",
+        action=SignalAction.BUY,
+        confidence=0.4,
+        combined_score=0.2,
+        technical_score=0.1,
+        sentiment_score=0.1,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=520.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.BUY,
+        intraday=IntradayRead(
+            timeframe=TimeFrame.MIN_15,
+            action=SignalAction.SELL,
+            confidence=0.8,
+            combined_score=-0.6,
+            technical_score=-0.6,
+        ),
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text_daily = header.render()
+        # In daily view the OPP-I label shouldn't appear.
+        assert "OPP-I" not in text_daily
+
+        await pilot.press("t")
+        await pilot.pause(0.05)
+        text_intraday = header.render()
+        # Intraday view surfaces the OPP-I label + a SELL tier chip.
+        assert "OPP-I" in text_intraday
+        assert "SELL" in text_intraday
+
+
 async def test_view_toggle_falls_back_when_row_has_no_intraday() -> None:
     """In intraday view, a row without an IntradayRead shows a dim
     `—` in ACTION/CONF/TECH rather than misleading the trader with

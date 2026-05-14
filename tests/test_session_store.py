@@ -474,10 +474,13 @@ def test_intraday_signal_history_records_when_row_has_intraday() -> None:
     assert ctrl.intraday_signal_history.summary_for("MSFT") is None
 
 
-def test_intraday_signal_history_persists_via_v2_snapshot(tmp_path: Path) -> None:
+def test_intraday_signal_history_persists_via_current_snapshot(tmp_path: Path) -> None:
     """End-to-end: an intraday episode recorded on one controller
     survives the snapshot round-trip and hydrates on a fresh
-    controller. The schema_version is now 2."""
+    controller. The schema version is whatever the current code
+    writes (was v2 in phase 2a; v3 after phase 2b adds the
+    intraday OPP fields). Either is fine — the persistence is the
+    contract being tested here, not the version bump."""
     from datetime import timedelta
 
     from src.dashboard.controller import MockDashboardController
@@ -516,10 +519,10 @@ def test_intraday_signal_history_persists_via_v2_snapshot(tmp_path: Path) -> Non
     ctrl_a._record_intraday_history([row], fired + timedelta(seconds=5))
     ctrl_a._persist_if_enabled()
 
-    # Snapshot on disk should now carry schema_version=2.
+    # Snapshot on disk should carry the current schema version.
     loaded = SessionStore(state_path).load()
     assert loaded is not None
-    assert loaded.schema_version == 2
+    assert loaded.schema_version == CURRENT_SCHEMA_VERSION
     assert "AAPL" in loaded.intraday_signal_episodes
 
     # Fresh controller hydrates the intraday tracker.
@@ -529,6 +532,53 @@ def test_intraday_signal_history_persists_via_v2_snapshot(tmp_path: Path) -> Non
     summary = ctrl_b.intraday_signal_history.summary_for("AAPL")
     assert summary is not None
     assert summary.current.action == SignalAction.SELL
+
+
+def test_intraday_opp_tracker_persists_via_v3_snapshot(tmp_path: Path) -> None:
+    """Phase 2b: intraday OPP membership is recorded into a parallel
+    OpportunityMembershipTracker and persisted alongside the daily
+    tracker. A fresh controller pointed at the same file hydrates
+    the intraday tracker."""
+    from src.dashboard.controller import MockDashboardController
+
+    state_path = tmp_path / "session.json"
+    ctrl_a = MockDashboardController(
+        watchlist=["AAPL"], seed=1, session_store=SessionStore(state_path)
+    )
+    # Directly seed the parallel intraday tracker — bypasses the
+    # async fetch path so the test stays synchronous.
+    ctrl_a.intraday_opp_tracker.record(["AAPL", "MSFT"])
+    ctrl_a.intraday_opp_tracker.record(["AAPL"])
+    ctrl_a._persist_if_enabled()
+
+    loaded = SessionStore(state_path).load()
+    assert loaded is not None
+    assert loaded.schema_version == CURRENT_SCHEMA_VERSION
+    assert "AAPL" in loaded.intraday_opp_membership
+    assert "MSFT" in loaded.intraday_opp_membership
+
+    # Fresh controller hydrates the intraday tracker.
+    ctrl_b = MockDashboardController(
+        watchlist=["AAPL"], seed=1, session_store=SessionStore(state_path)
+    )
+    aapl_summary = ctrl_b.intraday_opp_tracker.summary_for("AAPL")
+    assert aapl_summary is not None
+    assert aapl_summary.streak == 2
+
+
+def test_v2_snapshot_migrates_to_v3_with_empty_intraday_opp(tmp_path: Path) -> None:
+    """A v2 snapshot on disk (signal-history fields but no intraday
+    OPP membership) must still load — the new v3 fields default to
+    empty dicts via pydantic."""
+    target = tmp_path / "session.json"
+    target.write_text(
+        '{"schema_version": 2, "saved_at": "2026-05-14T12:00:00+00:00", "tick": 5}',
+        encoding="utf-8",
+    )
+    loaded = SessionStore(target).load()
+    assert loaded is not None
+    assert loaded.tick == 5
+    assert loaded.intraday_opp_membership == {}
 
 
 def test_controller_prune_briefs_drops_only_matching_symbol() -> None:

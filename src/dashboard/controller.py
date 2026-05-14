@@ -33,7 +33,10 @@ from src.data.news_ingestion import NewsSource, get_news_source
 from src.intelligence.alert_prioritizer import AlertPrioritizer, AlertState
 from src.intelligence.alerts import AlertEngine
 from src.intelligence.history import SignalHistory, SignalHistorySummary
-from src.intelligence.opportunities import rank_opportunities
+from src.intelligence.opportunities import (
+    rank_opportunities,
+    rank_opportunities_intraday,
+)
 from src.intelligence.opportunity_history import (
     OpportunityHistory,
     OpportunityMembershipTracker,
@@ -90,6 +93,10 @@ class BaseController(ABC):
         # one in the same SessionStore snapshot. Phase 2a of MT2.
         self.intraday_signal_history = SignalHistory()
         self.opp_tracker = opp_tracker or OpportunityMembershipTracker()
+        # Parallel intraday opportunity-membership tracker — populated
+        # only when intraday is enabled, persisted alongside the daily
+        # tracker in the same snapshot. Phase 2b of MT2.
+        self.intraday_opp_tracker = OpportunityMembershipTracker()
         self.pulse_tracker = pulse_tracker or PulseHistoryTracker()
         self.session_store = session_store
         self._tick = 0
@@ -184,6 +191,22 @@ class BaseController(ABC):
                 out[symbol] = summary
         return out
 
+    def _record_intraday_opp_history(
+        self, snap: DashboardSnapshot
+    ) -> dict[str, OpportunityHistory]:
+        """Parallel to ``_record_opp_history`` — operates on the
+        intraday ranking + intraday tracker. Returns per-symbol
+        summaries for symbols currently in the intraday top-N."""
+        ranked = rank_opportunities_intraday(snap, n=_OPP_TOP_N)
+        top_symbols = [opp.symbol for opp in ranked]
+        self.intraday_opp_tracker.record(top_symbols)
+        out: dict[str, OpportunityHistory] = {}
+        for symbol in top_symbols:
+            summary = self.intraday_opp_tracker.summary_for(symbol)
+            if summary is not None:
+                out[symbol] = summary
+        return out
+
     def _record_history(
         self, rows: list[RecommendationRow], now: datetime
     ) -> dict[str, SignalHistorySummary]:
@@ -249,6 +272,10 @@ class BaseController(ABC):
         # is a no-op for pre-MT2 sessions.
         self.intraday_signal_history.apply_snapshot(snapshot.intraday_signal_episodes)
         self.opp_tracker.apply_snapshot(snapshot.opp_membership)
+        # v3-and-later: intraday OPP membership. Older snapshots
+        # populate this field with the pydantic default ({}), which
+        # is a no-op apply.
+        self.intraday_opp_tracker.apply_snapshot(snapshot.intraday_opp_membership)
         self.pulse_tracker.apply_snapshot(snapshot.pulse_records)
         self.alert_state.apply_snapshot(snapshot.alert_log, snapshot.alert_last_fired)
         self._tick = snapshot.tick
@@ -281,6 +308,7 @@ class BaseController(ABC):
             brief_cache=dict(self.brief_cache),
             opp_brief_cache=dict(self.opp_brief_cache),
             intraday_signal_episodes=self.intraday_signal_history.to_snapshot(),
+            intraday_opp_membership=self.intraday_opp_tracker.to_snapshot(),
         )
         self.session_store.save(snapshot)
 
@@ -395,6 +423,7 @@ class DashboardController(BaseController):
         )
         self._record_pulse(snap)
         snap.opp_history = self._record_opp_history(snap)
+        snap.intraday_opp_history = self._record_intraday_opp_history(snap)
         fresh_alerts = self.alert_engine.evaluate(rows_list)
         fresh_alerts.extend(self.alert_engine.evaluate_snapshot(snap))
         snap.alerts = self.alert_prioritizer.prioritize(fresh_alerts, self.alert_state, now=now)
@@ -558,6 +587,7 @@ class MockDashboardController(BaseController):
         )
         self._record_pulse(snap)
         snap.opp_history = self._record_opp_history(snap)
+        snap.intraday_opp_history = self._record_intraday_opp_history(snap)
         fresh_alerts = self.alert_engine.evaluate(rows)
         fresh_alerts.extend(self.alert_engine.evaluate_snapshot(snap))
         snap.alerts = self.alert_prioritizer.prioritize(fresh_alerts, self.alert_state, now=now)

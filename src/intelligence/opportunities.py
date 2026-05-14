@@ -106,9 +106,7 @@ def detect_opportunities(
 # ---------------------------------------------------------------------------
 
 
-def _candidates_for_row(
-    row: RecommendationRow, snapshot: DashboardSnapshot
-) -> list[Opportunity]:
+def _candidates_for_row(row: RecommendationRow, snapshot: DashboardSnapshot) -> list[Opportunity]:
     out: list[Opportunity] = []
     conv = _check_convergence(row)
     if conv is not None:
@@ -138,9 +136,7 @@ def _check_convergence(row: RecommendationRow) -> Opportunity | None:
     # All three indicators + sentiment need to agree. Sentiment only
     # counts if there's actual news; without it, convergence isn't real.
     has_news = row.num_news_articles > 0
-    indicators_aligned = (
-        aligned(row.rsi) and aligned(row.macd) and aligned(row.bollinger)
-    )
+    indicators_aligned = aligned(row.rsi) and aligned(row.macd) and aligned(row.bollinger)
     sentiment_aligned = has_news and aligned(row.sentiment_score)
     if not (indicators_aligned and sentiment_aligned):
         return None
@@ -165,9 +161,7 @@ def _check_convergence(row: RecommendationRow) -> Opportunity | None:
     )
 
 
-def _check_reversal(
-    row: RecommendationRow, snapshot: DashboardSnapshot
-) -> Opportunity | None:
+def _check_reversal(row: RecommendationRow, snapshot: DashboardSnapshot) -> Opportunity | None:
     """Action flipped from a non-HOLD prior episode AND confidence is
     rising within the new episode."""
     if row.action == SignalAction.HOLD:
@@ -267,6 +261,56 @@ class RankedOpportunity:
     signal_quality_score: float
 
 
+def rank_opportunities_intraday(
+    snapshot: DashboardSnapshot,
+    *,
+    n: int = 5,
+) -> list[RankedOpportunity]:
+    """Rank watchlist symbols by composite score on the **intraday**
+    timeframe.
+
+    Mirrors :func:`rank_opportunities` but reads from
+    ``row.intraday`` (action, confidence, technical_score) and the
+    parallel ``snapshot.intraday_signal_history``. Rows without an
+    ``IntradayRead`` are skipped — no intraday data, no intraday
+    ranking. Sentiment is timeframe-agnostic (news weighting is the
+    same regardless of bar timeframe) and the signal-quality tier
+    isn't computed separately for intraday yet (Phase 2c), so both
+    of those drivers still read from the daily row.
+
+    Returns the same :class:`RankedOpportunity` shape; ``tier`` is
+    mapped directly from ``intraday.action`` (no STRONG promotion).
+    """
+    candidates: list[RankedOpportunity] = []
+    for row in snapshot.rows:
+        if row.error or row.intraday is None:
+            continue
+        if row.intraday.action not in (SignalAction.BUY, SignalAction.SELL):
+            continue
+        history = snapshot.intraday_signal_history.get(row.symbol)
+        scores = _intraday_driver_scores(row, history)
+        composite = _weighted_composite(scores)
+        if composite <= 0:
+            continue
+        # Profile reuses the existing classifier — stability still
+        # reads from row.stability (daily), but trend / persistence
+        # come from the intraday history that gets passed in.
+        profile = compute_signal_profile(row, history)
+        rationale = _rationale_from_drivers(scores, profile, history)
+        candidates.append(
+            RankedOpportunity(
+                symbol=row.symbol,
+                tier=RecommendationTier.from_action(row.intraday.action),
+                composite_score=composite,
+                profile=profile,
+                rationale=rationale,
+                **scores,
+            )
+        )
+    candidates.sort(key=lambda c: c.composite_score, reverse=True)
+    return candidates[:n]
+
+
 def rank_opportunities(
     snapshot: DashboardSnapshot,
     *,
@@ -329,6 +373,70 @@ def _driver_scores(
     }
 
 
+def _intraday_driver_scores(
+    row: RecommendationRow,
+    history: SignalHistorySummary | None,
+) -> dict[str, float]:
+    """Driver scores for the intraday ranker.
+
+    Differs from the daily ``_driver_scores`` in three places:
+
+    * ``technical_alignment`` keys off the aggregate
+      ``row.intraday.technical_score`` because IntradayRead doesn't
+      carry per-indicator scores (RSI / MACD / Bollinger separately).
+    * ``reversal_strength`` uses the intraday confidence, not the
+      daily one.
+    * Sentiment + signal-quality drivers pass through unchanged —
+      news weighting is timeframe-agnostic and the tier-based
+      quality grade isn't separately computed for intraday yet
+      (Phase 2c if needed).
+
+    Caller is responsible for ensuring ``row.intraday is not None``
+    — this function assumes it.
+    """
+    assert row.intraday is not None
+    direction = _direction(row.intraday.action)
+    return {
+        "technical_alignment": _score_technical_alignment_intraday(row, direction),
+        "sentiment_alignment": _score_sentiment_alignment(row, direction),
+        "confidence_acceleration": _score_confidence_acceleration(history),
+        "momentum_persistence": _score_momentum_persistence(history),
+        "unusual_activity": _score_unusual_activity(history),
+        "reversal_strength": _score_reversal_strength_intraday(row, history, direction),
+        "signal_quality_score": _score_signal_quality(row),
+    }
+
+
+def _score_technical_alignment_intraday(row: RecommendationRow, direction: int) -> float:
+    """Intraday technical alignment from the aggregate technical
+    score. Same magnitude scaling as the sentiment driver — score
+    in the action direction gets mapped to ``[0, 1]``."""
+    if direction == 0 or row.intraday is None:
+        return 0.0
+    directional = direction * row.intraday.technical_score
+    if directional <= _ALIGN_MIN_MAGNITUDE:
+        return 0.0
+    return min(1.0, abs(row.intraday.technical_score) * 2.0)
+
+
+def _score_reversal_strength_intraday(
+    row: RecommendationRow,
+    history: SignalHistorySummary | None,
+    direction: int,
+) -> float:
+    """Same shape as ``_score_reversal_strength`` but uses the
+    intraday confidence — a fresh flip on the intraday timeframe
+    should reflect intraday conviction, not daily."""
+    if direction == 0 or history is None or not history.recent or row.intraday is None:
+        return 0.0
+    prior = history.recent[0]
+    prior_dir = _direction(prior.action)
+    if prior_dir == 0 or prior_dir == direction:
+        return 0.0
+    score = row.intraday.confidence * prior.tick_count / 5.0
+    return min(1.0, score)
+
+
 def _direction(action: SignalAction) -> int:
     if action == SignalAction.BUY:
         return 1
@@ -350,9 +458,7 @@ def _score_technical_alignment(row: RecommendationRow, direction: int) -> float:
     finite = [s for s in indicators if _is_finite(s)]
     if not finite:
         return 0.0
-    aligned = sum(
-        1 for s in finite if direction * s > _ALIGN_MIN_MAGNITUDE
-    )
+    aligned = sum(1 for s in finite if direction * s > _ALIGN_MIN_MAGNITUDE)
     return aligned / len(finite)
 
 
@@ -405,9 +511,7 @@ def _score_unusual_activity(history: SignalHistorySummary | None) -> float:
     """
     if history is None or history.current.tick_count < 2:
         return 0.0
-    delta = abs(
-        history.current.confidence_last - history.current.confidence_first
-    )
+    delta = abs(history.current.confidence_last - history.current.confidence_first)
     score = delta * history.current.tick_count / 4.0
     return min(1.0, score)
 
@@ -437,9 +541,7 @@ def _score_reversal_strength(
 
 def _score_signal_quality(row: RecommendationRow) -> float:
     """Map the tier-system quality label to a numeric score."""
-    return {"high": 1.0, "moderate": 0.5, "low": 0.0}.get(
-        row.signal_quality, 0.0
-    )
+    return {"high": 1.0, "moderate": 0.5, "low": 0.0}.get(row.signal_quality, 0.0)
 
 
 def _weighted_composite(scores: dict[str, float]) -> float:
@@ -480,10 +582,7 @@ def _rationale_from_drivers(
         out.append("unusual confidence swing")
     if scores["reversal_strength"] >= _RATIONALE_FLOOR and history is not None:
         prior = history.recent[0]
-        out.append(
-            f"fresh reversal from {prior.tick_count}-tick "
-            f"{prior.action.value.upper()}"
-        )
+        out.append(f"fresh reversal from {prior.tick_count}-tick {prior.action.value.upper()}")
     if scores["signal_quality_score"] >= 1.0:
         out.append("high signal quality")
     return tuple(out)
@@ -494,4 +593,5 @@ __all__ = [
     "RankedOpportunity",
     "detect_opportunities",
     "rank_opportunities",
+    "rank_opportunities_intraday",
 ]

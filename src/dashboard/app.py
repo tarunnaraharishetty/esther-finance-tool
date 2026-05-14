@@ -40,6 +40,7 @@ from src.intelligence.opportunities import (
     Opportunity,
     RankedOpportunity,
     rank_opportunities,
+    rank_opportunities_intraday,
 )
 from src.intelligence.opportunity_drilldown import (
     OpportunityDrilldown,
@@ -286,13 +287,20 @@ class WatchlistHeader(Static):
             lines.append(f"{_section_label('INTRADAY')}{intraday_summary}")
 
         # --- Top opportunities (skip when none qualify) ---------------
-        # Ranked-composite output replaces the older kind-based view —
-        # same screen real estate, richer per-line content. Skipped
-        # when no directional symbols rank.
-        opportunities = rank_opportunities(snap, n=3)
+        # Phase 2b: in intraday view the OPP lines render from
+        # ``rank_opportunities_intraday`` + the parallel intraday
+        # history tracker. Daily view stays unchanged.
+        if self.view_timeframe == _VIEW_INTRADAY:
+            opportunities = rank_opportunities_intraday(snap, n=3)
+            opp_history_source = snap.intraday_opp_history
+            opp_label = "OPP-I"  # disambiguate so the trader can tell at a glance
+        else:
+            opportunities = rank_opportunities(snap, n=3)
+            opp_history_source = snap.opp_history
+            opp_label = "OPP"
         for opp in opportunities:
-            history = snap.opp_history.get(opp.symbol)
-            lines.append(f"{_section_label('OPP')}{_format_ranked_opportunity(opp, history)}")
+            history = opp_history_source.get(opp.symbol)
+            lines.append(f"{_section_label(opp_label)}{_format_ranked_opportunity(opp, history)}")
 
         return "\n".join(lines)
 
@@ -458,6 +466,15 @@ def _header_signature(
             snap.pulse_history.alert_intensity[-1],
         )
     # Opportunities + their history badges drive the OPP lines.
+    # Phase 2b: in intraday view the OPP section reads from the
+    # intraday ranker + intraday history mirror, so the cache
+    # fingerprint has to switch sources too.
+    if view_timeframe == _VIEW_INTRADAY:
+        ranked_for_sig = rank_opportunities_intraday(snap, n=3)
+        opp_history_for_sig = snap.intraday_opp_history
+    else:
+        ranked_for_sig = rank_opportunities(snap, n=3)
+        opp_history_for_sig = snap.opp_history
     opp_sig = tuple(
         (
             o.symbol,
@@ -466,13 +483,13 @@ def _header_signature(
             # History badge is part of the rendered line — without it a
             # streak bump (2x → 3x) wouldn't invalidate the cache.
             (
-                snap.opp_history[o.symbol].streak,
-                snap.opp_history[o.symbol].appearances,
+                opp_history_for_sig[o.symbol].streak,
+                opp_history_for_sig[o.symbol].appearances,
             )
-            if o.symbol in snap.opp_history
+            if o.symbol in opp_history_for_sig
             else None,
         )
-        for o in rank_opportunities(snap, n=3)
+        for o in ranked_for_sig
     )
     # Intraday signature — the INTRADAY header line keys off per-row
     # divergence vs daily action. Any (daily action, intraday action)
