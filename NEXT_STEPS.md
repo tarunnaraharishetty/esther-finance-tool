@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (dashboard polish: columns + command palette).*
+*Last touched: 2026-05-14 (MT2 phase 2a: schema v2 + view toggle).*
 
 ---
 
@@ -113,20 +113,22 @@ dashboard or exposed via the CLI.
   prompt as deterministic facts; existing anti-hallucination rules
   already cover observational language so no new few-shot needed.
 
-**Multi-timeframe (Phase 1)**
-- **Per-row intraday read** alongside the daily pipeline. Opt-in
-  via `Settings.intraday_enabled` (default off; doubles Alpaca bar
-  fetches when on). Default secondary timeframe is 15-min;
-  configurable.
-- `RecommendationEngine.recommend_intraday()` runs the daily
-  indicator-scoring path on the secondary bar dataframe — sentiment
-  is skipped (timeframe-agnostic). Returns an `IntradayRead`
-  attached to each `RecommendationRow`.
-- `DetailPanel` renders an "Intraday" section with the alignment
-  word (green `aligned` / red `diverging` / dim `neutral`) when the
-  row carries an intraday read.
-- `WatchlistHeader` adds an INTRADAY line with the
-  diverging / aligned / neutral counts.
+**Multi-timeframe**
+- **Phase 1: per-row intraday read** alongside the daily pipeline.
+  Opt-in via `Settings.intraday_enabled` (default off; doubles
+  Alpaca bar fetches when on). `RecommendationEngine.recommend_
+  intraday()` runs the indicator scoring path on the secondary
+  bar dataframe. `IntradayRead` attaches to each
+  `RecommendationRow`. `DetailPanel` + `WatchlistHeader` surface
+  alignment chips + divergence counts.
+- **Phase 2a: schema v2 + view toggle.** `SessionStore` schema
+  bumped to v2 with v1 migration (v1 snapshots load with empty
+  intraday state, persist as v2). `BaseController.intraday_signal_
+  history` records from `row.intraday` each tick; surfaces on
+  `DashboardSnapshot.intraday_signal_history`. View toggle `t`
+  flips the table's ACTION / CONF / BAR / TECH cells between
+  daily and intraday; `WatchlistHeader` shows a VIEW chip while
+  intraday is active.
 
 **Strategy**
 - RSI / MACD / Bollinger indicators
@@ -188,7 +190,7 @@ dashboard or exposed via the CLI.
   drift from the keys.
 
 **Quality baseline**
-- 601 passing tests, 1 deselected (`slow`/`integration`)
+- 607 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
 - `mypy src` (`--strict`) green across all 49 source files
 - Documented exceptions live in `pyproject.toml`
@@ -259,20 +261,22 @@ when the surrounding code is touched.
 
 ## Recommended next implementation order
 
-Sequenced for maximum compounding return. Only one major theme
-remains in the roadmap.
+Sequenced for maximum compounding return.
 
-**1. Multi-timeframe Phase 2** *(start here when intraday becomes
-the primary read)*
-- Separate intraday `SignalHistory` / `OpportunityMembershipTracker`
-  / `PulseHistoryTracker`, intraday-specific alerts and
-  opportunities, `SessionStore` schema bump (`schema_version=2`)
-  to persist intraday state. Plan the snapshot migration carefully
-  so the existing daily state migrates rather than starts cold.
+**1. MT2 phase 2b** *(start here when intraday becomes more than
+alignment context)*
+- Parallel intraday `OpportunityMembershipTracker` +
+  `PulseHistoryTracker` (mirroring how phase 2a added the parallel
+  `SignalHistory`).
+- Intraday-specific opportunities (`rank_opportunities_intraday`)
+  + alert rules keyed off `row.intraday`.
+- View toggle extends to OPP / REGIME / PATTERNS / DetailPanel /
+  StatusLine (currently only the table cells flip).
+- Schema v3 bump if/when new fields are needed.
 
 **Polish backlog (opportunistic)**
 - In-app column-toggle modal (bound to `c`), surfacing the same
-  Settings.dashboard_columns list for live editing.
+  `Settings.dashboard_columns` list for live editing.
 - `--dry-run` flag on `esther backfill` to preview without paying
   the Alpaca quota.
 - Inline SessionStore status footer (last-write timestamp, size).
@@ -283,34 +287,36 @@ the primary read)*
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 601 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 607 passing
 ```
 
-The major roadmap is done — only **multi-timeframe Phase 2** remains
-as a planned theme, and it's intentionally not started yet (waits
-on intraday becoming the trader's primary read rather than alignment
-context). Otherwise pick something from the opportunistic polish
-backlog or address a real user complaint.
+Phase 2a shipped the foundation (schema v2 with v1 migration,
+intraday signal history, view toggle on the table). The natural
+next slice is **Phase 2b**: extend the view toggle to the rest of
+the dashboard (OPP / REGIME / PATTERNS / DetailPanel / StatusLine)
+once intraday-specific trackers are in place.
 
-Suggested opening prompt to Claude when MT2 becomes urgent:
+Suggested opening prompt to Claude when MT2 phase 2b becomes urgent:
 
-> Implement multi-timeframe Phase 2. Add parallel intraday
-> trackers (SignalHistory / OpportunityMembershipTracker /
-> PulseHistoryTracker) keyed off the intraday timeframe. Build
-> intraday-specific alerts and opportunities on top. Bump the
-> SessionStore schema to version 2 with a migration path that
-> preserves existing daily state — old snapshots load as version
-> 1 with empty intraday fields. Surface a dashboard view toggle
-> (`t`) that switches the primary read between daily and intraday.
+> Implement MT2 phase 2b. Add parallel intraday
+> OpportunityMembershipTracker + PulseHistoryTracker that mirror
+> the daily ones (same shape as the phase 2a SignalHistory).
+> Build intraday-specific opportunities (rank_opportunities_intraday
+> in src/intelligence/opportunities.py) keyed off row.intraday.
+> Extend DashboardApp.view_timeframe to flip the OPP / REGIME /
+> PATTERNS / DetailPanel / StatusLine renders as well — phase 2a
+> only flipped the table cells. Add intraday-specific alert rules
+> if the trader needs them; otherwise reuse daily rules pointed at
+> the intraday tracker. Schema bump to v3 if needed.
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `ef6e42d` (push to `origin/main`
+- **Branch:** `main` is clean at `93c4fe7` (push to `origin/main`
   pending — harness blocks direct push to default branch unless
   the user runs it themselves; one commit queued locally).
-- **Tests:** 601 passing, 1 deselected (`slow`/`integration` mark).
+- **Tests:** 607 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
   across all 49 source files.
