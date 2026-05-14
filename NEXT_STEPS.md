@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-13 (pulse evolution shipped).*
+*Last touched: 2026-05-13 (dashboard refinement bundle shipped).*
 
 ---
 
@@ -170,9 +170,15 @@ dashboard or exposed via the CLI.
   Non-OPP rows render unchanged.
 - Keyboard shortcuts: `q` quit · `r` refresh · `p` pause · `s` brief
   · `o` cycle OPP · `b` OPP brief · `a` add symbol · `x` remove symbol
+  · `?` help overlay (lists every keybinding)
+- **Refinements:** empty-watchlist hint on header + DetailPanel
+  (mentions `a` and `?`); `dashboard_refresh_seconds` and
+  `dashboard_burst_seconds` are Settings fields, env-overridable
+  and surfaced via the `--refresh-seconds` / `--burst-seconds` CLI
+  flags.
 
 **Quality baseline**
-- 587 passing tests, 1 deselected (`slow`/`integration`)
+- 591 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
 - `mypy src` (`--strict`) green across all 49 source files
 - Documented exceptions live in `pyproject.toml`
@@ -181,12 +187,15 @@ dashboard or exposed via the CLI.
 
 ## Remaining high-priority roadmap
 
-The remaining roadmap is small — most major themes shipped on
-2026-05-13 (drilldown, news quality scoring, `SessionStore`
-persistence, multi-timeframe Phase 1, pulse evolution). Two
-follow-ups still open:
-- **Brief caches** (row + OPP briefs in `DashboardApp`) aren't
-  persisted yet — small separate-section hook on the SessionStore.
+The roadmap is light — every major theme is shipped. Remaining
+work is opportunistic polish + the two follow-ups noted below.
+
+### Open follow-ups
+
+- **Brief caches**: row + OPP LLM briefs live on `DashboardApp` and
+  aren't persisted yet. Small separate-section hook on
+  `SessionStore` (or sibling file). Saves Anthropic calls across
+  restarts.
 - **Multi-timeframe Phase 2**: separate intraday `SignalHistory` /
   `OpportunityMembershipTracker` / `PulseHistoryTracker`, intraday-
   specific alerts and opportunities, `SessionStore` schema bump
@@ -194,12 +203,15 @@ follow-ups still open:
   intraday becomes part of the trader's primary read rather than
   alignment context.
 
-### 1. Dashboard refinement
-Ongoing polish that doesn't fit a neat feature box: column tunables,
-help-overlay (`?`), better empty-state messages, configurable burst
-window, perhaps a command palette via Textual's built-in. Best done
-in parallel with feature work — pick up small items between bigger
-features.
+### Dashboard polish backlog
+
+- Column tunables (let the trader hide / reorder watchlist
+  columns).
+- Textual command palette wired to controller actions.
+- A `--dry-run` flag on `esther backfill` so the trader can
+  preview what would be fetched without paying the Alpaca quota.
+- Inline status footer for the SessionStore (last-write timestamp,
+  size) so the persistence layer's health is visible.
 
 ---
 
@@ -243,20 +255,21 @@ when the surrounding code is touched.
 
 Sequenced for maximum compounding return.
 
-**1. Dashboard refinement** *(start here tomorrow)*
-- Help overlay (`?`), command palette via Textual built-ins,
-  configurable burst window, empty-state polish, column tunables.
-  Pick up a few small items rather than chasing a single feature.
+**1. Brief-cache persistence** *(start here tomorrow)*
+- Smallest unshipped item with clear value. Extend `SessionStore`
+  with a brief-caches section (or a sibling file); `DashboardApp`
+  reads at mount, writes on each successful brief generation.
+  Saves Anthropic calls across restarts — directly reduces cost.
 
-**2. Brief-cache persistence**
-- Small follow-up. Extend `SessionStore` with a brief-caches
-  section (or a sibling file); the `DashboardApp` reads at mount,
-  writes on each successful brief generation. Saves Anthropic
-  calls across restarts.
-
-**3. Multi-timeframe Phase 2**
+**2. Multi-timeframe Phase 2**
 - Bigger lift; only justify when intraday becomes the trader's
-  primary read. Plan the `schema_version=2` snapshot carefully.
+  primary read. Plan the `schema_version=2` snapshot carefully so
+  the existing daily state migrates rather than starts cold.
+
+**3. Dashboard polish backlog**
+- Pick small items between bigger features rather than as a
+  dedicated session. Column tunables and the command palette are
+  both reasonable next picks.
 
 ---
 
@@ -264,32 +277,35 @@ Sequenced for maximum compounding return.
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 587 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 591 passing
 ```
 
-Open this doc and start with **Dashboard refinement** (roadmap
-item #1). The major features are all in; the next session is
-polish work — a help overlay (`?`), Textual's built-in command
-palette, configurable burst window, better empty-state messages.
-None of these are individually large, so pick a small bundle that
-adds visible UX wins.
+Open this doc and start with **Brief-cache persistence** (roadmap
+item #1). The Anthropic-backed row + OPP briefs are cached in
+memory on `DashboardApp`; restarting the dashboard wipes them and
+the next press of `s` / `b` re-bills the LLM. Extending
+`SessionStore` (schema_version still 1; just add two new dict
+fields) plus app-side load/save hooks closes that gap.
 
 Suggested opening prompt to Claude:
 
-> Tackle dashboard refinement. Pick three items from the punch list:
-> a help overlay bound to `?` that lists every keybinding;
-> Textual's built-in command palette wired to controller actions;
-> a friendlier empty-state when the watchlist is cleared. Keep each
-> change small and well-tested; preserve render-skip caching.
+> Add brief-cache persistence to SessionStore. Persist DashboardApp's
+> _brief_cache (keyed by (symbol, action)) and _opp_brief_cache
+> (keyed by (symbol, composite_bucket)) so AI briefs survive
+> restarts. Load in DashboardApp.on_mount via the controller's
+> session_store; save after each successful brief generation. Add
+> schema_version=1 fields with sensible defaults so old snapshots
+> still load. Keep brief text strings opaque to the persistence
+> layer — they're just dict values.
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `c9f0d66` (push to `origin/main`
+- **Branch:** `main` is clean at `18139e3` (push to `origin/main`
   pending — harness blocks direct push to default branch unless
-  the user runs it themselves; two commits queued locally).
-- **Tests:** 587 passing, 1 deselected (`slow`/`integration` mark).
+  the user runs it themselves; one commit queued locally).
+- **Tests:** 591 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
   across all 49 source files.
