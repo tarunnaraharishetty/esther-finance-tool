@@ -176,6 +176,56 @@ def test_reversal_against_daily_trend_phrase_on_fresh_conflict_flip() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_alignment_label_strengthening_continuation_on_aligned_plus_phrase() -> None:
+    """``aligned_bullish`` + ``strengthening intraday momentum``
+    upgrades to the richer ``strengthening continuation`` label."""
+    from src.intelligence.timeframe_compare import alignment_label
+
+    assert (
+        alignment_label("aligned_bullish", ("strengthening intraday momentum",))
+        == "strengthening continuation"
+    )
+    assert (
+        alignment_label("aligned_bearish", ("strengthening intraday momentum",))
+        == "strengthening continuation"
+    )
+
+
+def test_alignment_label_intraday_reversal_overrides_momentum_conflict() -> None:
+    """A conflict category with the reversal-against-daily phrase
+    upgrades to ``intraday reversal`` instead of the plain
+    ``momentum conflict`` label."""
+    from src.intelligence.timeframe_compare import alignment_label
+
+    assert (
+        alignment_label("conflict", ("intraday reversal against daily trend",))
+        == "intraday reversal"
+    )
+    # Plain conflict (no phrase) stays at momentum_conflict.
+    assert alignment_label("conflict", ()) == "momentum conflict"
+
+
+def test_alignment_label_daily_only_maps_to_short_term_pullback() -> None:
+    from src.intelligence.timeframe_compare import alignment_label
+
+    assert alignment_label("daily_only", ()) == "short-term pullback"
+
+
+def test_alignment_label_simple_aligned_when_no_phrases() -> None:
+    from src.intelligence.timeframe_compare import alignment_label
+
+    assert alignment_label("aligned_bullish", ()) == "aligned bullish"
+    assert alignment_label("aligned_bearish", ()) == "aligned bearish"
+
+
+def test_alignment_label_fallback_neutral() -> None:
+    from src.intelligence.timeframe_compare import alignment_label
+
+    assert alignment_label("neutral", ()) == "neutral"
+    # Unknown category falls through to neutral defensively.
+    assert alignment_label("anything_else", ()) == "neutral"
+
+
 def test_aggregate_counts_returns_category_totals() -> None:
     """Counts roll up by category, mirroring the labels the ALIGN
     header chip surfaces."""

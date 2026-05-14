@@ -110,6 +110,9 @@ class BaseController(ABC):
         # after each successful LLM generation.
         self.brief_cache: dict[str, str] = {}
         self.opp_brief_cache: dict[str, str] = {}
+        # Phase 2c follow-up: parallel intraday OPP brief cache so
+        # daily and intraday briefs persist independently.
+        self.intraday_opp_brief_cache: dict[str, str] = {}
         # If a SessionStore is wired up, hydrate the trackers + tick
         # counter from the saved snapshot. Missing or corrupt file →
         # cold start; logged at the store layer.
@@ -303,6 +306,9 @@ class BaseController(ABC):
         # this commit, so no None-check is needed.
         self.brief_cache = dict(snapshot.brief_cache)
         self.opp_brief_cache = dict(snapshot.opp_brief_cache)
+        # Phase 2c follow-up — older snapshots populate this as ``{}``
+        # via the pydantic default.
+        self.intraday_opp_brief_cache = dict(snapshot.intraday_opp_brief_cache)
         self.events.info(
             f"session restored from {self.session_store.path.name} (tick {snapshot.tick})"
         )
@@ -329,6 +335,7 @@ class BaseController(ABC):
             intraday_signal_episodes=self.intraday_signal_history.to_snapshot(),
             intraday_opp_membership=self.intraday_opp_tracker.to_snapshot(),
             intraday_pulse_records=self.intraday_pulse_tracker.to_snapshot(),
+            intraday_opp_brief_cache=dict(self.intraday_opp_brief_cache),
         )
         self.session_store.save(snapshot)
 
@@ -360,6 +367,16 @@ class BaseController(ABC):
         key = f"{symbol}{self._BRIEF_KEY_DELIM}{composite_bucket}"
         self.opp_brief_cache[key] = text
 
+    def record_intraday_opp_brief(self, symbol: str, composite_bucket: int, text: str) -> None:
+        """Persist an intraday-OPP brief into the dedicated mirror.
+
+        Same key shape as the daily ``record_opp_brief`` so the
+        round-trip math works identically; lives in a separate dict
+        so daily and intraday briefs on the same symbol coexist.
+        """
+        key = f"{symbol}{self._BRIEF_KEY_DELIM}{composite_bucket}"
+        self.intraday_opp_brief_cache[key] = text
+
     def prune_briefs_for_symbol(self, symbol: str) -> None:
         """Drop every cached brief whose key starts with ``symbol|``.
 
@@ -371,6 +388,12 @@ class BaseController(ABC):
         self.brief_cache = {k: v for k, v in self.brief_cache.items() if not k.startswith(prefix)}
         self.opp_brief_cache = {
             k: v for k, v in self.opp_brief_cache.items() if not k.startswith(prefix)
+        }
+        # Phase 2c follow-up: the intraday OPP brief mirror also
+        # needs pruning so a re-added symbol doesn't surface stale
+        # briefs from before the removal.
+        self.intraday_opp_brief_cache = {
+            k: v for k, v in self.intraday_opp_brief_cache.items() if not k.startswith(prefix)
         }
 
 

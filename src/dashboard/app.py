@@ -341,6 +341,7 @@ def _detail_signature(
     brief_kind: str = "row",
     opp_match: tuple[int, RankedOpportunity] | None = None,
     intraday_opp_match: tuple[int, RankedOpportunity] | None = None,
+    view_timeframe: str = "daily",
 ) -> tuple[object, ...]:
     """Stable signature of what DetailPanel.render() would produce.
 
@@ -444,6 +445,10 @@ def _detail_signature(
         brief_state,
         brief_text,
         brief_kind,
+        # Phase 2c follow-up: the view axis flips Intelligence-block
+        # order + OPP-drilldown source, so it has to invalidate the
+        # cache when the trader hits `t`.
+        view_timeframe,
     )
 
 
@@ -866,6 +871,47 @@ def _timeframe_reversal_state(
     return ("none", "dim")
 
 
+def _format_intraday_status_chip(snap: DashboardSnapshot) -> str:
+    """Compact intraday-state chip for the StatusLine.
+
+    Returns ``""`` when no row has an intraday read. Otherwise one
+    of five labels, deterministic from observable state:
+
+      INTRA HOT          intraday pulse activity is volatile
+      INTRA REV          intraday reversal_intensity >= 2
+      TF CONFLICT        conflict stances dominate the comparison set
+      DAILY+INTRA ALIGN  >= 50% of stances are aligned (bull or bear)
+      INTRA ON           intraday data present but nothing else fires
+
+    Most-specific labels win — HOT and REV come from the intraday
+    pulse triad; ALIGN / CONFLICT come from the timeframe comparison.
+    """
+    from src.intelligence.timeframe_compare import (
+        aggregate_counts,
+        compare_timeframes,
+    )
+
+    stances = compare_timeframes(snap)
+    if not stances:
+        return ""
+
+    intraday_pulse = snap.intraday_pulse
+    if intraday_pulse is not None and intraday_pulse.activity == "volatile":
+        return "[bold red]INTRA HOT[/]"
+    if intraday_pulse is not None and intraday_pulse.reversal_intensity >= 2:
+        return "[bold yellow]INTRA REV[/]"
+
+    counts = aggregate_counts(stances)
+    total = sum(counts.values())
+    aligned = counts.get("aligned_bullish", 0) + counts.get("aligned_bearish", 0)
+    conflict = counts.get("conflict", 0)
+    if conflict > aligned and conflict > 0:
+        return "[bold red]TF CONFLICT[/]"
+    if total > 0 and aligned / total >= 0.5:
+        return "[bold green]DAILY+INTRA ALIGN[/]"
+    return "[bold cyan]INTRA ON[/]"
+
+
 def _format_align_summary(snap: DashboardSnapshot) -> str:
     """Phase 2c ALIGN line — daily-vs-intraday stance aggregates.
 
@@ -1228,6 +1274,11 @@ class DetailPanel(Static):
     brief_state: reactive[str] = reactive("idle")  # idle | loading | ready | error
     brief_text: reactive[str] = reactive("")
     brief_kind: reactive[str] = reactive("row")  # "row" | "opp"
+    # Phase 2c follow-up: tracks the dashboard's active view so the
+    # Intelligence-block ordering + Opportunity-drilldown source can
+    # flip without the panel reading from the app directly. Pushed by
+    # DashboardApp on each _render_panels + action_toggle_view.
+    view_timeframe: reactive[str] = reactive("daily")
 
     # In-render cache: when the input signature matches the last frame,
     # short-circuit and return the cached string. Saves a full Rich
@@ -1280,6 +1331,7 @@ class DetailPanel(Static):
             self.brief_kind,
             opp_match=opp_match,
             intraday_opp_match=intraday_opp_match,
+            view_timeframe=self.view_timeframe,
         )
         if signature == self._last_signature:
             return self._last_rendered
@@ -1360,6 +1412,11 @@ class DetailPanel(Static):
         # opportunity rank, and strongest drivers. Only renders when
         # the row carries an intraday read — otherwise the existing
         # daily-only sections above already cover the picture.
+        #
+        # Phase 2c follow-up: when the trader is in intraday view,
+        # the Intraday block renders first so the active timeframe
+        # is the primary read; daily becomes secondary comparison
+        # info. Daily view keeps the original ordering.
         timeframe_blocks: list[str] = []
         if r.intraday is not None:
             daily_block_text = _format_timeframe_intelligence(
@@ -1368,30 +1425,58 @@ class DetailPanel(Static):
                 view=_VIEW_DAILY,
                 opp_match=opp_match,
             )
-            timeframe_blocks.append("[bold cyan]Daily Intelligence[/]\n" + daily_block_text)
             intraday_block_text = _format_timeframe_intelligence(
                 r,
                 snap,
                 view=_VIEW_INTRADAY,
                 opp_match=intraday_opp_match,
             )
-            timeframe_blocks.append("[bold cyan]Intraday Intelligence[/]\n" + intraday_block_text)
+            # Append an alignment-label hint so each row shows the
+            # categorical relationship between the two timeframes
+            # without forcing the trader to scan both blocks first.
+            from src.intelligence.timeframe_compare import compare_timeframes
+
+            stance = compare_timeframes(snap).get(r.symbol)
+            label_chunk = ""
+            if stance is not None:
+                label_chunk = f"  [dim]·[/]  [bold]{rich_escape(stance.alignment_label)}[/]"
+            daily_block = f"[bold cyan]Daily Intelligence[/]{label_chunk}\n{daily_block_text}"
+            intraday_block_block = (
+                f"[bold cyan]Intraday Intelligence[/]{label_chunk}\n{intraday_block_text}"
+            )
+            if self.view_timeframe == _VIEW_INTRADAY:
+                timeframe_blocks.append(intraday_block_block)
+                timeframe_blocks.append(daily_block)
+            else:
+                timeframe_blocks.append(daily_block)
+                timeframe_blocks.append(intraday_block_block)
 
         # Section: Opportunity Intelligence (only when this symbol ranks
-        # in the top-N). Additive — non-OPP rows render unchanged. The
-        # row is threaded through so action-aware state phrases
-        # (sentiment breadth polarity, stable BUY/SELL persistence) can
-        # fire.
+        # in the top-N of the active view's ranker). Additive —
+        # non-OPP rows render unchanged. The row is threaded through
+        # so action-aware state phrases can fire.
+        #
+        # Phase 2c follow-up: in intraday view the drilldown sources
+        # from the intraday OPP match + intraday tracker history so
+        # the block matches the timeframe the trader is reading.
         opp_block = ""
-        if opp_match is not None:
-            rank, opp = opp_match
+        if self.view_timeframe == _VIEW_INTRADAY:
+            active_opp_match = intraday_opp_match
+            active_opp_history = snap.intraday_opp_history
+            drilldown_label = "Opportunity Intelligence (intraday)"
+        else:
+            active_opp_match = opp_match
+            active_opp_history = snap.opp_history
+            drilldown_label = "Opportunity Intelligence"
+        if active_opp_match is not None:
+            rank, opp = active_opp_match
             drilldown = build_drilldown(
                 opp,
                 rank,
-                snap.opp_history.get(r.symbol),
+                active_opp_history.get(r.symbol),
                 row=r,
             )
-            opp_block = "[bold cyan]Opportunity Intelligence[/]\n" + _render_opportunity_drilldown(
+            opp_block = f"[bold cyan]{drilldown_label}[/]\n" + _render_opportunity_drilldown(
                 drilldown
             )
 
@@ -1564,6 +1649,13 @@ class StatusLine(Static):
         critical = sum(1 for a in snap.recent_alerts if a.severity == "critical")
         if critical:
             chunks.append(f"[bold red]{critical} critical[/]")
+
+        # Phase 2c follow-up: compact intraday state chip. Empty when
+        # no row has an intraday read — keeps the status line tight
+        # on daily-only sessions.
+        intraday_chip = _format_intraday_status_chip(snap)
+        if intraday_chip:
+            chunks.append(intraday_chip)
 
         # Tick + clock.
         clock = snap.timestamp.strftime("%H:%M:%S")
@@ -1906,6 +1998,10 @@ class DashboardApp(App[None]):
         # round(composite * 100) so a meaningful score shift re-bills,
         # but tick-over-tick float jitter on the same OPP doesn't.
         self._opp_brief_cache: dict[tuple[str, int], str] = {}
+        # Phase 2c follow-up: parallel cache for intraday-OPP briefs.
+        # Keeps daily and intraday briefs on the same symbol from
+        # overwriting each other when the trader flips views.
+        self._intraday_opp_brief_cache: dict[tuple[str, int], str] = {}
 
     # -- layout -----------------------------------------------------------
 
@@ -1957,6 +2053,16 @@ class DashboardApp(App[None]):
             except ValueError:
                 continue
             self._opp_brief_cache[(symbol, bucket)] = text
+        # Phase 2c follow-up: same shape, parallel cache.
+        for raw_key, text in self.controller.intraday_opp_brief_cache.items():
+            symbol, sep, bucket_str = raw_key.partition("|")
+            if not sep or not symbol:
+                continue
+            try:
+                bucket = int(bucket_str)
+            except ValueError:
+                continue
+            self._intraday_opp_brief_cache[(symbol, bucket)] = text
 
     def _update_sub_title(self) -> None:
         """Reflect the current watchlist in the dashboard sub-title.
@@ -1995,8 +2101,10 @@ class DashboardApp(App[None]):
     def action_toggle_view(self) -> None:
         """`t`: flip the table's primary read between daily and
         intraday. Re-renders the table + pushes the new view to the
-        watchlist header (chip toggle) immediately instead of waiting
-        for the next snapshot tick."""
+        watchlist header (chip toggle) immediately and busts the
+        DetailPanel render-skip cache so the Intelligence-block
+        order / OPP-drilldown source flip without waiting for the
+        next tick."""
         self.view_timeframe = _VIEW_INTRADAY if self.view_timeframe == _VIEW_DAILY else _VIEW_DAILY
         self.query_one("#events", RichLog).write(f"[bold cyan]view:[/] {self.view_timeframe}")
         # Push the new view to the header so the VIEW chip
@@ -2004,6 +2112,12 @@ class DashboardApp(App[None]):
         self.query_one(WatchlistHeader).view_timeframe = self.view_timeframe
         if self._snapshot is not None:
             self._render_table(self._snapshot)
+        # Bust the DetailPanel signature so the block-order swap and
+        # OPP-drilldown source change render on this same press.
+        detail = self.query_one(DetailPanel)
+        detail.view_timeframe = self.view_timeframe
+        detail._last_signature = None
+        detail.refresh()
 
     def action_add_symbol(self) -> None:
         """`a`: open the AddSymbolModal and append the entered symbol.
@@ -2055,6 +2169,9 @@ class DashboardApp(App[None]):
         self._opp_brief_cache = {
             k: v for k, v in self._opp_brief_cache.items() if k[0] != row.symbol
         }
+        self._intraday_opp_brief_cache = {
+            k: v for k, v in self._intraday_opp_brief_cache.items() if k[0] != row.symbol
+        }
         self.controller.prune_briefs_for_symbol(row.symbol)
         # Textual's run_worker is typed as Callable[..., Never] upstream, but
         # accepts any coroutine at runtime — the ignore is for the upstream
@@ -2082,7 +2199,16 @@ class DashboardApp(App[None]):
 
         from src.intelligence.opportunity_brief import OpportunityBriefContext
 
-        ranked = rank_opportunities(snap, n=3)
+        # Phase 2c follow-up: route through the active view's ranker
+        # and brief cache. Daily and intraday OPPs cache separately
+        # so a brief from one view never displays for the other.
+        intraday_view = self.view_timeframe == _VIEW_INTRADAY
+        if intraday_view:
+            ranked = rank_opportunities_intraday(snap, n=3)
+            cache_store = self._intraday_opp_brief_cache
+        else:
+            ranked = rank_opportunities(snap, n=3)
+            cache_store = self._opp_brief_cache
         if not ranked:
             return
 
@@ -2106,23 +2232,32 @@ class DashboardApp(App[None]):
 
         composite_bucket = round(target_opp.composite_score * 100)
         cache_key = (target_symbol, composite_bucket)
-        if cache_key in self._opp_brief_cache:
+        if cache_key in cache_store:
             detail.brief_state = "ready"
-            detail.brief_text = self._opp_brief_cache[cache_key]
+            detail.brief_text = cache_store[cache_key]
             detail.refresh()
             return
 
+        # Brief context still reads from the daily snapshot fields —
+        # full intraday-aware context is a future enhancement. The
+        # event log notes the view so the trader knows the ranking
+        # source even when the context body is daily-leaning.
         context = OpportunityBriefContext.from_snapshot(snap, target_symbol)
         if context is None:
-            # Defensive: rank_opportunities found this symbol but
-            # from_snapshot couldn't build a context. Bail silently.
+            # Defensive: ranker found this symbol but from_snapshot
+            # couldn't build a context. Bail silently.
             return
 
         detail.brief_state = "loading"
         detail.brief_text = ""
         detail.refresh()
+        if intraday_view:
+            self.query_one("#events", RichLog).write(
+                f"[dim]brief target: intraday OPP {target_symbol} "
+                f"({target_opp.composite_score:.2f})[/dim]"
+            )
         self.run_worker(
-            self._fetch_opp_brief(context, cache_key),
+            self._fetch_opp_brief(context, cache_key, intraday=intraday_view),
             exclusive=False,
             group="opp_brief",
         )
@@ -2131,8 +2266,12 @@ class DashboardApp(App[None]):
         self,
         context: OpportunityBriefContext,
         cache_key: tuple[str, int],
+        *,
+        intraday: bool = False,
     ) -> None:
-        """Compute the OPP brief off the UI thread, then push to DetailPanel."""
+        """Compute the OPP brief off the UI thread, then push to
+        DetailPanel + the right cache (daily vs intraday).
+        """
         import asyncio
 
         assert self.opportunity_briefer is not None  # checked by caller
@@ -2147,12 +2286,13 @@ class DashboardApp(App[None]):
             detail.refresh()
             return
 
-        self._opp_brief_cache[cache_key] = text
-        # Mirror into the controller so the next persistence tick
-        # picks it up. Symbol + bucket are the cache key; the text
-        # is opaque to the controller.
         symbol, bucket = cache_key
-        self.controller.record_opp_brief(symbol, bucket, text)
+        if intraday:
+            self._intraday_opp_brief_cache[cache_key] = text
+            self.controller.record_intraday_opp_brief(symbol, bucket, text)
+        else:
+            self._opp_brief_cache[cache_key] = text
+            self.controller.record_opp_brief(symbol, bucket, text)
         detail = self.query_one(DetailPanel)
         detail.brief_state = "ready"
         detail.brief_text = text
@@ -2177,7 +2317,13 @@ class DashboardApp(App[None]):
         snap = self._snapshot
         if snap is None or not snap.rows:
             return
-        ranked = rank_opportunities(snap, n=3)
+        # Phase 2c follow-up: use the active view's ranker so `o`
+        # cycles through intraday OPPs when the trader is on the
+        # intraday view, and daily OPPs otherwise.
+        if self.view_timeframe == _VIEW_INTRADAY:
+            ranked = rank_opportunities_intraday(snap, n=3)
+        else:
+            ranked = rank_opportunities(snap, n=3)
         if not ranked:
             return
 
@@ -2348,6 +2494,7 @@ class DashboardApp(App[None]):
         status.snapshot = snap
 
         detail = self.query_one(DetailPanel)
+        detail.view_timeframe = self.view_timeframe
         detail.snapshot = snap
         # Sync with current cursor on the table.
         table = self.query_one(DataTable)

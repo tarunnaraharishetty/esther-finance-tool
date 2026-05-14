@@ -137,6 +137,12 @@ class SessionSnapshot(BaseModel):
     intraday_pulse_records: list[PulseRecord] = Field(default_factory=list)
     intraday_pulse_window: int = 20
 
+    # Intraday OPP brief cache (phase 2c follow-up). Parallel to the
+    # daily ``opp_brief_cache`` — keeps each timeframe's briefs from
+    # overwriting the other when the trader presses `b` in different
+    # views. Same string key shape ("symbol|bucket").
+    intraday_opp_brief_cache: dict[str, str] = Field(default_factory=dict)
+
 
 class SessionStore:
     """JSON-file persistence for :class:`SessionSnapshot`.

@@ -2018,6 +2018,237 @@ async def test_view_toggle_renders_intraday_chip_in_header() -> None:
         assert "intraday" in text_intraday
 
 
+async def test_status_line_renders_intraday_chip_when_intraday_present() -> None:
+    """Phase 2c follow-up: the StatusLine surfaces a compact intraday
+    state chip when at least one row has an intraday read."""
+    from src.dashboard.app import DashboardApp, StatusLine
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.data.models import TimeFrame
+    from src.strategy.base import RecommendationTier
+    from src.strategy.multi_timeframe import IntradayRead
+
+    fired = datetime.now(UTC)
+    aligned_row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.BUY,
+        confidence=0.6,
+        combined_score=0.5,
+        technical_score=0.4,
+        sentiment_score=0.3,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=190.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.BUY,
+        intraday=IntradayRead(
+            timeframe=TimeFrame.MIN_15,
+            action=SignalAction.BUY,
+            confidence=0.6,
+            combined_score=0.4,
+            technical_score=0.4,
+        ),
+    )
+    snap = DashboardSnapshot(tick=1, rows=[aligned_row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        status = app.query_one(StatusLine)
+        status.snapshot = snap
+        text = status.render()
+        # An aligned-only setup should surface the ALIGN chip.
+        assert "DAILY+INTRA ALIGN" in text
+
+
+async def test_status_line_omits_chip_when_no_intraday_data() -> None:
+    """Status line stays compact on daily-only sessions — no chip
+    renders when no row has an IntradayRead."""
+    from src.dashboard.app import DashboardApp, StatusLine
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.BUY,
+        confidence=0.5,
+        combined_score=0.4,
+        technical_score=0.3,
+        sentiment_score=0.2,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=190.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        status = app.query_one(StatusLine)
+        status.snapshot = snap
+        text = status.render()
+        for label in (
+            "INTRA HOT",
+            "INTRA REV",
+            "TF CONFLICT",
+            "DAILY+INTRA ALIGN",
+            "INTRA ON",
+        ):
+            assert label not in text
+
+
+async def test_detail_panel_intraday_first_in_intraday_view() -> None:
+    """Phase 2c follow-up: with view_timeframe=='intraday' the
+    Intraday Intelligence block renders before Daily Intelligence."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.data.models import TimeFrame
+    from src.strategy.base import RecommendationTier
+    from src.strategy.multi_timeframe import IntradayRead
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="NVDA",
+        action=SignalAction.BUY,
+        confidence=0.7,
+        combined_score=0.6,
+        technical_score=0.5,
+        sentiment_score=0.5,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
+        last_price=520.0,
+        num_news_articles=2,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.BUY,
+        intraday=IntradayRead(
+            timeframe=TimeFrame.MIN_15,
+            action=SignalAction.SELL,
+            confidence=0.42,
+            combined_score=-0.42,
+            technical_score=-0.42,
+        ),
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        detail.row_index = 0
+        # Daily view: Daily block precedes Intraday block.
+        text_daily = detail.render()
+        assert text_daily.index("Daily Intelligence") < text_daily.index("Intraday Intelligence")
+        # Toggle to intraday view.
+        await pilot.press("t")
+        await pilot.pause(0.05)
+        detail = app.query_one(DetailPanel)
+        text_intraday = detail.render()
+        assert text_intraday.index("Intraday Intelligence") < text_intraday.index(
+            "Daily Intelligence"
+        )
+
+
+async def test_action_cycle_opportunity_targets_intraday_in_intraday_view() -> None:
+    """`o` cycles through intraday OPPs when in intraday view. The
+    cursor lands on a symbol that ranks intraday but not daily."""
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.data.models import TimeFrame
+    from src.intelligence.history import SignalEpisode, SignalHistorySummary
+    from src.strategy.base import RecommendationTier
+    from src.strategy.multi_timeframe import IntradayRead
+
+    fired = datetime.now(UTC)
+    intraday_history = SignalHistorySummary(
+        current=SignalEpisode(
+            action=SignalAction.BUY,
+            started_at=fired,
+            last_seen_at=fired,
+            tick_count=4,
+            confidence_first=0.4,
+            confidence_last=0.8,
+        ),
+        recent=(),
+    )
+    aapl_row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.2,
+        combined_score=0.0,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=190.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.HOLD,
+        intraday=IntradayRead(
+            timeframe=TimeFrame.MIN_15,
+            action=SignalAction.BUY,
+            confidence=0.8,
+            combined_score=0.6,
+            technical_score=0.6,
+        ),
+    )
+    msft_row = RecommendationRow(
+        symbol="MSFT",
+        action=SignalAction.HOLD,
+        confidence=0.2,
+        combined_score=0.0,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=420.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.HOLD,
+    )
+    snap = DashboardSnapshot(
+        tick=1,
+        rows=[msft_row, aapl_row],
+        intraday_signal_history={"AAPL": intraday_history},
+    )
+    app = DashboardApp(
+        MockDashboardController(watchlist=["MSFT", "AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        app._snapshot = snap
+        app._render_table(snap)
+        await pilot.press("t")  # switch to intraday view
+        await pilot.pause(0.05)
+        await pilot.press("o")  # cycle intraday OPP
+        await pilot.pause(0.05)
+        table = app.query_one(DataTable)
+        # AAPL is the only intraday-ranked symbol → cursor lands on
+        # row index 1 (AAPL is second in the rows list).
+        assert table.cursor_row == 1
+
+
 async def test_watchlist_header_renders_align_line_when_intraday_present() -> None:
     """Phase 2c: the ALIGN line surfaces alignment / conflict counts
     whenever at least one row has an intraday read — independent of

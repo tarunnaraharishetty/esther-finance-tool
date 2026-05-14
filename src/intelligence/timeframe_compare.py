@@ -50,6 +50,13 @@ class TimeframeStance:
     intraday-history deltas — e.g. ``"strengthening intraday
     momentum"`` when intraday confidence has been rising inside the
     current intraday episode.
+
+    ``alignment_label`` is the trader-facing summary string — one of
+    a fixed set: ``"aligned bullish"`` / ``"aligned bearish"`` /
+    ``"strengthening continuation"`` / ``"momentum conflict"`` /
+    ``"intraday reversal"`` / ``"short-term pullback"`` /
+    ``"intraday only"`` / ``"neutral"``. Deterministic mapping from
+    ``(category, phrases)`` — see :func:`_alignment_label`.
     """
 
     symbol: str
@@ -57,6 +64,7 @@ class TimeframeStance:
     intraday_action: SignalAction
     category: str
     phrases: tuple[str, ...] = ()
+    alignment_label: str = "neutral"
 
 
 _DIRECTIONAL = {SignalAction.BUY, SignalAction.SELL}
@@ -95,8 +103,34 @@ def compare_timeframes(snapshot: DashboardSnapshot) -> dict[str, TimeframeStance
             intraday_action=row.intraday.action,
             category=category,
             phrases=phrases,
+            alignment_label=_alignment_label(category, phrases),
         )
     return out
+
+
+def _alignment_label(category: str, phrases: tuple[str, ...]) -> str:
+    """Deterministic mapping from ``(category, phrases)`` to a fixed
+    trader-facing label. Order matters — more specific labels
+    (combinations of category + phrase) win over the generic
+    category-only labels.
+    """
+    strengthening = "strengthening intraday momentum" in phrases
+    intraday_flip = "intraday reversal against daily trend" in phrases
+    if category in ("aligned_bullish", "aligned_bearish") and strengthening:
+        return "strengthening continuation"
+    if category == "aligned_bullish":
+        return "aligned bullish"
+    if category == "aligned_bearish":
+        return "aligned bearish"
+    if category == "conflict" and intraday_flip:
+        return "intraday reversal"
+    if category == "conflict":
+        return "momentum conflict"
+    if category == "daily_only":
+        return "short-term pullback"
+    if category == "intraday_only":
+        return "intraday only"
+    return "neutral"
 
 
 def _phrases_for(
@@ -145,5 +179,13 @@ def aggregate_counts(stances: dict[str, TimeframeStance]) -> dict[str, int]:
 __all__ = [
     "TimeframeStance",
     "aggregate_counts",
+    "alignment_label",
     "compare_timeframes",
 ]
+
+
+# Re-export the helper under a public name so downstream tests can
+# exercise the label mapping directly without going through a full
+# snapshot.
+def alignment_label(category: str, phrases: tuple[str, ...] = ()) -> str:
+    return _alignment_label(category, phrases)
