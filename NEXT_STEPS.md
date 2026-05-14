@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (MT2 phase 2b: intraday OPP ranker + tracker).*
+*Last touched: 2026-05-14 (MT2 phase 2c: intraday pulse + alerts + Intelligence blocks).*
 
 ---
 
@@ -136,6 +136,25 @@ dashboard or exposed via the CLI.
   `BaseController.intraday_opp_tracker` records top-N membership.
   `WatchlistHeader`'s OPP block flips to `OPP-I` label + intraday
   ranking in intraday view; daily view unchanged.
+- **Phase 2c: intraday pulse + Intelligence blocks + alerts.**
+  - `compute_pulse_intraday` + parallel `intraday_pulse_tracker`;
+    full PULSE / HIST / REGIME / PATTERNS lines toggle to the
+    intraday triad in intraday view (`-I` label suffix).
+  - `src/intelligence/timeframe_compare.py` — per-symbol
+    `TimeframeStance` (aligned_bullish / aligned_bearish /
+    conflict / intraday_only / daily_only / neutral) with
+    observational phrases ("strengthening intraday momentum",
+    "intraday reversal against daily trend"). Header ALIGN line
+    surfaces aggregate counts.
+  - `DetailPanel` adds compact **Daily Intelligence** +
+    **Intraday Intelligence** blocks per row (action tier,
+    confidence, tenure, trend, reversal state, opp rank, top
+    drivers).
+  - `src/intelligence/intraday_alerts.py` — 5 deterministic
+    rules: reversal acceleration, momentum collapse, timeframe
+    disagreement (transition edge only), intraday OPP entry,
+    rapid confidence decay. Cooldowns wired in
+    `_DEFAULT_COOLDOWNS`.
 
 **Strategy**
 - RSI / MACD / Bollinger indicators
@@ -197,9 +216,9 @@ dashboard or exposed via the CLI.
   drift from the keys.
 
 **Quality baseline**
-- 614 passing tests, 1 deselected (`slow`/`integration`)
+- 641 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
-- `mypy src` (`--strict`) green across all 49 source files
+- `mypy src` (`--strict`) green across all 51 source files
 - Documented exceptions live in `pyproject.toml`
 
 ---
@@ -270,21 +289,22 @@ when the surrounding code is touched.
 
 Sequenced for maximum compounding return.
 
-**1. MT2 phase 2c** *(natural follow-up once the OPP slice has
-been used)*
-- Parallel intraday `PulseHistoryTracker` — mirrors how 2a added
-  the SignalHistory and 2b added the OpportunityMembershipTracker.
-  Persisted via additive schema fields.
-- View toggle extends to the rest of the dashboard:
-  - `REGIME` + `PATTERNS` lines render from intraday pulse
-    history + evolution when in intraday view.
-  - `DetailPanel` "Opportunity Intelligence" block uses intraday
-    drilldown for symbols ranked in the intraday top-N.
-  - `StatusLine` reflects intraday read.
-- Action keys (`o`, `b`) target the active view's ranking so
-  cycling and OPP-brief work for intraday OPPs.
-- Intraday-specific alert rules (optional — defer if daily alerts
-  + the existing view toggle satisfy the trader).
+The MT2 roadmap is now fully shipped (phases 2a, 2b, 2c). What
+remains is opportunistic polish + small follow-ups around the
+edges. None are critical-path.
+
+**Open MT2 follow-ups (small, opportunistic):**
+- Wire the 5 intraday alert rules into `main.py`'s default
+  AlertEngine when `settings.intraday_enabled` so the trader gets
+  them without manual `alerts.yaml` setup.
+- `action_cycle_opportunity` + `action_brief_opportunity` could
+  target the active view's ranking when `view_timeframe ==
+  "intraday"` (currently both still use the daily ranker).
+- `StatusLine` could flip to the intraday pulse's `sentiment` chip
+  when in intraday view (currently always daily).
+- DetailPanel "Opportunity Intelligence" drilldown could swap
+  between daily and intraday `RankedOpportunity` sources (currently
+  always daily).
 
 **Polish backlog (opportunistic)**
 - In-app column-toggle modal (bound to `c`), surfacing the same
@@ -299,36 +319,32 @@ been used)*
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 614 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 641 passing
 ```
 
-Phase 2a + 2b shipped the foundation (schema v3 with v1/v2
-migration, intraday signal + opp trackers, view toggle on the
-table cells + OPP block). Phase 2c is the natural follow-up:
-parallel intraday pulse tracker + view toggle on REGIME /
-PATTERNS / DetailPanel / StatusLine.
+MT2 is fully shipped (phases 2a / 2b / 2c). Remaining work is
+opportunistic polish — pick whichever follow-up the trader hits
+first in practice. Most likely entry points:
 
-Suggested opening prompt to Claude when MT2 phase 2c becomes urgent:
+- **Auto-register intraday alert rules** in `main.py` so they fire
+  without manual `alerts.yaml` setup when `settings.intraday_enabled`.
+- **Action keys `o` / `b`** target the active view's ranking.
 
-> Implement MT2 phase 2c. Add a parallel intraday PulseHistoryTracker
-> that mirrors how phase 2a / 2b added SignalHistory and the
-> OpportunityMembershipTracker — controller-owned, persisted via
-> additive snapshot fields. Extend the view toggle so REGIME /
-> PATTERNS / DetailPanel "Opportunity Intelligence" / StatusLine
-> all flip to intraday data when active. Update action_cycle_
-> opportunity and action_brief_opportunity to target the active
-> view's ranking. Defer intraday-specific alert rules unless the
-> trader has a concrete request — the existing view toggle on the
-> OPP block already surfaces the intraday risk.
+Suggested opening prompt for whichever follow-up:
+
+> Pick a small follow-up. The MT2 roadmap is fully shipped; the
+> backlog in NEXT_STEPS.md describes opportunistic polish. Use
+> whichever item is closest to a trader pain-point you've seen.
+> Keep the commit narrow and well-tested.
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `f7b43b1` (push to `origin/main`
+- **Branch:** `main` is clean at `8aced8a` (push to `origin/main`
   pending — harness blocks direct push to default branch unless
   the user runs it themselves; one commit queued locally).
-- **Tests:** 614 passing, 1 deselected (`slow`/`integration` mark).
+- **Tests:** 641 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
   across all 49 source files.
