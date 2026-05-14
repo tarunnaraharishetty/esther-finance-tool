@@ -1918,6 +1918,147 @@ async def test_watchlist_header_omits_intraday_line_when_disabled() -> None:
         assert "INTRADAY" not in text
 
 
+async def test_view_toggle_switches_action_cell_to_intraday() -> None:
+    """Pressing `t` flips DashboardApp.view_timeframe; the table's
+    ACTION cell on a row with an IntradayRead now reflects the
+    intraday action label, not the daily tier."""
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.data.models import TimeFrame
+    from src.strategy.base import RecommendationTier
+    from src.strategy.multi_timeframe import IntradayRead
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="NVDA",
+        action=SignalAction.BUY,
+        confidence=0.7,
+        combined_score=0.6,
+        technical_score=0.5,
+        sentiment_score=0.5,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
+        last_price=520.0,
+        num_news_articles=2,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.BUY,
+        intraday=IntradayRead(
+            timeframe=TimeFrame.MIN_15,
+            action=SignalAction.SELL,
+            confidence=0.42,
+            combined_score=-0.42,
+            technical_score=-0.42,
+        ),
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        app._snapshot = snap
+        app._render_table(snap)
+        table = app.query_one(DataTable)
+        daily_action_cell = str(table.get_cell_at((0, 1)))
+        assert "BUY" in daily_action_cell
+
+        await pilot.press("t")
+        await pilot.pause(0.05)
+        assert app.view_timeframe == "intraday"
+        intraday_action_cell = str(table.get_cell_at((0, 1)))
+        assert "SELL" in intraday_action_cell
+
+
+async def test_view_toggle_renders_intraday_chip_in_header() -> None:
+    """When view is intraday, the WatchlistHeader surfaces a `VIEW`
+    line. The chip drops back out when toggled to daily."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.strategy.base import RecommendationTier
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.BUY,
+        confidence=0.6,
+        combined_score=0.5,
+        technical_score=0.4,
+        sentiment_score=0.3,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
+        last_price=190.0,
+        num_news_articles=1,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.BUY,
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text_daily = header.render()
+        assert "VIEW" not in text_daily
+
+        await pilot.press("t")
+        await pilot.pause(0.05)
+        text_intraday = header.render()
+        assert "VIEW" in text_intraday
+        assert "intraday" in text_intraday
+
+
+async def test_view_toggle_falls_back_when_row_has_no_intraday() -> None:
+    """In intraday view, a row without an IntradayRead shows a dim
+    `—` in ACTION/CONF/TECH rather than misleading the trader with
+    the daily values."""
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.BUY,
+        confidence=0.6,
+        combined_score=0.5,
+        technical_score=0.4,
+        sentiment_score=0.3,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
+        last_price=190.0,
+        num_news_articles=1,
+        reasoning="",
+        timestamp=fired,
+        # intraday=None (the default) — feature disabled / fetch failed
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        app._snapshot = snap
+        await pilot.press("t")
+        await pilot.pause(0.05)
+        table = app.query_one(DataTable)
+        action_cell = str(table.get_cell_at((0, 1)))
+        assert "—" in action_cell
+
+
 async def test_dashboard_respects_configured_column_subset() -> None:
     """When the app is constructed with a column subset, the
     DataTable only adds those columns — hidden columns drop out of

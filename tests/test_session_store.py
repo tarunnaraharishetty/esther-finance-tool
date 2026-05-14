@@ -68,7 +68,7 @@ def test_load_returns_none_on_corrupt_file(tmp_path: Path) -> None:
 
 
 def test_load_returns_none_on_schema_mismatch(tmp_path: Path) -> None:
-    """A snapshot from a future / older incompatible schema must be
+    """A snapshot from a future / unrecognized schema must be
     discarded silently. The intelligence trackers self-heal on the
     first tick — cold start is cheap."""
     target = tmp_path / "session.json"
@@ -78,6 +78,24 @@ def test_load_returns_none_on_schema_mismatch(tmp_path: Path) -> None:
     )
     store = SessionStore(target)
     assert store.load() is None
+
+
+def test_v1_snapshot_migrates_to_v2_with_empty_intraday(tmp_path: Path) -> None:
+    """MT2 bumped CURRENT_SCHEMA_VERSION from 1 to 2 with one new
+    field (``intraday_signal_episodes``). v1 snapshots on disk must
+    still load — they migrate in-memory by validating with the
+    pydantic default, and the next persist re-writes as v2."""
+    target = tmp_path / "session.json"
+    target.write_text(
+        '{"schema_version": 1, "saved_at": "2026-05-13T12:00:00+00:00", "tick": 12}',
+        encoding="utf-8",
+    )
+    store = SessionStore(target)
+    loaded = store.load()
+    assert loaded is not None
+    assert loaded.tick == 12
+    # The v1 file didn't carry intraday state; the default kicks in.
+    assert loaded.intraday_signal_episodes == {}
 
 
 def test_save_is_atomic_via_tmp_then_rename(tmp_path: Path) -> None:
@@ -390,6 +408,127 @@ def test_controller_record_briefs_round_trip_across_restart(tmp_path: Path) -> N
     )
     assert ctrl_b.brief_cache == {"AAPL|buy": "saved row brief text"}
     assert ctrl_b.opp_brief_cache == {"AAPL|75": "saved OPP brief text"}
+
+
+def test_intraday_signal_history_records_when_row_has_intraday() -> None:
+    """Phase 2a: the controller's intraday_signal_history records
+    from row.intraday whenever the row carries one. Rows without an
+    intraday read are skipped — no synthetic HOLD entries."""
+    from datetime import timedelta
+
+    from src.dashboard.controller import MockDashboardController
+    from src.dashboard.state import RecommendationRow
+    from src.data.models import TimeFrame
+    from src.strategy.base import SignalAction
+    from src.strategy.multi_timeframe import IntradayRead
+
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT"], seed=1)
+    base = datetime(2026, 5, 13, tzinfo=UTC)
+
+    fired = datetime.now(UTC)
+    rows = [
+        RecommendationRow(
+            symbol="AAPL",
+            action=SignalAction.BUY,
+            confidence=0.6,
+            combined_score=0.5,
+            technical_score=0.4,
+            sentiment_score=0.3,
+            rsi=0.0,
+            macd=0.0,
+            bollinger=0.0,
+            last_price=190.0,
+            num_news_articles=1,
+            reasoning="",
+            timestamp=fired,
+            intraday=IntradayRead(
+                timeframe=TimeFrame.MIN_15,
+                action=SignalAction.SELL,
+                confidence=0.4,
+                combined_score=-0.4,
+                technical_score=-0.4,
+            ),
+        ),
+        # MSFT has no intraday read — should be skipped, not synth-recorded.
+        RecommendationRow(
+            symbol="MSFT",
+            action=SignalAction.BUY,
+            confidence=0.5,
+            combined_score=0.4,
+            technical_score=0.3,
+            sentiment_score=0.2,
+            rsi=0.0,
+            macd=0.0,
+            bollinger=0.0,
+            last_price=420.0,
+            num_news_articles=0,
+            reasoning="",
+            timestamp=fired,
+        ),
+    ]
+    ctrl._record_intraday_history(rows, base + timedelta(seconds=10))
+    aapl = ctrl.intraday_signal_history.summary_for("AAPL")
+    assert aapl is not None
+    assert aapl.current.action == SignalAction.SELL
+    # MSFT had no intraday read — no episodes recorded.
+    assert ctrl.intraday_signal_history.summary_for("MSFT") is None
+
+
+def test_intraday_signal_history_persists_via_v2_snapshot(tmp_path: Path) -> None:
+    """End-to-end: an intraday episode recorded on one controller
+    survives the snapshot round-trip and hydrates on a fresh
+    controller. The schema_version is now 2."""
+    from datetime import timedelta
+
+    from src.dashboard.controller import MockDashboardController
+    from src.dashboard.state import RecommendationRow
+    from src.data.models import TimeFrame
+    from src.strategy.base import SignalAction
+    from src.strategy.multi_timeframe import IntradayRead
+
+    state_path = tmp_path / "session.json"
+    ctrl_a = MockDashboardController(
+        watchlist=["AAPL"], seed=1, session_store=SessionStore(state_path)
+    )
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.BUY,
+        confidence=0.6,
+        combined_score=0.5,
+        technical_score=0.4,
+        sentiment_score=0.3,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=190.0,
+        num_news_articles=1,
+        reasoning="",
+        timestamp=fired,
+        intraday=IntradayRead(
+            timeframe=TimeFrame.MIN_15,
+            action=SignalAction.SELL,
+            confidence=0.4,
+            combined_score=-0.4,
+            technical_score=-0.4,
+        ),
+    )
+    ctrl_a._record_intraday_history([row], fired + timedelta(seconds=5))
+    ctrl_a._persist_if_enabled()
+
+    # Snapshot on disk should now carry schema_version=2.
+    loaded = SessionStore(state_path).load()
+    assert loaded is not None
+    assert loaded.schema_version == 2
+    assert "AAPL" in loaded.intraday_signal_episodes
+
+    # Fresh controller hydrates the intraday tracker.
+    ctrl_b = MockDashboardController(
+        watchlist=["AAPL"], seed=1, session_store=SessionStore(state_path)
+    )
+    summary = ctrl_b.intraday_signal_history.summary_for("AAPL")
+    assert summary is not None
+    assert summary.current.action == SignalAction.SELL
 
 
 def test_controller_prune_briefs_drops_only_matching_symbol() -> None:

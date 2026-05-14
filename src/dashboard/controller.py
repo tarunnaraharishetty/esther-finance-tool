@@ -85,6 +85,10 @@ class BaseController(ABC):
         self.alert_prioritizer = alert_prioritizer or AlertPrioritizer()
         self.alert_state = alert_state or AlertState()
         self.signal_history = signal_history or SignalHistory()
+        # Parallel intraday signal history — recorded only when the
+        # intraday feature is enabled, persisted alongside the daily
+        # one in the same SessionStore snapshot. Phase 2a of MT2.
+        self.intraday_signal_history = SignalHistory()
         self.opp_tracker = opp_tracker or OpportunityMembershipTracker()
         self.pulse_tracker = pulse_tracker or PulseHistoryTracker()
         self.session_store = session_store
@@ -199,6 +203,34 @@ class BaseController(ABC):
                 summaries[row.symbol] = summary
         return summaries
 
+    def _record_intraday_history(
+        self, rows: list[RecommendationRow], now: datetime
+    ) -> dict[str, SignalHistorySummary]:
+        """Parallel intraday recording — same shape as daily, but
+        keyed off the ``row.intraday`` field instead of ``row.action``.
+
+        Rows without an intraday read (intraday disabled, fetch
+        failed) are skipped — no synthetic HOLD entries to muddy the
+        episode count.
+        """
+        for row in rows:
+            if row.error or row.intraday is None:
+                continue
+            self.intraday_signal_history.record(
+                row.symbol,
+                row.intraday.action,
+                row.intraday.confidence,
+                now,
+            )
+        summaries: dict[str, SignalHistorySummary] = {}
+        for row in rows:
+            if row.intraday is None:
+                continue
+            summary = self.intraday_signal_history.summary_for(row.symbol)
+            if summary is not None:
+                summaries[row.symbol] = summary
+        return summaries
+
     def _hydrate_from_store(self) -> None:
         """Replace tracker state with the saved snapshot if one exists.
 
@@ -212,6 +244,10 @@ class BaseController(ABC):
         if snapshot is None:
             return
         self.signal_history.apply_snapshot(snapshot.signal_episodes)
+        # Intraday signal history (schema v2). v1 snapshots populate
+        # this as ``{}`` via the pydantic default, so apply_snapshot
+        # is a no-op for pre-MT2 sessions.
+        self.intraday_signal_history.apply_snapshot(snapshot.intraday_signal_episodes)
         self.opp_tracker.apply_snapshot(snapshot.opp_membership)
         self.pulse_tracker.apply_snapshot(snapshot.pulse_records)
         self.alert_state.apply_snapshot(snapshot.alert_log, snapshot.alert_last_fired)
@@ -244,6 +280,7 @@ class BaseController(ABC):
             alert_last_fired=alert_last_fired,
             brief_cache=dict(self.brief_cache),
             opp_brief_cache=dict(self.opp_brief_cache),
+            intraday_signal_episodes=self.intraday_signal_history.to_snapshot(),
         )
         self.session_store.save(snapshot)
 
@@ -344,6 +381,7 @@ class DashboardController(BaseController):
         )
         rows_list = list(rows)
         history = self._record_history(rows_list, now)
+        intraday_history = self._record_intraday_history(rows_list, now)
         # Build the snapshot first so snapshot-level rules can see the
         # same view the dashboard will render. Alerts get filled in
         # after prioritization.
@@ -352,6 +390,7 @@ class DashboardController(BaseController):
             rows=rows_list,
             events=self.events.snapshot(),
             signal_history=history,
+            intraday_signal_history=intraday_history,
             timestamp=now,
         )
         self._record_pulse(snap)
@@ -508,11 +547,13 @@ class MockDashboardController(BaseController):
         self.events.info(f"mock tick {self._tick} ({len(self.watchlist)} symbols)")
         rows = [self._mock_row(sym, now) for sym in self.watchlist]
         history = self._record_history(rows, now)
+        intraday_history = self._record_intraday_history(rows, now)
         snap = DashboardSnapshot(
             tick=self._tick,
             rows=rows,
             events=self.events.snapshot(),
             signal_history=history,
+            intraday_signal_history=intraday_history,
             timestamp=now,
         )
         self._record_pulse(snap)

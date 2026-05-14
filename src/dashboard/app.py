@@ -75,6 +75,13 @@ _ACTION_STYLES = {
 }
 
 
+# MT2 phase 2a — the two values ``DashboardApp.view_timeframe`` can
+# take. Module-level so _header_signature, cell factories, and the
+# WatchlistHeader can all reference the same constants.
+_VIEW_DAILY = "daily"
+_VIEW_INTRADAY = "intraday"
+
+
 def _fmt_signed(x: float) -> str:
     """Signed score rendered with sign-based color markup.
 
@@ -149,6 +156,10 @@ class WatchlistHeader(Static):
     """
 
     snapshot: reactive[DashboardSnapshot | None] = reactive(None)
+    # MT2 phase 2a — surfaces the table's current view as a chip
+    # at the top of the header so the trader always knows which
+    # timeframe they're looking at. Pushed by DashboardApp.
+    view_timeframe: reactive[str] = reactive("daily")
 
     def __init__(self, **kwargs: object) -> None:
         super().__init__(**kwargs)  # type: ignore[arg-type]
@@ -166,12 +177,19 @@ class WatchlistHeader(Static):
         """
         if new is None:
             return
-        signature = _header_signature(new, self._prev_snapshot)  # type: ignore[arg-type]
+        signature = _header_signature(new, self._prev_snapshot, self.view_timeframe)  # type: ignore[arg-type]
         if signature != self._last_signature:
             self.refresh()
             self._last_signature = signature
         # Promote *after* signature check so the diff line keeps working.
         self._prev_snapshot = new  # type: ignore[assignment]
+
+    def watch_view_timeframe(self, _old: object, _new: object) -> None:
+        """A view-toggle keypress invalidates the cached signature so
+        the next watch_snapshot does a fresh render — otherwise the
+        VIEW chip would only appear on the next data tick."""
+        self._last_signature = None
+        self.refresh()
 
     def render(self) -> str:
         snap = self.snapshot
@@ -190,6 +208,18 @@ class WatchlistHeader(Static):
         rankings = compute_rankings(snap, n=3)
         pulse = snap.pulse if snap.pulse is not None else compute_pulse(snap)
         lines: list[str] = []
+
+        # --- View chip ------------------------------------------------
+        # Surface the active table view so the trader always knows
+        # whether the row cells are daily or intraday. Only render
+        # the chip when the intraday view is active — daily is the
+        # implicit default and a chip on every frame would just be
+        # visual noise.
+        if self.view_timeframe == _VIEW_INTRADAY:
+            lines.append(
+                f"{_section_label('VIEW')}[bold cyan]intraday[/]  "
+                "[dim](press [bold]t[/bold] to flip)[/dim]"
+            )
 
         # --- Pulse line (skip when no healthy rows) --------------------
         if not pulse.is_empty:
@@ -368,6 +398,7 @@ def _detail_signature(
 def _header_signature(
     snap: DashboardSnapshot,
     prev_snap: DashboardSnapshot | None,
+    view_timeframe: str = _VIEW_DAILY,
 ) -> tuple[object, ...]:
     """Stable signature of what the WatchlistHeader would render.
 
@@ -471,6 +502,11 @@ def _header_signature(
         opp_sig,
         intraday_sig,
         evolution_sig,
+        # View axis — the VIEW chip toggles in/out of the header on
+        # press. Without this entry the signature would stay stable
+        # across a `t` press and the chip wouldn't appear until the
+        # next tick.
+        view_timeframe,
     )
 
 
@@ -1304,51 +1340,78 @@ class AddSymbolModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-def _cell_symbol(r: RecommendationRow) -> object:
+def _cell_symbol(r: RecommendationRow, _view: str) -> object:
     return r.symbol
 
 
-def _cell_action(r: RecommendationRow) -> object:
-    return _tier_text(r.tier) if not r.error else "[red]ERR[/red]"
+def _cell_action(r: RecommendationRow, view: str) -> object:
+    """ACTION cell routes through the active view. In intraday view
+    a row without an IntradayRead falls back to a dim ``—`` rather
+    than misleading the trader with the daily action label."""
+    if r.error:
+        return "[red]ERR[/red]"
+    if view == _VIEW_INTRADAY:
+        if r.intraday is None:
+            return "[dim]—[/]"
+        return _action_text(r.intraday.action)
+    return _tier_text(r.tier)
 
 
-def _cell_confidence(r: RecommendationRow) -> object:
-    return f"{r.confidence:.2f}" if not r.error else "—"
+def _cell_confidence(r: RecommendationRow, view: str) -> object:
+    if r.error:
+        return "—"
+    if view == _VIEW_INTRADAY:
+        if r.intraday is None:
+            return "[dim]—[/]"
+        return f"{r.intraday.confidence:.2f}"
+    return f"{r.confidence:.2f}"
 
 
-def _cell_bar(r: RecommendationRow) -> object:
+def _cell_bar(r: RecommendationRow, view: str) -> object:
+    """Confidence bar mirrors the active view's confidence number."""
+    if view == _VIEW_INTRADAY and r.intraday is not None:
+        return _confidence_bar(r.intraday.confidence)
     return _confidence_bar(r.confidence)
 
 
-def _cell_technical(r: RecommendationRow) -> object:
-    return _fmt_signed(r.technical_score) if not r.error else "—"
+def _cell_technical(r: RecommendationRow, view: str) -> object:
+    if r.error:
+        return "—"
+    if view == _VIEW_INTRADAY:
+        if r.intraday is None:
+            return "[dim]—[/]"
+        return _fmt_signed(r.intraday.technical_score)
+    return _fmt_signed(r.technical_score)
 
 
-def _cell_sentiment(r: RecommendationRow) -> object:
+def _cell_sentiment(r: RecommendationRow, _view: str) -> object:
+    # Sentiment is timeframe-agnostic — news weighting is the same
+    # regardless of bar timeframe. Stay on the daily value even in
+    # intraday view rather than zero-filling.
     return _fmt_signed(r.sentiment_score) if not r.error else "—"
 
 
-def _cell_rsi(r: RecommendationRow) -> object:
+def _cell_rsi(r: RecommendationRow, _view: str) -> object:
     return _fmt_signed(r.rsi)
 
 
-def _cell_macd(r: RecommendationRow) -> object:
+def _cell_macd(r: RecommendationRow, _view: str) -> object:
     return _fmt_signed(r.macd)
 
 
-def _cell_bband(r: RecommendationRow) -> object:
+def _cell_bband(r: RecommendationRow, _view: str) -> object:
     return _fmt_signed(r.bollinger)
 
 
-def _cell_price(r: RecommendationRow) -> object:
+def _cell_price(r: RecommendationRow, _view: str) -> object:
     return _fmt_price(r.last_price)
 
 
-def _cell_news(r: RecommendationRow) -> object:
+def _cell_news(r: RecommendationRow, _view: str) -> object:
     return str(r.num_news_articles) if not r.error else r.error or ""
 
 
-_COLUMN_DEFS: tuple[tuple[str, Callable[[RecommendationRow], object]], ...] = (
+_COLUMN_DEFS: tuple[tuple[str, Callable[[RecommendationRow, str], object]], ...] = (
     ("SYM", _cell_symbol),
     ("ACTION", _cell_action),
     ("CONF", _cell_confidence),
@@ -1382,6 +1445,7 @@ _HELP_TEXT = (
     "[bold cyan]b[/]      AI brief for the selected opportunity\n"
     "[bold cyan]a[/]      add a symbol to the watchlist\n"
     "[bold cyan]x[/]      remove the selected symbol\n"
+    "[bold cyan]t[/]      toggle daily / intraday view\n"
     "[bold cyan]?[/]      show / close this help overlay\n"
     "[bold cyan]↑ ↓[/]    select rows in the watchlist\n\n"
     "[dim]Esc or ? to close.[/dim]"
@@ -1429,6 +1493,11 @@ _PALETTE_COMMANDS: tuple[tuple[str, str, str], ...] = (
         "Generate / show the OPP LLM brief (`b`)",
     ),
     ("Show help overlay", "action_show_help", "List every keybinding (`?`)"),
+    (
+        "Toggle daily / intraday view",
+        "action_toggle_view",
+        "Flip the table between timeframes (`t`)",
+    ),
     ("Quit dashboard", "action_quit", "Exit Esther"),
 )
 """Static palette inventory — each entry is
@@ -1508,6 +1577,7 @@ class DashboardApp(App[None]):
         Binding("b", "brief_opportunity", "OPP brief"),
         Binding("a", "add_symbol", "add symbol"),
         Binding("x", "remove_selected", "remove symbol"),
+        Binding("t", "toggle_view", "view"),
         Binding("question_mark", "show_help", "help"),
         Binding("up,down", "noop", "select", show=False),
     ]
@@ -1522,6 +1592,11 @@ class DashboardApp(App[None]):
     }
 
     paused: reactive[bool] = reactive(False)
+    # MT2 phase 2a — switches the table's ACTION / CONF / BAR /
+    # TECH cells between the daily recommendation and the intraday
+    # read. Other panels (OPP, REGIME, PATTERNS, DetailPanel) stay
+    # on daily for now; flipping them parallels Phase 2b.
+    view_timeframe: reactive[str] = reactive(_VIEW_DAILY)
 
     def __init__(
         self,
@@ -1546,7 +1621,7 @@ class DashboardApp(App[None]):
         else:
             requested = set(columns)
             active = [name for name, _ in _COLUMN_DEFS if name in requested]
-        self._columns: tuple[tuple[str, Callable[[RecommendationRow], object]], ...] = tuple(
+        self._columns: tuple[tuple[str, Callable[[RecommendationRow, str], object]], ...] = tuple(
             (name, factory) for name, factory in _COLUMN_DEFS if name in active
         )
         # Adaptive cadence: when a tick produces new alerts or any row's
@@ -1652,6 +1727,19 @@ class DashboardApp(App[None]):
     def action_show_help(self) -> None:
         """`?`: push the help overlay listing every keybinding."""
         self.push_screen(HelpOverlay())
+
+    def action_toggle_view(self) -> None:
+        """`t`: flip the table's primary read between daily and
+        intraday. Re-renders the table + pushes the new view to the
+        watchlist header (chip toggle) immediately instead of waiting
+        for the next snapshot tick."""
+        self.view_timeframe = _VIEW_INTRADAY if self.view_timeframe == _VIEW_DAILY else _VIEW_DAILY
+        self.query_one("#events", RichLog).write(f"[bold cyan]view:[/] {self.view_timeframe}")
+        # Push the new view to the header so the VIEW chip
+        # appears / disappears without waiting for the next tick.
+        self.query_one(WatchlistHeader).view_timeframe = self.view_timeframe
+        if self._snapshot is not None:
+            self._render_table(self._snapshot)
 
     def action_add_symbol(self) -> None:
         """`a`: open the AddSymbolModal and append the entered symbol.
@@ -1975,14 +2063,21 @@ class DashboardApp(App[None]):
     def _render_table(self, snap: DashboardSnapshot) -> None:
         table = self.query_one(DataTable)
         table.clear(columns=False)
+        view = self.view_timeframe
         for r in snap.rows:
             # Build only the cells configured for this dashboard
             # instance — hidden columns skip their factory call.
-            row_cells = tuple(factory(r) for _, factory in self._columns)
+            # Each factory receives the row + active view so
+            # ACTION / CONF / BAR / TECH can route through the
+            # right read.
+            row_cells = tuple(factory(r, view) for _, factory in self._columns)
             table.add_row(*row_cells, key=r.symbol)
 
     def _render_panels(self, snap: DashboardSnapshot) -> None:
         header = self.query_one(WatchlistHeader)
+        # Push the view first so the header's snapshot-watcher sees
+        # the right value when it computes its signature.
+        header.view_timeframe = self.view_timeframe
         header.snapshot = snap
 
         status = self.query_one(StatusLine)

@@ -103,6 +103,11 @@ class DashboardSnapshot:
     # history. ``None`` when history is too thin for a meaningful
     # classification — the renderer treats that as "skip the chip".
     pulse_evolution: PulseEvolution | None = None
+    # Parallel intraday signal history — populated only when
+    # ``settings.intraday_enabled`` is on and the row carries an
+    # IntradayRead. MT2 phase 2a foundation; downstream phases will
+    # surface this alongside the daily ``signal_history`` field.
+    intraday_signal_history: dict[str, SignalHistorySummary] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 

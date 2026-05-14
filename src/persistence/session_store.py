@@ -37,11 +37,16 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
-CURRENT_SCHEMA_VERSION = 1
-"""Bumped on incompatible schema changes. Old snapshots are
-discarded by :meth:`SessionStore.load` rather than migrated — the
-intelligence trackers self-heal on first tick, so the cost of a
-cold start after a schema bump is one missed warm-up tick."""
+CURRENT_SCHEMA_VERSION = 2
+"""Bumped when the snapshot shape changes in a way that warrants
+calling it out — even when the change is additive. Old snapshots
+go through ``_MIGRATIONS`` to upgrade in memory; any version we
+don't recognize cold-starts cleanly."""
+
+_SUPPORTED_LOAD_VERSIONS: frozenset[int] = frozenset({1, 2})
+"""Versions ``load()`` knows how to read. v1 lacked intraday
+fields; pydantic defaults fill them on load and the controller
+re-persists as v2."""
 
 
 class PulseRecord(BaseModel):
@@ -106,11 +111,18 @@ class SessionSnapshot(BaseModel):
     # LLM on a symbol the trader already paid for. Keys are tuples
     # in memory (``(symbol, action)`` / ``(symbol, composite_bucket)``);
     # JSON requires string dict keys so the controller joins with
-    # ``|`` before serialization and splits on hydrate. Schema stays
-    # at version 1 — pydantic defaults make these fields backward-
-    # compatible with snapshots written before they existed.
+    # ``|`` before serialization and splits on hydrate. Pydantic
+    # defaults make these fields backward-compatible with snapshots
+    # written before they existed.
     brief_cache: dict[str, str] = Field(default_factory=dict)
     opp_brief_cache: dict[str, str] = Field(default_factory=dict)
+
+    # Intraday signal history (schema v2). Parallel to the daily
+    # ``signal_episodes`` field above — recorded only when the
+    # controller's ``intraday_enabled`` setting is on. v1 snapshots
+    # land here as an empty dict, which is what we'd record for any
+    # session that ran without the intraday feature.
+    intraday_signal_episodes: dict[str, list[SignalEpisode]] = Field(default_factory=dict)
 
 
 class SessionStore:
@@ -148,7 +160,7 @@ class SessionStore:
                 error=str(e),
             )
             return None
-        if snapshot.schema_version != CURRENT_SCHEMA_VERSION:
+        if snapshot.schema_version not in _SUPPORTED_LOAD_VERSIONS:
             log.info(
                 "session_store.schema_mismatch_starting_cold",
                 path=str(self.path),
@@ -156,6 +168,17 @@ class SessionStore:
                 current_version=CURRENT_SCHEMA_VERSION,
             )
             return None
+        if snapshot.schema_version != CURRENT_SCHEMA_VERSION:
+            # In-memory migration: an older supported snapshot is
+            # validated under the current model (pydantic fills new
+            # fields with their defaults), and the controller will
+            # re-persist it as the current version on the next tick.
+            log.info(
+                "session_store.migrated_in_memory",
+                path=str(self.path),
+                from_version=snapshot.schema_version,
+                to_version=CURRENT_SCHEMA_VERSION,
+            )
         return snapshot
 
     def save(self, snapshot: SessionSnapshot) -> None:
