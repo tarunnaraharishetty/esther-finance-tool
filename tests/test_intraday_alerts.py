@@ -257,3 +257,43 @@ def test_rapid_decay_skipped_when_history_too_short() -> None:
     history = _pulse_history_with_breadth(0.8, 0.7)
     snap = DashboardSnapshot(tick=1, rows=[], intraday_pulse_history=history)
     assert rule.evaluate_snapshot(snap) == []
+
+
+# ---------------------------------------------------------------------------
+# default_intraday_rules + default_intraday_cooldowns
+# ---------------------------------------------------------------------------
+
+
+def test_default_intraday_rules_returns_full_rule_set() -> None:
+    """The factory returns three per-row rules + two snapshot rules,
+    matching the five rule classes exported by the module."""
+    from src.intelligence.intraday_alerts import default_intraday_rules
+
+    per_row, snapshot_rules = default_intraday_rules()
+    rule_names = {r.name for r in per_row}
+    snapshot_names = {r.name for r in snapshot_rules}
+    assert rule_names == {
+        "intraday_reversal_acceleration",
+        "intraday_momentum_collapse",
+        "timeframe_disagreement",
+    }
+    assert snapshot_names == {
+        "intraday_opportunity_entry",
+        "rapid_confidence_decay",
+    }
+
+
+def test_default_intraday_cooldowns_covers_every_rule_name() -> None:
+    """Every rule name in the default set has a cooldown entry —
+    otherwise YAML-loaded configs that don't mention these rules
+    would let them fire every tick."""
+    from src.intelligence.intraday_alerts import (
+        default_intraday_cooldowns,
+        default_intraday_rules,
+    )
+
+    per_row, snapshot_rules = default_intraday_rules()
+    cooldowns = default_intraday_cooldowns()
+    for rule in (*per_row, *snapshot_rules):
+        assert rule.name in cooldowns, f"missing cooldown for {rule.name}"
+        assert cooldowns[rule.name] > 0

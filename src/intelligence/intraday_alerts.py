@@ -286,10 +286,52 @@ class RapidConfidenceDecayRule:
         ]
 
 
+def default_intraday_rules() -> tuple[list[object], list[object]]:
+    """Default rule set for sessions with intraday enabled.
+
+    Returns ``(per_row_rules, snapshot_rules)`` — two lists matching
+    :class:`~src.intelligence.alerts.AlertEngine`'s ``rules`` and
+    ``snapshot_rules`` shapes. Splicing them onto an existing engine
+    is the typical call-site pattern: append to both lists, then call
+    ``alert_state.record(...)`` as usual.
+    """
+    return (
+        [
+            IntradayReversalAccelerationRule(),
+            IntradayMomentumCollapseRule(),
+            TimeframeDisagreementRule(),
+        ],
+        [
+            IntradayOpportunityEntryRule(),
+            RapidConfidenceDecayRule(),
+        ],
+    )
+
+
+def default_intraday_cooldowns() -> dict[str, int]:
+    """Cooldown overrides for the intraday rule set, keyed by rule
+    name (matches :data:`~src.intelligence.alert_prioritizer._DEFAULT_COOLDOWNS`).
+
+    Caller merges these into the active prioritizer config when
+    intraday is enabled. Loaded-from-YAML configs that don't mention
+    intraday rules would otherwise leave them uncool'd-down (firing
+    every tick) — this helper closes that gap.
+    """
+    return {
+        "intraday_opportunity_entry": 600,
+        "intraday_reversal_acceleration": 600,
+        "intraday_momentum_collapse": 300,
+        "timeframe_disagreement": 600,
+        "rapid_confidence_decay": 900,
+    }
+
+
 __all__ = [
     "IntradayMomentumCollapseRule",
     "IntradayOpportunityEntryRule",
     "IntradayReversalAccelerationRule",
     "RapidConfidenceDecayRule",
     "TimeframeDisagreementRule",
+    "default_intraday_cooldowns",
+    "default_intraday_rules",
 ]

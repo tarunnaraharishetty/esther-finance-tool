@@ -767,6 +767,33 @@ def dashboard(
         alert_engine = AlertEngine()
         alert_prioritizer = AlertPrioritizer()
 
+    # Auto-register intraday alert rules when the feature is on.
+    # Adds 3 per-row rules (reversal acceleration, momentum collapse,
+    # timeframe disagreement) and 2 snapshot rules (intraday OPP
+    # entry, rapid confidence decay). Cooldowns are merged into the
+    # active prioritizer config so YAML-loaded configs that didn't
+    # mention intraday rules still debounce them correctly.
+    if settings.intraday_enabled:
+        from dataclasses import replace as dc_replace
+
+        from src.intelligence.intraday_alerts import (
+            default_intraday_cooldowns,
+            default_intraday_rules,
+        )
+
+        extra_rules, extra_snapshot_rules = default_intraday_rules()
+        alert_engine.rules.extend(extra_rules)  # type: ignore[arg-type]
+        alert_engine.snapshot_rules.extend(extra_snapshot_rules)  # type: ignore[arg-type]
+        merged_cooldowns = {
+            **default_intraday_cooldowns(),
+            **alert_prioritizer.config.cooldowns,
+        }
+        alert_prioritizer.config = dc_replace(alert_prioritizer.config, cooldowns=merged_cooldowns)
+        console.print(
+            "[dim]intraday alerts wired: "
+            f"{len(extra_rules)} per-row + {len(extra_snapshot_rules)} snapshot rule(s)[/dim]"
+        )
+
     controller: BaseController
     if mock:
         controller = MockDashboardController(
