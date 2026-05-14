@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-13 (SessionStore persistence shipped).*
+*Last touched: 2026-05-13 (multi-timeframe Phase 1 shipped).*
 
 ---
 
@@ -51,6 +51,9 @@ src/
 ├── persistence/       # SessionStore (JSON snapshot for cross-restart
 │                      # state: signal_history, opp_history,
 │                      # pulse_history, alert_state, tick counter)
+├── strategy/          # base · recommendation · multi_timeframe
+│                      # (IntradayRead + is_divergent for the
+│                      # secondary intraday alignment chip)
 └── utils/             # logging, rate limiter, preflight
 ```
 
@@ -90,6 +93,21 @@ dashboard or exposed via the CLI.
   `SessionStore` injection into the controller; tests stay
   ephemeral by omitting it. Default path
   `data/session_state.json`, env-overridable.
+
+**Multi-timeframe (Phase 1)**
+- **Per-row intraday read** alongside the daily pipeline. Opt-in
+  via `Settings.intraday_enabled` (default off; doubles Alpaca bar
+  fetches when on). Default secondary timeframe is 15-min;
+  configurable.
+- `RecommendationEngine.recommend_intraday()` runs the daily
+  indicator-scoring path on the secondary bar dataframe — sentiment
+  is skipped (timeframe-agnostic). Returns an `IntradayRead`
+  attached to each `RecommendationRow`.
+- `DetailPanel` renders an "Intraday" section with the alignment
+  word (green `aligned` / red `diverging` / dim `neutral`) when the
+  row carries an intraday read.
+- `WatchlistHeader` adds an INTRADAY line with the
+  diverging / aligned / neutral counts.
 
 **Strategy**
 - RSI / MACD / Bollinger indicators
@@ -141,9 +159,9 @@ dashboard or exposed via the CLI.
   · `o` cycle OPP · `b` OPP brief · `a` add symbol · `x` remove symbol
 
 **Quality baseline**
-- 552 passing tests, 1 deselected (`slow`/`integration`)
+- 565 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
-- `mypy src` (`--strict`) green across all 47 source files
+- `mypy src` (`--strict`) green across all 48 source files
 - Documented exceptions live in `pyproject.toml`
 
 ---
@@ -151,31 +169,25 @@ dashboard or exposed via the CLI.
 ## Remaining high-priority roadmap
 
 Three themes for upcoming sessions. (Drilldown, news quality scoring,
-and controller-owned `SessionStore` persistence all shipped on
-2026-05-13.) One nice-to-have follow-up on persistence: brief caches
-(LLM row briefs + OPP briefs) currently live on `DashboardApp` and
-aren't persisted yet — a separate file-section or store hook can
-plug into the app layer cleanly. Leaving for now since brief
-re-generation is cheap once we have an API key.
+`SessionStore` persistence, and multi-timeframe Phase 1 all shipped
+on 2026-05-13.) Two nice-to-have follow-ups:
+- **Brief caches** (row + OPP briefs in `DashboardApp`) aren't
+  persisted yet — small separate-section hook on the SessionStore.
+- **Multi-timeframe Phase 2**: separate intraday `SignalHistory` /
+  `OpportunityMembershipTracker` / `PulseHistoryTracker`, intraday-
+  specific alerts and opportunities, `SessionStore` schema bump
+  (`schema_version=2`) to persist intraday state. Justified when
+  intraday becomes part of the trader's primary read rather than
+  alignment context.
 
-### 1. Multi-timeframe intelligence
-Today the recommender runs on daily bars. Adding a second timeframe
-(e.g., 15-min intraday) would let alerts and the pulse react inside
-the trading day rather than tick-to-tick on daily-bar quirks.
-Architectural lift — touches data layer (separate cache buckets),
-indicators (already pure functions, work for any timeframe),
-recommender (per-timeframe scores combined), UI (timeframe toggle
-or both visible). Best done AFTER persistence so intraday state
-survives restarts.
-
-### 2. Smarter market pulse evolution
+### 1. Smarter market pulse evolution
 The pulse currently classifies one tick. With pulse_history we have
 trajectory data. Natural next steps: pattern detection ("breadth
 firming for 8 ticks"), regime classification (risk-on / risk-off /
 mixed), or an LLM-driven read of the trajectory tied into the recap
 brief. Build on top of pulse_history; doesn't add new state.
 
-### 3. Dashboard refinement
+### 2. Dashboard refinement
 Ongoing polish that doesn't fit a neat feature box: column tunables,
 help-overlay (`?`), better empty-state messages, configurable burst
 window, perhaps a command palette via Textual's built-in. Best done
@@ -224,18 +236,17 @@ when the surrounding code is touched.
 
 Sequenced for maximum compounding return.
 
-**1. Multi-timeframe intelligence** *(start here tomorrow)*
-- Biggest architectural lift; persistence is now in place so
-  intraday state will survive restarts cleanly. Plan the SessionStore
-  schema bump with the multi-timeframe data shape in mind.
-
-**2. Smarter market pulse evolution**
+**1. Smarter market pulse evolution** *(start here tomorrow)*
 - Builds naturally on the now-persistent pulse_history. Likely an
-  LLM-driven read of the trajectory tied into the recap brief.
+  LLM-driven read of the trajectory tied into the recap brief —
+  regime detection (risk-on / risk-off / mixed), pattern callouts
+  ("breadth firming for 8 ticks"), trajectory commentary.
 
-**3. Dashboard refinement**
+**2. Dashboard refinement**
 - In parallel with the above. Pick up small items between bigger
-  features rather than as a dedicated session.
+  features rather than as a dedicated session: help overlay (`?`),
+  command palette via Textual built-ins, configurable burst window,
+  empty-state polish.
 
 ---
 
@@ -243,39 +254,41 @@ Sequenced for maximum compounding return.
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 552 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 565 passing
 ```
 
-Open this doc and start with **Multi-timeframe intelligence**
-(roadmap item #1, recommended order step 1). Today the recommender
-runs on daily bars only. Adding a second timeframe (15-min intraday
-is the natural pick) lets alerts and the pulse react inside the
-trading day rather than tick-to-tick on daily-bar quirks. Touches
-the data layer (separate cache buckets), the recommender (per-
-timeframe scores combined), and the UI (a toggle or simultaneous
-view).
+Open this doc and start with **Smarter market pulse evolution**
+(roadmap item #1, recommended order step 1). The pulse currently
+classifies one tick; `PulseHistoryTracker` gives us a rolling
+trajectory; persistence keeps that trajectory across restarts.
+The natural next step is reading that trajectory — pattern
+detection ("breadth firming for 8 ticks"), regime classification
+(risk-on / risk-off / mixed), or an LLM-driven trajectory commentary
+tied into the recap brief. Pure intelligence-layer work; no new
+data fetches.
 
 Suggested opening prompt to Claude:
 
-> Design multi-timeframe support: add 15-min intraday alongside
-> the existing daily bars. Indicators are already pure functions
-> so they work for any timeframe — the lift is data-layer caching,
-> per-timeframe recommender outputs, snapshot schema for both
-> timeframes, and a dashboard surface (toggle or split view). Plan
-> the SessionStore schema bump (schema_version=2) so intraday
-> state persists across restarts.
+> Implement smarter pulse evolution on top of PulseHistoryTracker.
+> Add pattern detection (e.g. "momentum breadth firming for N
+> ticks"), a regime classifier (risk-on / risk-off / mixed) derived
+> from the trajectory, and an LLM-driven trajectory commentary that
+> the recap brief can call. All inputs are already on the persisted
+> pulse history — no new data layer work. Strict grounding: every
+> phrase derives from a numeric pattern over actual history values;
+> no forecasts.
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `422a234` (push to `origin/main`
+- **Branch:** `main` is clean at `29b7a05` (push to `origin/main`
   pending — harness blocks direct push to default branch unless
-  the user runs it themselves).
-- **Tests:** 552 passing, 1 deselected (`slow`/`integration` mark).
+  the user runs it themselves; four commits queued locally).
+- **Tests:** 565 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
-  across all 47 source files.
+  across all 48 source files.
 - **Dependencies installed in `.venv/`** (Python 3.14): all of
   `pyproject.toml`'s base set, plus `anthropic`, `pyyaml`, `textual`,
   `ruff`, `mypy`, `pytest`. `alembic` and `backtrader` removed.
