@@ -334,6 +334,107 @@ async def test_mock_controller_persists_and_hydrates(tmp_path: Path) -> None:
     assert snap.tick == 3
 
 
+def test_brief_cache_round_trips_through_snapshot(tmp_path: Path) -> None:
+    """SessionSnapshot's brief_cache + opp_brief_cache fields survive
+    serialization. Pydantic's default_factory keeps these backward-
+    compatible — old snapshots without the fields still load."""
+    store = SessionStore(tmp_path / "session.json")
+    original = SessionSnapshot(
+        saved_at=datetime.now(UTC),
+        brief_cache={"AAPL|buy": "Apple looks strong on supply chain news."},
+        opp_brief_cache={"NVDA|82": "NVDA is the top OPP at composite 0.82."},
+    )
+    store.save(original)
+    loaded = store.load()
+    assert loaded is not None
+    assert loaded.brief_cache == {"AAPL|buy": "Apple looks strong on supply chain news."}
+    assert loaded.opp_brief_cache == {"NVDA|82": "NVDA is the top OPP at composite 0.82."}
+
+
+def test_old_snapshot_without_brief_fields_still_loads(tmp_path: Path) -> None:
+    """Snapshots written before the brief-cache fields existed should
+    load cleanly — pydantic fills in the new dict fields with empty
+    defaults."""
+    target = tmp_path / "session.json"
+    target.write_text(
+        '{"schema_version": 1, "saved_at": "2026-05-13T12:00:00+00:00", "tick": 7}',
+        encoding="utf-8",
+    )
+    store = SessionStore(target)
+    loaded = store.load()
+    assert loaded is not None
+    assert loaded.tick == 7
+    assert loaded.brief_cache == {}
+    assert loaded.opp_brief_cache == {}
+
+
+def test_controller_record_briefs_round_trip_across_restart(tmp_path: Path) -> None:
+    """End-to-end: a brief recorded into the controller mirror lands
+    in the JSON snapshot at tick-end persist, and a fresh controller
+    pointed at the same file hydrates the brief on construction."""
+    from src.dashboard.controller import MockDashboardController
+
+    state_path = tmp_path / "session.json"
+    ctrl_a = MockDashboardController(
+        watchlist=["AAPL"], seed=1, session_store=SessionStore(state_path)
+    )
+    ctrl_a.record_row_brief("AAPL", "buy", "saved row brief text")
+    ctrl_a.record_opp_brief("AAPL", 75, "saved OPP brief text")
+    # Persist directly — calling the internal helper avoids needing
+    # an event loop for this sync test.
+    ctrl_a._persist_if_enabled()
+
+    # Brand-new controller — should see both briefs after construction.
+    ctrl_b = MockDashboardController(
+        watchlist=["AAPL"], seed=1, session_store=SessionStore(state_path)
+    )
+    assert ctrl_b.brief_cache == {"AAPL|buy": "saved row brief text"}
+    assert ctrl_b.opp_brief_cache == {"AAPL|75": "saved OPP brief text"}
+
+
+def test_controller_prune_briefs_drops_only_matching_symbol() -> None:
+    """``prune_briefs_for_symbol`` keeps other symbols' briefs intact."""
+    from src.dashboard.controller import MockDashboardController
+
+    ctrl = MockDashboardController(watchlist=["AAPL", "MSFT"], seed=1)
+    ctrl.record_row_brief("AAPL", "buy", "apple text")
+    ctrl.record_row_brief("MSFT", "sell", "microsoft text")
+    ctrl.record_opp_brief("AAPL", 70, "apple opp text")
+    ctrl.record_opp_brief("MSFT", 55, "microsoft opp text")
+    ctrl.prune_briefs_for_symbol("AAPL")
+    assert ctrl.brief_cache == {"MSFT|sell": "microsoft text"}
+    assert ctrl.opp_brief_cache == {"MSFT|55": "microsoft opp text"}
+
+
+@pytest.mark.asyncio
+async def test_dashboard_app_hydrates_briefs_from_controller(tmp_path: Path) -> None:
+    """App.on_mount copies the controller's persisted brief caches
+    into local dict storage so a press of `s`/`b` after restart
+    surfaces the saved text without re-billing the LLM."""
+    from src.dashboard.app import DashboardApp
+    from src.dashboard.controller import MockDashboardController
+
+    state_path = tmp_path / "session.json"
+    # Pre-seed the persisted snapshot with two briefs. Persisting
+    # synchronously via the internal helper avoids fetching a tick.
+    ctrl = MockDashboardController(
+        watchlist=["AAPL"], seed=1, session_store=SessionStore(state_path)
+    )
+    ctrl.record_row_brief("AAPL", "buy", "row-brief-text")
+    ctrl.record_opp_brief("AAPL", 80, "opp-brief-text")
+    ctrl._persist_if_enabled()
+
+    # Fresh controller + app — app on_mount should hydrate briefs.
+    fresh_ctrl = MockDashboardController(
+        watchlist=["AAPL"], seed=1, session_store=SessionStore(state_path)
+    )
+    app = DashboardApp(fresh_ctrl, refresh_seconds=999.0)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        assert app._brief_cache.get(("AAPL", "buy")) == "row-brief-text"
+        assert app._opp_brief_cache.get(("AAPL", 80)) == "opp-brief-text"
+
+
 @pytest.mark.asyncio
 async def test_controller_without_session_store_does_not_create_file(
     tmp_path: Path,

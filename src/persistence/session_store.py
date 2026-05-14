@@ -101,6 +101,17 @@ class SessionSnapshot(BaseModel):
     alert_last_fired: dict[str, datetime] = Field(default_factory=dict)
     alert_max_history: int = 200
 
+    # Brief caches — Anthropic-generated row + OPP briefs survive
+    # restarts so the next ``s`` / ``b`` keypress doesn't re-bill the
+    # LLM on a symbol the trader already paid for. Keys are tuples
+    # in memory (``(symbol, action)`` / ``(symbol, composite_bucket)``);
+    # JSON requires string dict keys so the controller joins with
+    # ``|`` before serialization and splits on hydrate. Schema stays
+    # at version 1 — pydantic defaults make these fields backward-
+    # compatible with snapshots written before they existed.
+    brief_cache: dict[str, str] = Field(default_factory=dict)
+    opp_brief_cache: dict[str, str] = Field(default_factory=dict)
+
 
 class SessionStore:
     """JSON-file persistence for :class:`SessionSnapshot`.

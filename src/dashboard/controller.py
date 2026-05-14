@@ -89,6 +89,13 @@ class BaseController(ABC):
         self.pulse_tracker = pulse_tracker or PulseHistoryTracker()
         self.session_store = session_store
         self._tick = 0
+        # Brief caches mirrored from / written to the SessionStore.
+        # Keys are joined strings ("symbol|action" for row briefs,
+        # "symbol|composite_bucket" for OPP briefs). DashboardApp
+        # reads these on mount and pushes updates via record_brief()
+        # after each successful LLM generation.
+        self.brief_cache: dict[str, str] = {}
+        self.opp_brief_cache: dict[str, str] = {}
         # If a SessionStore is wired up, hydrate the trackers + tick
         # counter from the saved snapshot. Missing or corrupt file →
         # cold start; logged at the store layer.
@@ -209,6 +216,11 @@ class BaseController(ABC):
         self.pulse_tracker.apply_snapshot(snapshot.pulse_records)
         self.alert_state.apply_snapshot(snapshot.alert_log, snapshot.alert_last_fired)
         self._tick = snapshot.tick
+        # Brief caches — pydantic defaults mean these are always
+        # populated (possibly empty) on snapshots written before
+        # this commit, so no None-check is needed.
+        self.brief_cache = dict(snapshot.brief_cache)
+        self.opp_brief_cache = dict(snapshot.opp_brief_cache)
         self.events.info(
             f"session restored from {self.session_store.path.name} (tick {snapshot.tick})"
         )
@@ -230,8 +242,51 @@ class BaseController(ABC):
             pulse_records=self.pulse_tracker.to_snapshot(),
             alert_log=alert_log,
             alert_last_fired=alert_last_fired,
+            brief_cache=dict(self.brief_cache),
+            opp_brief_cache=dict(self.opp_brief_cache),
         )
         self.session_store.save(snapshot)
+
+    _BRIEF_KEY_DELIM = "|"
+    """Joins the in-memory tuple key (``(symbol, action)`` /
+    ``(symbol, composite_bucket)``) into a JSON-safe string key. Pipe
+    is safe — neither alphanumeric symbols + ``.`` / ``/`` nor
+    snake_case action labels contain it, and composite buckets are
+    integers."""
+
+    def record_row_brief(self, symbol: str, action: str, text: str) -> None:
+        """Persist a row brief into the controller-owned mirror.
+
+        Called by :class:`~src.dashboard.app.DashboardApp` after each
+        successful row-brief generation. The text is opaque to the
+        controller — it's just dict storage that the next
+        ``_persist_if_enabled`` will serialize.
+        """
+        key = f"{symbol}{self._BRIEF_KEY_DELIM}{action}"
+        self.brief_cache[key] = text
+
+    def record_opp_brief(self, symbol: str, composite_bucket: int, text: str) -> None:
+        """Persist an OPP brief into the controller-owned mirror.
+
+        Bucket is the same ``round(composite * 100)`` the app uses
+        for in-memory caching, so identical cache hits on either
+        side stay aligned.
+        """
+        key = f"{symbol}{self._BRIEF_KEY_DELIM}{composite_bucket}"
+        self.opp_brief_cache[key] = text
+
+    def prune_briefs_for_symbol(self, symbol: str) -> None:
+        """Drop every cached brief whose key starts with ``symbol|``.
+
+        Called when the trader removes a symbol — keeps the mirror
+        in sync with the app's brief-cache pruning so a re-add
+        doesn't surface a stale brief from before the wipe.
+        """
+        prefix = f"{symbol}{self._BRIEF_KEY_DELIM}"
+        self.brief_cache = {k: v for k, v in self.brief_cache.items() if not k.startswith(prefix)}
+        self.opp_brief_cache = {
+            k: v for k, v in self.opp_brief_cache.items() if not k.startswith(prefix)
+        }
 
 
 # ---------------------------------------------------------------------------

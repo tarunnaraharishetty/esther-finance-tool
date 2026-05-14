@@ -1447,9 +1447,36 @@ class DashboardApp(App[None]):
     async def on_mount(self) -> None:
         self.title = "Esther — quant dashboard"
         self._update_sub_title()
+        # Hydrate the in-memory brief caches from the controller's
+        # persisted mirror so a restart surfaces saved briefs on the
+        # very first keypress rather than re-billing the LLM.
+        self._hydrate_briefs_from_controller()
         # First refresh immediately; then schedule recurring.
         await self._refresh_snapshot()
         self._tick_handle = self.set_interval(self.refresh_seconds, self._tick)
+
+    def _hydrate_briefs_from_controller(self) -> None:
+        """Copy the controller's persisted brief caches into local
+        dict storage at mount.
+
+        Keys are split on the controller's ``|`` delimiter back into
+        the in-memory tuple form. Malformed keys (missing delimiter,
+        empty halves) are skipped — defensive against a tampered
+        snapshot file."""
+        for raw_key, text in self.controller.brief_cache.items():
+            symbol, sep, action = raw_key.partition("|")
+            if not sep or not symbol or not action:
+                continue
+            self._brief_cache[(symbol, action)] = text
+        for raw_key, text in self.controller.opp_brief_cache.items():
+            symbol, sep, bucket_str = raw_key.partition("|")
+            if not sep or not symbol:
+                continue
+            try:
+                bucket = int(bucket_str)
+            except ValueError:
+                continue
+            self._opp_brief_cache[(symbol, bucket)] = text
 
     def _update_sub_title(self) -> None:
         """Reflect the current watchlist in the dashboard sub-title.
@@ -1528,11 +1555,14 @@ class DashboardApp(App[None]):
             f"[bold red]−[/] watchlist: removed [bold]{row.symbol}[/]"
         )
         # Wipe brief caches keyed on this symbol so a re-add doesn't
-        # show a stale brief from the prior session.
+        # show a stale brief from the prior session. Mirror the wipe
+        # to the controller's persisted cache so a restart-after-
+        # removal doesn't resurrect the brief either.
         self._brief_cache = {k: v for k, v in self._brief_cache.items() if k[0] != row.symbol}
         self._opp_brief_cache = {
             k: v for k, v in self._opp_brief_cache.items() if k[0] != row.symbol
         }
+        self.controller.prune_briefs_for_symbol(row.symbol)
         # Textual's run_worker is typed as Callable[..., Never] upstream, but
         # accepts any coroutine at runtime — the ignore is for the upstream
         # type signature, not a runtime concern.
@@ -1625,6 +1655,11 @@ class DashboardApp(App[None]):
             return
 
         self._opp_brief_cache[cache_key] = text
+        # Mirror into the controller so the next persistence tick
+        # picks it up. Symbol + bucket are the cache key; the text
+        # is opaque to the controller.
+        symbol, bucket = cache_key
+        self.controller.record_opp_brief(symbol, bucket, text)
         detail = self.query_one(DetailPanel)
         detail.brief_state = "ready"
         detail.brief_text = text
@@ -1726,6 +1761,11 @@ class DashboardApp(App[None]):
             return
 
         self._brief_cache[cache_key] = text
+        # Mirror to the controller so the brief survives a restart.
+        # Cache key is (symbol, action_value) — same shape the
+        # controller persists.
+        symbol, action_value = cache_key
+        self.controller.record_row_brief(symbol, action_value, text)
         # Only push if the user hasn't navigated away from this symbol.
         current = self._selected_row()
         detail = self.query_one(DetailPanel)
