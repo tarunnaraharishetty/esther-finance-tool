@@ -84,11 +84,13 @@ def _snap(
 
 
 def test_context_captures_action_mix() -> None:
-    snap = _snap([
-        _row("AAPL", action=SignalAction.BUY),
-        _row("MSFT", action=SignalAction.BUY),
-        _row("NVDA", action=SignalAction.SELL),
-    ])
+    snap = _snap(
+        [
+            _row("AAPL", action=SignalAction.BUY),
+            _row("MSFT", action=SignalAction.BUY),
+            _row("NVDA", action=SignalAction.SELL),
+        ]
+    )
     ctx = RecapContext.from_snapshot(snap)
     assert ctx.action_mix[SignalAction.BUY] == 2
     assert ctx.action_mix[SignalAction.SELL] == 1
@@ -137,10 +139,12 @@ def test_context_skips_non_flip_history() -> None:
 
 
 def test_context_captures_headlines_per_symbol() -> None:
-    snap = _snap([
-        _row("AAPL", news=2, headlines=("AAPL beats earnings", "Apple supplier deal")),
-        _row("NVDA", news=0),  # no headlines
-    ])
+    snap = _snap(
+        [
+            _row("AAPL", news=2, headlines=("AAPL beats earnings", "Apple supplier deal")),
+            _row("NVDA", news=0),  # no headlines
+        ]
+    )
     ctx = RecapContext.from_snapshot(snap)
     assert ctx.headlines_by_symbol == {
         "AAPL": ("AAPL beats earnings", "Apple supplier deal"),
@@ -150,12 +154,17 @@ def test_context_captures_headlines_per_symbol() -> None:
 def test_context_counts_alerts_by_severity() -> None:
     fired = datetime(2026, 5, 13, 14, 0, tzinfo=UTC)
     alerts = [
-        Alert(symbol="AAPL", rule="action_changed", severity="warn",
-              message="x", fired_at=fired),
-        Alert(symbol="MSFT", rule="confidence_threshold", severity="info",
-              message="x", fired_at=fired),
-        Alert(symbol="NVDA", rule="confidence_threshold", severity="critical",
-              message="x", fired_at=fired),
+        Alert(symbol="AAPL", rule="action_changed", severity="warn", message="x", fired_at=fired),
+        Alert(
+            symbol="MSFT", rule="confidence_threshold", severity="info", message="x", fired_at=fired
+        ),
+        Alert(
+            symbol="NVDA",
+            rule="confidence_threshold",
+            severity="critical",
+            message="x",
+            fired_at=fired,
+        ),
     ]
     snap = _snap([_row("AAPL")], alerts=alerts)
     ctx = RecapContext.from_snapshot(snap)
@@ -174,10 +183,12 @@ def test_context_watchlist_preserves_order() -> None:
 
 
 def test_user_message_lists_action_mix_and_watchlist() -> None:
-    snap = _snap([
-        _row("AAPL", action=SignalAction.BUY),
-        _row("NVDA", action=SignalAction.SELL),
-    ])
+    snap = _snap(
+        [
+            _row("AAPL", action=SignalAction.BUY),
+            _row("NVDA", action=SignalAction.SELL),
+        ]
+    )
     text = _build_recap_user_message(RecapContext.from_snapshot(snap))
     assert "Watchlist: AAPL, NVDA" in text
     assert "1 BUY" in text
@@ -196,13 +207,15 @@ def test_user_message_only_includes_populated_sections() -> None:
 
 
 def test_user_message_quotes_headlines_verbatim() -> None:
-    snap = _snap([
-        _row(
-            "AAPL",
-            news=2,
-            headlines=("AAPL beats earnings expectations",),
-        ),
-    ])
+    snap = _snap(
+        [
+            _row(
+                "AAPL",
+                news=2,
+                headlines=("AAPL beats earnings expectations",),
+            ),
+        ]
+    )
     text = _build_recap_user_message(RecapContext.from_snapshot(snap))
     # Literal quoted form so the LLM can quote it back without paraphrasing.
     assert '"AAPL beats earnings expectations"' in text
@@ -219,6 +232,62 @@ def test_user_message_lists_flips_with_durations() -> None:
     text = _build_recap_user_message(RecapContext.from_snapshot(snap))
     assert "was HOLD for 7 ticks" in text
     assert "now BUY" in text
+
+
+def test_context_captures_pulse_evolution() -> None:
+    """When the snapshot carries a PulseEvolution, RecapContext picks
+    up the regime label and renders each pattern as a flat string the
+    user-message builder can slot in without knowing about the
+    PulseEvolution dataclass shape."""
+    from src.intelligence.pulse_evolution import PulseEvolution, TrajectoryPattern
+
+    snap = _snap([_row("AAPL", action=SignalAction.BUY)])
+    snap.pulse_evolution = PulseEvolution(
+        regime="risk-on",
+        patterns=(
+            TrajectoryPattern(
+                name="momentum_breadth_firming",
+                label="momentum breadth firming",
+                detail="across last 6 ticks",
+            ),
+        ),
+    )
+    ctx = RecapContext.from_snapshot(snap)
+    assert ctx.regime == "risk-on"
+    assert ctx.patterns == ("momentum breadth firming (across last 6 ticks)",)
+
+
+def test_user_message_includes_regime_and_patterns_when_present() -> None:
+    """The LLM input gains a Pulse regime line + a Pulse patterns
+    block when the context carries them — the recap prose can then
+    reference both as deterministic facts."""
+    from src.intelligence.pulse_evolution import PulseEvolution, TrajectoryPattern
+
+    snap = _snap([_row("AAPL", action=SignalAction.BUY)])
+    snap.pulse_evolution = PulseEvolution(
+        regime="risk-off",
+        patterns=(
+            TrajectoryPattern(
+                name="alert_intensity_spiking",
+                label="alert intensity spiking",
+                detail="latest 5 vs prior 1",
+            ),
+        ),
+    )
+    text = _build_recap_user_message(RecapContext.from_snapshot(snap))
+    assert "Pulse regime: risk-off" in text
+    assert "Pulse patterns:" in text
+    assert "alert intensity spiking (latest 5 vs prior 1)" in text
+
+
+def test_user_message_omits_regime_block_when_indeterminate() -> None:
+    """An indeterminate regime + no patterns should leave the user
+    message unchanged — no orphan headers, no empty section."""
+    snap = _snap([_row("AAPL", action=SignalAction.BUY)])
+    # pulse_evolution stays None by default → indeterminate
+    text = _build_recap_user_message(RecapContext.from_snapshot(snap))
+    assert "Pulse regime:" not in text
+    assert "Pulse patterns:" not in text
 
 
 # ---------------------------------------------------------------------------

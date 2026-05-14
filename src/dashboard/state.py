@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from src.intelligence.history import SignalHistorySummary
     from src.intelligence.opportunity_history import OpportunityHistory
     from src.intelligence.pulse import MarketPulse
+    from src.intelligence.pulse_evolution import PulseEvolution
     from src.intelligence.pulse_history import PulseHistory
     from src.strategy.multi_timeframe import IntradayRead
 
@@ -98,6 +99,10 @@ class DashboardSnapshot:
     # controller's tracker has at least one entry — same fallback
     # semantics as ``pulse``.
     pulse_history: PulseHistory | None = None
+    # Trajectory-level synthesis (regime + patterns) over the pulse
+    # history. ``None`` when history is too thin for a meaningful
+    # classification — the renderer treats that as "skip the chip".
+    pulse_evolution: PulseEvolution | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -116,11 +121,7 @@ class EventBuffer:
 
     def push(self, level: str, message: str) -> EventEntry:
         now = datetime.now(UTC)
-        if (
-            self._buf
-            and self._buf[-1].level == level
-            and self._buf[-1].message == message
-        ):
+        if self._buf and self._buf[-1].level == level and self._buf[-1].message == message:
             # Collapse the duplicate: bump count, advance timestamp.
             last = self._buf[-1]
             bumped = replace(last, count=last.count + 1, timestamp=now)

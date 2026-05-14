@@ -39,6 +39,7 @@ from src.intelligence.opportunity_history import (
     OpportunityMembershipTracker,
 )
 from src.intelligence.pulse import compute_pulse
+from src.intelligence.pulse_evolution import evolve as evolve_pulse
 from src.intelligence.pulse_history import PulseHistoryTracker
 from src.intelligence.tier import promote_to_tier
 from src.persistence.session_store import SessionSnapshot, SessionStore
@@ -147,6 +148,11 @@ class BaseController(ABC):
         self.pulse_tracker.record(pulse)
         snap.pulse = pulse
         snap.pulse_history = self.pulse_tracker.summary()
+        # Trajectory-level synthesis lives alongside pulse_history so
+        # the header, recap, and signature cache all see the same
+        # regime + patterns. Cheap pure compute — same cadence as the
+        # pulse itself.
+        snap.pulse_evolution = evolve_pulse(snap.pulse_history)
 
     def _record_opp_history(self, snap: DashboardSnapshot) -> dict[str, OpportunityHistory]:
         """Update the membership tracker for this tick + return per-symbol

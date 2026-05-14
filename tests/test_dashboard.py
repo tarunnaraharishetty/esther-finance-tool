@@ -1807,6 +1807,101 @@ async def test_watchlist_header_renders_intraday_divergence_count() -> None:
         assert "1 aligned" in text
 
 
+async def test_watchlist_header_renders_regime_and_patterns_when_present() -> None:
+    """When the snapshot carries a pulse_evolution with a regime + at
+    least one pattern, the header surfaces REGIME and PATTERNS lines."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.intelligence.pulse_evolution import PulseEvolution, TrajectoryPattern
+    from src.strategy.base import RecommendationTier
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.BUY,
+        confidence=0.6,
+        combined_score=0.5,
+        technical_score=0.5,
+        sentiment_score=0.3,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
+        last_price=190.0,
+        num_news_articles=1,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.BUY,
+    )
+    evolution = PulseEvolution(
+        regime="risk-on",
+        patterns=(
+            TrajectoryPattern(
+                name="momentum_breadth_firming",
+                label="momentum breadth firming",
+                detail="across last 6 ticks",
+            ),
+        ),
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row], pulse_evolution=evolution)
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        assert "REGIME" in text
+        assert "risk-on" in text
+        assert "PATTERNS" in text
+        assert "momentum breadth firming" in text
+        assert "last 6 ticks" in text
+
+
+async def test_watchlist_header_omits_regime_when_indeterminate() -> None:
+    """An indeterminate regime + no patterns means the synthesis isn't
+    ready yet — header skips both lines."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.intelligence.pulse_evolution import PulseEvolution
+    from src.strategy.base import RecommendationTier
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.2,
+        combined_score=0.0,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=150.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.HOLD,
+    )
+    snap = DashboardSnapshot(
+        tick=1,
+        rows=[row],
+        pulse_evolution=PulseEvolution(regime="indeterminate", patterns=()),
+    )
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        assert "REGIME" not in text
+        assert "PATTERNS" not in text
+
+
 async def test_watchlist_header_omits_intraday_line_when_disabled() -> None:
     """Without IntradayRead data on any row the header skips the
     INTRADAY line entirely — default behavior for daily-only mode."""

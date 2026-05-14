@@ -367,6 +367,12 @@ class RecapContext:
     # (severity → count)
     watchlist: tuple[str, ...] = ()
     tick: int = 0
+    # Trajectory-level synthesis from PulseEvolution. ``regime`` is one
+    # of "risk-on" / "risk-off" / "mixed" / "indeterminate"; ``patterns``
+    # is a tuple of human-readable strings like
+    # ``"momentum breadth firming (across last 6 ticks)"``.
+    regime: str = "indeterminate"
+    patterns: tuple[str, ...] = ()
 
     @classmethod
     def from_snapshot(
@@ -405,6 +411,18 @@ class RecapContext:
         for alert in snapshot.alerts:
             alert_counts[alert.severity] = alert_counts.get(alert.severity, 0) + 1
 
+        # Pulse-evolution synthesis — regime + observed patterns. The
+        # patterns tuple is rendered as plain strings here so the
+        # user-message builder doesn't have to know about the
+        # PulseEvolution dataclass shape.
+        regime = "indeterminate"
+        patterns_strs: tuple[str, ...] = ()
+        if snapshot.pulse_evolution is not None:
+            regime = snapshot.pulse_evolution.regime
+            patterns_strs = tuple(
+                f"{p.label} ({p.detail})" for p in snapshot.pulse_evolution.patterns
+            )
+
         return cls(
             action_mix=action_mix,
             rankings=rankings,
@@ -413,6 +431,8 @@ class RecapContext:
             alert_counts=alert_counts,
             watchlist=watchlist,
             tick=snapshot.tick,
+            regime=regime,
+            patterns=patterns_strs,
         )
 
 
@@ -519,6 +539,18 @@ def _build_recap_user_message(ctx: RecapContext) -> str:
         lines.append("")
         parts = [f"{count} {sev}" for sev, count in sorted(ctx.alert_counts.items())]
         lines.append(f"Alerts this tick: {', '.join(parts)}")
+
+    # Trajectory synthesis — regime + patterns. Both are deterministic
+    # labels derived from numeric gates over the persisted pulse
+    # history; the LLM consumes them as facts, never as guidance.
+    if ctx.regime != "indeterminate" or ctx.patterns:
+        lines.append("")
+        if ctx.regime != "indeterminate":
+            lines.append(f"Pulse regime: {ctx.regime}")
+        if ctx.patterns:
+            lines.append("Pulse patterns:")
+            for pattern in ctx.patterns:
+                lines.append(f"  {pattern}")
 
     return "\n".join(lines)
 

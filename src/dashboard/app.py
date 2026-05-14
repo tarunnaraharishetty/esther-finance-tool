@@ -45,6 +45,7 @@ from src.intelligence.opportunity_drilldown import (
 )
 from src.intelligence.opportunity_history import OpportunityHistory
 from src.intelligence.pulse import MarketPulse, compute_pulse
+from src.intelligence.pulse_evolution import TrajectoryPattern
 from src.intelligence.pulse_history import PulseHistory
 from src.intelligence.rankings import compute as compute_rankings
 from src.intelligence.signal_profile import SignalProfile
@@ -186,6 +187,16 @@ class WatchlistHeader(Static):
         # --- HIST line (sparklines of recent pulses; needs >=2 ticks) --
         if snap.pulse_history is not None and snap.pulse_history.has_trend:
             lines.append(f"{_section_label('HIST')}{_format_pulse_history(snap.pulse_history)}")
+
+        # --- REGIME + PATTERNS (trajectory-level synthesis) -------------
+        # Both lines key off snap.pulse_evolution. REGIME is always
+        # shown when the evolution exists and isn't indeterminate;
+        # PATTERNS only when at least one fires.
+        evolution = snap.pulse_evolution
+        if evolution is not None and evolution.regime != "indeterminate":
+            lines.append(f"{_section_label('REGIME')}{_format_regime(evolution.regime)}")
+        if evolution is not None and evolution.patterns:
+            lines.append(f"{_section_label('PATTERNS')}{_format_patterns(evolution.patterns)}")
 
         # --- Status line: action mix + changes since last refresh -------
         counts = action_breakdown(snap)
@@ -429,6 +440,16 @@ def _header_signature(
         for r in snap.rows
         if not r.error and r.intraday is not None
     )
+    # Pulse-evolution signature — regime + pattern names drive the
+    # REGIME / PATTERNS header lines. Detail strings (numeric grounding)
+    # are derived from the same series the pattern-detector keyed off,
+    # so the names suffice as a cache fingerprint.
+    evolution_sig: tuple[object, ...] = ()
+    if snap.pulse_evolution is not None:
+        evolution_sig = (
+            snap.pulse_evolution.regime,
+            tuple(p.name for p in snap.pulse_evolution.patterns),
+        )
     return (
         rows_sig,
         prev_sig,
@@ -438,6 +459,7 @@ def _header_signature(
         hist_sig,
         opp_sig,
         intraday_sig,
+        evolution_sig,
     )
 
 
@@ -845,6 +867,32 @@ def _format_pulse_history(history: PulseHistory) -> str:
         # quiet placeholder so the HIST label doesn't visually orphan.
         return f"[dim]({history.length} ticks of quiet)[/dim]"
 
+    return "  [dim]·[/]  ".join(chunks)
+
+
+_REGIME_STYLES: dict[str, str] = {
+    "risk-on": "bold green",
+    "risk-off": "bold red",
+    "mixed": "bold yellow",
+    "indeterminate": "dim",
+}
+
+
+def _format_regime(regime: str) -> str:
+    """Render the regime chip with regime-specific color."""
+    style = _REGIME_STYLES.get(regime, "white")
+    return f"[{style}]{regime}[/]"
+
+
+def _format_patterns(patterns: tuple[TrajectoryPattern, ...]) -> str:
+    """Render trajectory patterns as a · -separated row of chips.
+
+    Each chip shows the human label and its numeric detail in dim
+    text so the gate evidence sits right next to the call-out.
+    """
+    chunks = [
+        f"[bold]{rich_escape(p.label)}[/]  [dim]{rich_escape(p.detail)}[/dim]" for p in patterns
+    ]
     return "  [dim]·[/]  ".join(chunks)
 
 
