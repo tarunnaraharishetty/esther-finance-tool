@@ -113,6 +113,11 @@ class DashboardSnapshot:
     # ``rank_opportunities_intraday`` + the controller's parallel
     # intraday tracker.
     intraday_opp_history: dict[str, OpportunityHistory] = field(default_factory=dict)
+    # Parallel intraday pulse triad (MT2 phase 2c). All three fields
+    # default to ``None`` so daily-only sessions render unchanged.
+    intraday_pulse: MarketPulse | None = None
+    intraday_pulse_history: PulseHistory | None = None
+    intraday_pulse_evolution: PulseEvolution | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 

@@ -41,7 +41,7 @@ from src.intelligence.opportunity_history import (
     OpportunityHistory,
     OpportunityMembershipTracker,
 )
-from src.intelligence.pulse import compute_pulse
+from src.intelligence.pulse import compute_pulse, compute_pulse_intraday
 from src.intelligence.pulse_evolution import evolve as evolve_pulse
 from src.intelligence.pulse_history import PulseHistoryTracker
 from src.intelligence.tier import promote_to_tier
@@ -98,6 +98,9 @@ class BaseController(ABC):
         # tracker in the same snapshot. Phase 2b of MT2.
         self.intraday_opp_tracker = OpportunityMembershipTracker()
         self.pulse_tracker = pulse_tracker or PulseHistoryTracker()
+        # Parallel intraday pulse tracker (MT2 phase 2c). Recorded
+        # alongside the daily pulse + persisted in the same snapshot.
+        self.intraday_pulse_tracker = PulseHistoryTracker()
         self.session_store = session_store
         self._tick = 0
         # Brief caches mirrored from / written to the SessionStore.
@@ -171,6 +174,18 @@ class BaseController(ABC):
         # regime + patterns. Cheap pure compute — same cadence as the
         # pulse itself.
         snap.pulse_evolution = evolve_pulse(snap.pulse_history)
+
+        # Intraday pulse triad (MT2 phase 2c). compute_pulse_intraday
+        # returns the empty-pulse sentinel when no row carries an
+        # IntradayRead, so PulseHistoryTracker.record() naturally
+        # skips it via its is_empty filter. The summary/evolution
+        # accessors are still safe to call on an empty tracker.
+        intraday_pulse = compute_pulse_intraday(snap)
+        self.intraday_pulse_tracker.record(intraday_pulse)
+        snap.intraday_pulse = intraday_pulse if not intraday_pulse.is_empty else None
+        if len(self.intraday_pulse_tracker):
+            snap.intraday_pulse_history = self.intraday_pulse_tracker.summary()
+            snap.intraday_pulse_evolution = evolve_pulse(snap.intraday_pulse_history)
 
     def _record_opp_history(self, snap: DashboardSnapshot) -> dict[str, OpportunityHistory]:
         """Update the membership tracker for this tick + return per-symbol
@@ -277,6 +292,10 @@ class BaseController(ABC):
         # is a no-op apply.
         self.intraday_opp_tracker.apply_snapshot(snapshot.intraday_opp_membership)
         self.pulse_tracker.apply_snapshot(snapshot.pulse_records)
+        # Intraday pulse (MT2 phase 2c). Additive snapshot field —
+        # pre-2c snapshots populate it as ``[]`` via the pydantic
+        # default, so the apply is a no-op.
+        self.intraday_pulse_tracker.apply_snapshot(snapshot.intraday_pulse_records)
         self.alert_state.apply_snapshot(snapshot.alert_log, snapshot.alert_last_fired)
         self._tick = snapshot.tick
         # Brief caches — pydantic defaults mean these are always
@@ -309,6 +328,7 @@ class BaseController(ABC):
             opp_brief_cache=dict(self.opp_brief_cache),
             intraday_signal_episodes=self.intraday_signal_history.to_snapshot(),
             intraday_opp_membership=self.intraday_opp_tracker.to_snapshot(),
+            intraday_pulse_records=self.intraday_pulse_tracker.to_snapshot(),
         )
         self.session_store.save(snapshot)
 

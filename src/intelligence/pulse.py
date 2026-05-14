@@ -153,9 +153,7 @@ def _classify_sentiment(healthy: list[RecommendationRow]) -> str:
     action_bias = (buys - sells) / n  # in [-1, +1]
 
     sent_rows = [r for r in healthy if r.num_news_articles > 0]
-    avg_news_sent = (
-        sum(r.sentiment_score for r in sent_rows) / len(sent_rows) if sent_rows else 0.0
-    )
+    avg_news_sent = sum(r.sentiment_score for r in sent_rows) / len(sent_rows) if sent_rows else 0.0
 
     action_bullish = action_bias > _SENTIMENT_LEAN
     action_bearish = action_bias < -_SENTIMENT_LEAN
@@ -264,8 +262,7 @@ def _compute_momentum_breadth(healthy: list[RecommendationRow]) -> float:
     aligned = sum(
         1
         for r in directional
-        if _is_finite(r.macd)
-        and _direction(r.action) * r.macd > _DIRECTIONAL_FLOOR
+        if _is_finite(r.macd) and _direction(r.action) * r.macd > _DIRECTIONAL_FLOOR
     )
     return aligned / len(directional)
 
@@ -273,15 +270,11 @@ def _compute_momentum_breadth(healthy: list[RecommendationRow]) -> float:
 def _compute_sentiment_breadth(healthy: list[RecommendationRow]) -> float:
     """Fraction of news-bearing directional rows whose sentiment aligns
     with action. Returns 0.0 when no qualifying rows exist."""
-    candidates = [
-        r for r in healthy if _direction(r.action) != 0 and r.num_news_articles > 0
-    ]
+    candidates = [r for r in healthy if _direction(r.action) != 0 and r.num_news_articles > 0]
     if not candidates:
         return 0.0
     aligned = sum(
-        1
-        for r in candidates
-        if _direction(r.action) * r.sentiment_score > _DIRECTIONAL_FLOOR
+        1 for r in candidates if _direction(r.action) * r.sentiment_score > _DIRECTIONAL_FLOOR
     )
     return aligned / len(candidates)
 
@@ -310,9 +303,173 @@ def _compute_strongest_symbols(
     if not strong:
         return ()
     strong.sort(key=lambda r: r.confidence, reverse=True)
-    return tuple(
-        (r.symbol, r.tier.display) for r in strong[:_STRONGEST_LIMIT]
+    return tuple((r.symbol, r.tier.display) for r in strong[:_STRONGEST_LIMIT])
+
+
+# ---------------------------------------------------------------------------
+# Intraday pulse (MT2 phase 2c)
+# ---------------------------------------------------------------------------
+
+
+def compute_pulse_intraday(snapshot: DashboardSnapshot) -> MarketPulse:
+    """Intraday counterpart to :func:`compute_pulse`.
+
+    Same :class:`MarketPulse` shape, but every per-row read comes from
+    ``row.intraday`` (action, confidence, technical_score) instead of
+    daily fields, and the activity/reversal classifiers consume the
+    parallel ``intraday_signal_history`` on the snapshot.
+
+    Returns ``_EMPTY`` when no row has an intraday read — same null
+    semantics the daily pulse uses for an empty watchlist.
+    """
+    healthy = [r for r in snapshot.rows if not r.error and r.intraday is not None]
+    if not healthy:
+        return _EMPTY
+
+    sentiment = _classify_sentiment_intraday(healthy)
+    conviction = _classify_conviction_intraday(healthy)
+    activity = _classify_activity_intraday(snapshot, healthy)
+    summary = _build_summary(sentiment, conviction, activity, healthy)
+
+    # ``healthy`` is filtered to rows with non-None intraday above, but
+    # narrowing through a list comprehension doesn't survive into the
+    # generator below — the local helper keeps mypy + the runtime
+    # contract aligned without an extra type-ignore.
+    def _intraday_action(r: RecommendationRow) -> SignalAction | None:
+        return r.intraday.action if r.intraday is not None else None
+
+    bullish_count = sum(1 for r in healthy if _intraday_action(r) == SignalAction.BUY)
+    bearish_count = sum(1 for r in healthy if _intraday_action(r) == SignalAction.SELL)
+    momentum_breadth = _compute_momentum_breadth_intraday(healthy)
+    # News sentiment is timeframe-agnostic, so sentiment breadth still
+    # reads from the daily sentiment_score — only the *action* is
+    # intraday-derived. This matches how the intraday opportunity
+    # ranker handles sentiment.
+    sentiment_breadth = _compute_sentiment_breadth_intraday(healthy)
+    reversal_intensity = _compute_reversal_intensity_intraday(snapshot)
+    # Alert intensity stays daily — alerts are session-wide, not
+    # per-timeframe (intraday alert rules will populate this same
+    # ``recent_alerts`` tuple).
+    alert_intensity = len(snapshot.recent_alerts)
+    # Strongest-symbols list reads STRONG tier promotions, which are
+    # currently only computed for the daily timeframe. Keep daily here
+    # — intraday tier mapping is direct (no STRONG promotion yet).
+    strongest_symbols = _compute_strongest_symbols(healthy)
+
+    return MarketPulse(
+        sentiment=sentiment,
+        conviction=conviction,
+        activity=activity,
+        summary=summary,
+        bullish_count=bullish_count,
+        bearish_count=bearish_count,
+        healthy_count=len(healthy),
+        momentum_breadth=momentum_breadth,
+        sentiment_breadth=sentiment_breadth,
+        reversal_intensity=reversal_intensity,
+        alert_intensity=alert_intensity,
+        strongest_symbols=strongest_symbols,
     )
 
 
-__all__ = ["MarketPulse", "compute_pulse"]
+def _classify_sentiment_intraday(healthy: list[RecommendationRow]) -> str:
+    """Sentiment classifier on intraday actions. News sentiment is
+    timeframe-agnostic so it still consults ``row.sentiment_score``."""
+    buys = sum(1 for r in healthy if r.intraday and r.intraday.action == SignalAction.BUY)
+    sells = sum(1 for r in healthy if r.intraday and r.intraday.action == SignalAction.SELL)
+    n = len(healthy)
+    action_bias = (buys - sells) / n
+
+    sent_rows = [r for r in healthy if r.num_news_articles > 0]
+    avg_news_sent = sum(r.sentiment_score for r in sent_rows) / len(sent_rows) if sent_rows else 0.0
+
+    action_bullish = action_bias > _SENTIMENT_LEAN
+    action_bearish = action_bias < -_SENTIMENT_LEAN
+    news_bullish = avg_news_sent > _SENTIMENT_LEAN
+    news_bearish = avg_news_sent < -_SENTIMENT_LEAN
+
+    if action_bullish and not action_bearish and not news_bearish:
+        return "bullish"
+    if action_bearish and not action_bullish and not news_bullish:
+        return "bearish"
+    if (action_bullish and news_bearish) or (action_bearish and news_bullish):
+        return "mixed"
+    return "neutral"
+
+
+def _classify_conviction_intraday(healthy: list[RecommendationRow]) -> str:
+    """Conviction tier from average intraday confidence."""
+    avg_conf = sum(r.intraday.confidence for r in healthy if r.intraday is not None) / len(healthy)
+    if avg_conf >= _CONVICTION_HIGH:
+        return "strong"
+    if avg_conf >= _CONVICTION_MODERATE:
+        return "moderate"
+    return "weak"
+
+
+def _classify_activity_intraday(
+    snapshot: DashboardSnapshot, healthy: list[RecommendationRow]
+) -> str:
+    """Activity classifier keyed on intraday history episode counts."""
+    total_episodes = 0
+    for r in healthy:
+        summary = snapshot.intraday_signal_history.get(r.symbol)
+        if summary is not None:
+            total_episodes += 1 + len(summary.recent)
+    alert_count = len(snapshot.recent_alerts)
+
+    if total_episodes >= 2 * len(healthy) or alert_count >= 5:
+        return "volatile"
+    if total_episodes > len(healthy) or alert_count >= 1:
+        return "active"
+    return "calm"
+
+
+def _compute_momentum_breadth_intraday(healthy: list[RecommendationRow]) -> float:
+    """Fraction of intraday-directional rows whose intraday
+    technical_score aligns with the intraday action. Same shape as the
+    daily breadth helper; only the field source changes."""
+    directional = [
+        r for r in healthy if r.intraday is not None and _direction(r.intraday.action) != 0
+    ]
+    if not directional:
+        return 0.0
+    aligned = sum(
+        1
+        for r in directional
+        if r.intraday is not None
+        and _direction(r.intraday.action) * r.intraday.technical_score > _DIRECTIONAL_FLOOR
+    )
+    return aligned / len(directional)
+
+
+def _compute_sentiment_breadth_intraday(healthy: list[RecommendationRow]) -> float:
+    """Fraction of news-bearing intraday-directional rows whose
+    sentiment aligns with the intraday action. Sentiment stays daily
+    (news is timeframe-agnostic); the action is intraday."""
+    candidates = [
+        r
+        for r in healthy
+        if r.intraday is not None and _direction(r.intraday.action) != 0 and r.num_news_articles > 0
+    ]
+    if not candidates:
+        return 0.0
+    aligned = sum(
+        1
+        for r in candidates
+        if r.intraday is not None
+        and _direction(r.intraday.action) * r.sentiment_score > _DIRECTIONAL_FLOOR
+    )
+    return aligned / len(candidates)
+
+
+def _compute_reversal_intensity_intraday(snapshot: DashboardSnapshot) -> int:
+    """Total intraday flips across the session — same shape as the
+    daily helper but keyed on intraday history."""
+    total = 0
+    for summary in snapshot.intraday_signal_history.values():
+        total += len(summary.recent)
+    return total
+
+
+__all__ = ["MarketPulse", "compute_pulse", "compute_pulse_intraday"]

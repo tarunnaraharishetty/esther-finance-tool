@@ -156,6 +156,13 @@ _DEFAULT_COOLDOWNS = {
     # symbols shuffle through the top-N. 10 min cooldown keeps the alert
     # focused on durable changes rather than rank noise.
     "opportunity_entry": 600,
+    # Intraday rules (MT2 phase 2c). Tighter cooldowns since intraday
+    # signals move faster than daily; 5-10 min is the sweet spot.
+    "intraday_opportunity_entry": 600,
+    "intraday_reversal_acceleration": 600,
+    "intraday_momentum_collapse": 300,
+    "timeframe_disagreement": 600,
+    "rapid_confidence_decay": 900,
 }
 
 

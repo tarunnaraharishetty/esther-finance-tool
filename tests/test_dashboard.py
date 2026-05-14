@@ -2018,6 +2018,127 @@ async def test_view_toggle_renders_intraday_chip_in_header() -> None:
         assert "intraday" in text_intraday
 
 
+async def test_watchlist_header_renders_align_line_when_intraday_present() -> None:
+    """Phase 2c: the ALIGN line surfaces alignment / conflict counts
+    whenever at least one row has an intraday read — independent of
+    the active view."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.data.models import TimeFrame
+    from src.strategy.base import RecommendationTier
+    from src.strategy.multi_timeframe import IntradayRead
+
+    fired = datetime.now(UTC)
+    aligned_row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.BUY,
+        confidence=0.5,
+        combined_score=0.4,
+        technical_score=0.3,
+        sentiment_score=0.2,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=190.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.BUY,
+        intraday=IntradayRead(
+            timeframe=TimeFrame.MIN_15,
+            action=SignalAction.BUY,
+            confidence=0.6,
+            combined_score=0.4,
+            technical_score=0.4,
+        ),
+    )
+    conflict_row = RecommendationRow(
+        symbol="NVDA",
+        action=SignalAction.BUY,
+        confidence=0.6,
+        combined_score=0.5,
+        technical_score=0.4,
+        sentiment_score=0.3,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=520.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.BUY,
+        intraday=IntradayRead(
+            timeframe=TimeFrame.MIN_15,
+            action=SignalAction.SELL,
+            confidence=0.5,
+            combined_score=-0.3,
+            technical_score=-0.3,
+        ),
+    )
+    snap = DashboardSnapshot(tick=1, rows=[aligned_row, conflict_row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        assert "ALIGN" in text
+        assert "1 aligned" in text
+        assert "1 conflict" in text
+
+
+async def test_detail_panel_renders_daily_and_intraday_intelligence() -> None:
+    """Phase 2c: rows with an intraday read get a Daily Intelligence
+    + Intraday Intelligence block in the DetailPanel. Each block
+    summarizes action / confidence / trend / reversal / opp rank."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.data.models import TimeFrame
+    from src.strategy.base import RecommendationTier
+    from src.strategy.multi_timeframe import IntradayRead
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="NVDA",
+        action=SignalAction.BUY,
+        confidence=0.7,
+        combined_score=0.6,
+        technical_score=0.5,
+        sentiment_score=0.5,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
+        last_price=520.0,
+        num_news_articles=2,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.BUY,
+        intraday=IntradayRead(
+            timeframe=TimeFrame.MIN_15,
+            action=SignalAction.SELL,
+            confidence=0.42,
+            combined_score=-0.42,
+            technical_score=-0.42,
+        ),
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        detail.row_index = 0
+        text = detail.render()
+        assert "Daily Intelligence" in text
+        assert "Intraday Intelligence" in text
+
+
 async def test_watchlist_header_opp_lines_flip_to_intraday_on_view_toggle() -> None:
     """MT2 phase 2b: the OPP block in the header reads from
     rank_opportunities_intraday when view is intraday, surfacing

@@ -104,10 +104,7 @@ def test_pulse_excludes_error_rows_from_calculations() -> None:
 def test_pulse_bullish_when_action_mix_skews_buy_and_news_neutral() -> None:
     pulse = compute_pulse(
         _snap(
-            [
-                _row(f"S{i}", action=SignalAction.BUY, confidence=0.5)
-                for i in range(3)
-            ]
+            [_row(f"S{i}", action=SignalAction.BUY, confidence=0.5) for i in range(3)]
             + [_row("X", action=SignalAction.HOLD, confidence=0.2)]
         )
     )
@@ -130,10 +127,8 @@ def test_pulse_mixed_when_action_bullish_but_news_bearish() -> None:
     pulse = compute_pulse(
         _snap(
             [
-                _row("AAPL", action=SignalAction.BUY, confidence=0.6,
-                     sentiment=-0.5, news=5),
-                _row("MSFT", action=SignalAction.BUY, confidence=0.6,
-                     sentiment=-0.4, news=5),
+                _row("AAPL", action=SignalAction.BUY, confidence=0.6, sentiment=-0.5, news=5),
+                _row("MSFT", action=SignalAction.BUY, confidence=0.6, sentiment=-0.4, news=5),
             ]
         )
     )
@@ -158,23 +153,17 @@ def test_pulse_neutral_when_action_balanced_and_news_quiet() -> None:
 
 
 def test_pulse_strong_conviction_when_avg_confidence_high() -> None:
-    pulse = compute_pulse(
-        _snap([_row(f"S{i}", confidence=0.7) for i in range(3)])
-    )
+    pulse = compute_pulse(_snap([_row(f"S{i}", confidence=0.7) for i in range(3)]))
     assert pulse.conviction == "strong"
 
 
 def test_pulse_moderate_conviction_at_middle_band() -> None:
-    pulse = compute_pulse(
-        _snap([_row(f"S{i}", confidence=0.4) for i in range(3)])
-    )
+    pulse = compute_pulse(_snap([_row(f"S{i}", confidence=0.4) for i in range(3)]))
     assert pulse.conviction == "moderate"
 
 
 def test_pulse_weak_conviction_when_avg_confidence_low() -> None:
-    pulse = compute_pulse(
-        _snap([_row(f"S{i}", confidence=0.1) for i in range(3)])
-    )
+    pulse = compute_pulse(_snap([_row(f"S{i}", confidence=0.1) for i in range(3)]))
     assert pulse.conviction == "weak"
 
 
@@ -191,8 +180,7 @@ def test_pulse_calm_with_no_history_or_alerts() -> None:
 def test_pulse_active_when_some_alerts_fire() -> None:
     fired = datetime.now(UTC)
     alerts = (
-        Alert(symbol="AAPL", rule="action_changed", severity="warn",
-              message="x", fired_at=fired),
+        Alert(symbol="AAPL", rule="action_changed", severity="warn", message="x", fired_at=fired),
     )
     pulse = compute_pulse(_snap([_row("AAPL"), _row("MSFT")], alerts=alerts))
     assert pulse.activity == "active"
@@ -368,9 +356,7 @@ def test_momentum_breadth_handles_nan_macd_as_unaligned() -> None:
 
 
 def test_momentum_breadth_zero_when_no_directional_rows() -> None:
-    pulse = compute_pulse(
-        _snap([_row_full("AAPL", action=SignalAction.HOLD, macd=0.5)])
-    )
+    pulse = compute_pulse(_snap([_row_full("AAPL", action=SignalAction.HOLD, macd=0.5)]))
     assert pulse.momentum_breadth == 0.0
 
 
@@ -380,12 +366,8 @@ def test_sentiment_breadth_only_counts_news_bearing_rows() -> None:
     pulse = compute_pulse(
         _snap(
             [
-                _row_full(
-                    "AAPL", action=SignalAction.BUY, sentiment=0.5, news=5
-                ),
-                _row_full(
-                    "MSFT", action=SignalAction.BUY, sentiment=0.5, news=0
-                ),
+                _row_full("AAPL", action=SignalAction.BUY, sentiment=0.5, news=5),
+                _row_full("MSFT", action=SignalAction.BUY, sentiment=0.5, news=0),
             ]
         )
     )
@@ -579,3 +561,89 @@ def test_empty_snapshot_returns_zero_breadth_and_empty_strongest() -> None:
     assert pulse.reversal_intensity == 0
     assert pulse.alert_intensity == 0
     assert pulse.strongest_symbols == ()
+
+
+# ---------------------------------------------------------------------------
+# compute_pulse_intraday (MT2 phase 2c)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_pulse_intraday_empty_when_no_intraday_reads() -> None:
+    """A snapshot whose rows lack IntradayRead returns the empty
+    pulse sentinel — same null semantics as the daily pulse on an
+    empty watchlist."""
+    from src.intelligence.pulse import compute_pulse_intraday
+
+    snap = DashboardSnapshot(
+        tick=1,
+        rows=[
+            _row("AAPL", action=SignalAction.BUY),
+            _row("MSFT", action=SignalAction.SELL),
+        ],
+    )
+    pulse = compute_pulse_intraday(snap)
+    assert pulse.is_empty
+
+
+def test_compute_pulse_intraday_uses_intraday_actions() -> None:
+    """Pulse breadth / bullish / bearish counts come from
+    row.intraday.action, not row.action."""
+    from src.data.models import TimeFrame
+    from src.intelligence.pulse import compute_pulse_intraday
+    from src.strategy.multi_timeframe import IntradayRead
+
+    intraday_buy = IntradayRead(
+        timeframe=TimeFrame.MIN_15,
+        action=SignalAction.BUY,
+        confidence=0.7,
+        combined_score=0.5,
+        technical_score=0.5,
+    )
+    intraday_sell = IntradayRead(
+        timeframe=TimeFrame.MIN_15,
+        action=SignalAction.SELL,
+        confidence=0.6,
+        combined_score=-0.4,
+        technical_score=-0.4,
+    )
+    # Daily actions are flipped to confirm the helper reads from
+    # intraday, not daily.
+    rows = [
+        RecommendationRow(
+            symbol="AAPL",
+            action=SignalAction.SELL,
+            confidence=0.5,
+            combined_score=0.0,
+            technical_score=0.0,
+            sentiment_score=0.0,
+            rsi=math.nan,
+            macd=math.nan,
+            bollinger=math.nan,
+            last_price=100.0,
+            num_news_articles=0,
+            reasoning="",
+            timestamp=datetime.now(UTC),
+            intraday=intraday_buy,
+        ),
+        RecommendationRow(
+            symbol="MSFT",
+            action=SignalAction.BUY,
+            confidence=0.5,
+            combined_score=0.0,
+            technical_score=0.0,
+            sentiment_score=0.0,
+            rsi=math.nan,
+            macd=math.nan,
+            bollinger=math.nan,
+            last_price=100.0,
+            num_news_articles=0,
+            reasoning="",
+            timestamp=datetime.now(UTC),
+            intraday=intraday_sell,
+        ),
+    ]
+    snap = DashboardSnapshot(tick=1, rows=rows)
+    pulse = compute_pulse_intraday(snap)
+    assert pulse.bullish_count == 1  # one intraday BUY (AAPL)
+    assert pulse.bearish_count == 1  # one intraday SELL (MSFT)
+    assert pulse.healthy_count == 2

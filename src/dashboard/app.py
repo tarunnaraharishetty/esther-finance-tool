@@ -222,23 +222,45 @@ class WatchlistHeader(Static):
                 "[dim](press [bold]t[/bold] to flip)[/dim]"
             )
 
-        # --- Pulse line (skip when no healthy rows) --------------------
-        if not pulse.is_empty:
-            lines.append(f"{_section_label('PULSE')}{_format_pulse(pulse)}")
+        # --- Pulse / HIST / REGIME / PATTERNS lines --------------------
+        # MT2 phase 2c: in intraday view these read from the parallel
+        # intraday pulse triad. The label suffix `-I` keeps the same
+        # visual layout while signaling the timeframe.
+        if self.view_timeframe == _VIEW_INTRADAY and snap.intraday_pulse is not None:
+            active_pulse = snap.intraday_pulse
+            active_history = snap.intraday_pulse_history
+            active_evolution = snap.intraday_pulse_evolution
+            label_pulse = "PULSE-I"
+            label_hist = "HIST-I"
+            label_regime = "REGIME-I"
+            label_patterns = "PATTERNS-I"
+        else:
+            active_pulse = pulse
+            active_history = snap.pulse_history
+            active_evolution = snap.pulse_evolution
+            label_pulse = "PULSE"
+            label_hist = "HIST"
+            label_regime = "REGIME"
+            label_patterns = "PATTERNS"
 
-        # --- HIST line (sparklines of recent pulses; needs >=2 ticks) --
-        if snap.pulse_history is not None and snap.pulse_history.has_trend:
-            lines.append(f"{_section_label('HIST')}{_format_pulse_history(snap.pulse_history)}")
+        if not active_pulse.is_empty:
+            lines.append(f"{_section_label(label_pulse)}{_format_pulse(active_pulse)}")
+        if active_history is not None and active_history.has_trend:
+            lines.append(f"{_section_label(label_hist)}{_format_pulse_history(active_history)}")
+        if active_evolution is not None and active_evolution.regime != "indeterminate":
+            lines.append(f"{_section_label(label_regime)}{_format_regime(active_evolution.regime)}")
+        if active_evolution is not None and active_evolution.patterns:
+            lines.append(
+                f"{_section_label(label_patterns)}{_format_patterns(active_evolution.patterns)}"
+            )
 
-        # --- REGIME + PATTERNS (trajectory-level synthesis) -------------
-        # Both lines key off snap.pulse_evolution. REGIME is always
-        # shown when the evolution exists and isn't indeterminate;
-        # PATTERNS only when at least one fires.
-        evolution = snap.pulse_evolution
-        if evolution is not None and evolution.regime != "indeterminate":
-            lines.append(f"{_section_label('REGIME')}{_format_regime(evolution.regime)}")
-        if evolution is not None and evolution.patterns:
-            lines.append(f"{_section_label('PATTERNS')}{_format_patterns(evolution.patterns)}")
+        # --- ALIGN line — daily-vs-intraday comparison aggregates -----
+        # Always shown (regardless of view) when at least one row
+        # carries intraday data, so the trader sees both sides at a
+        # glance even from the daily view.
+        align_summary = _format_align_summary(snap)
+        if align_summary:
+            lines.append(f"{_section_label('ALIGN')}{align_summary}")
 
         # --- Status line: action mix + changes since last refresh -------
         counts = action_breakdown(snap)
@@ -318,6 +340,7 @@ def _detail_signature(
     brief_text: str,
     brief_kind: str = "row",
     opp_match: tuple[int, RankedOpportunity] | None = None,
+    intraday_opp_match: tuple[int, RankedOpportunity] | None = None,
 ) -> tuple[object, ...]:
     """Stable signature of what DetailPanel.render() would produce.
 
@@ -396,6 +419,27 @@ def _detail_signature(
             round(row.intraday.combined_score, 3),
         )
         if row.intraday is not None
+        else None,
+        # Phase 2c — intraday opp rank + intraday history fingerprint
+        # so the Daily / Intraday Intelligence blocks invalidate on
+        # rank changes and intraday-episode advancement.
+        (
+            intraday_opp_match[0],
+            round(intraday_opp_match[1].composite_score, 3),
+        )
+        if intraday_opp_match is not None
+        else None,
+        (
+            (snap.intraday_signal_history or {}).get(row.symbol).current.action.value,  # type: ignore[union-attr]
+            (snap.intraday_signal_history or {}).get(row.symbol).current.tick_count,  # type: ignore[union-attr]
+            round(
+                (snap.intraday_signal_history or {})  # type: ignore[union-attr]
+                .get(row.symbol)
+                .current.confidence_last,
+                3,
+            ),
+        )
+        if row.symbol in (snap.intraday_signal_history or {})
         else None,
         brief_state,
         brief_text,
@@ -509,6 +553,34 @@ def _header_signature(
             snap.pulse_evolution.regime,
             tuple(p.name for p in snap.pulse_evolution.patterns),
         )
+    # Phase 2c — intraday pulse triad + ALIGN aggregate.
+    intraday_pulse_sig: tuple[object, ...] = ()
+    if snap.intraday_pulse is not None:
+        intraday_pulse_sig = (
+            snap.intraday_pulse.sentiment,
+            snap.intraday_pulse.conviction,
+            snap.intraday_pulse.activity,
+            snap.intraday_pulse.bullish_count,
+            snap.intraday_pulse.bearish_count,
+            round(snap.intraday_pulse.momentum_breadth, 3),
+            round(snap.intraday_pulse.sentiment_breadth, 3),
+            snap.intraday_pulse.reversal_intensity,
+            snap.intraday_pulse.alert_intensity,
+        )
+    intraday_evolution_sig: tuple[object, ...] = ()
+    if snap.intraday_pulse_evolution is not None:
+        intraday_evolution_sig = (
+            snap.intraday_pulse_evolution.regime,
+            tuple(p.name for p in snap.intraday_pulse_evolution.patterns),
+        )
+    # ALIGN aggregate — category-count fingerprint so the line
+    # invalidates when daily-vs-intraday membership shifts.
+    from src.intelligence.timeframe_compare import (
+        aggregate_counts,
+        compare_timeframes,
+    )
+
+    align_sig = tuple(sorted(aggregate_counts(compare_timeframes(snap)).items()))
     return (
         rows_sig,
         prev_sig,
@@ -519,6 +591,9 @@ def _header_signature(
         opp_sig,
         intraday_sig,
         evolution_sig,
+        intraday_pulse_sig,
+        intraday_evolution_sig,
+        align_sig,
         # View axis — the VIEW chip toggles in/out of the header on
         # press. Without this entry the signature would stay stable
         # across a `t` press and the chip wouldn't appear until the
@@ -688,6 +763,142 @@ def _render_opportunity_drilldown(drilldown: OpportunityDrilldown) -> str:
             lines.append(f"    [dim]·[/]  [dim]{rich_escape(phrase)}[/dim]")
 
     return "\n".join(lines)
+
+
+def _format_timeframe_intelligence(
+    row: RecommendationRow,
+    snap: DashboardSnapshot,
+    *,
+    view: str,
+    opp_match: tuple[int, RankedOpportunity] | None,
+) -> str:
+    """Compact per-timeframe intelligence block for the DetailPanel.
+
+    Renders 3 lines summarizing action / confidence / tenure / trend /
+    reversal state / opp rank / strongest drivers for the requested
+    view. Intraday-view renders are guarded — when ``row.intraday is
+    None`` the block collapses to a single "no intraday data" line.
+    """
+    if view == _VIEW_INTRADAY:
+        if row.intraday is None:
+            return "  [dim]no intraday data this tick[/dim]"
+        action = row.intraday.action
+        confidence = row.intraday.confidence
+        tier_text = _tier_text(RecommendationTier.from_action(action))
+        history = snap.intraday_signal_history.get(row.symbol)
+        rank_label = "OPP-I"
+    else:
+        action = row.action
+        confidence = row.confidence
+        tier_text = _tier_text(row.tier)
+        history = snap.signal_history.get(row.symbol)
+        rank_label = "OPP"
+
+    # Line 1: action + confidence + tenure.
+    tenure_str = "—"
+    if history is not None:
+        tenure = history.current.tick_count
+        tenure_str = f"{tenure}-tick {action.value.upper()} run"
+    line_action = (
+        f"  {tier_text}  [dim]conf[/] [bold]{confidence:.2f}[/]  [dim]·[/]  [dim]{tenure_str}[/dim]"
+    )
+
+    # Line 2: trend + reversal state.
+    trend_label, trend_style = _timeframe_trend(history)
+    reversal_label, reversal_style = _timeframe_reversal_state(history)
+    line_trend = (
+        f"  [dim]trend[/] [{trend_style}]{trend_label}[/]  "
+        f"[dim]·[/]  [dim]reversal[/] [{reversal_style}]{reversal_label}[/]"
+    )
+
+    # Line 3: opp rank + strongest drivers (top 2 rationale phrases).
+    if opp_match is not None:
+        rank, opp = opp_match
+        rank_chunk = f"[bold]#{rank} {rank_label}[/]  [dim]composite[/] {opp.composite_score:.2f}"
+        drivers_chunk: str
+        if opp.rationale:
+            drivers_chunk = (
+                "  [dim]·[/]  [dim]" + rich_escape(" · ".join(opp.rationale[:2])) + "[/dim]"
+            )
+        else:
+            drivers_chunk = "  [dim]·[/]  [dim](no driver above floor)[/dim]"
+        line_rank = f"  {rank_chunk}{drivers_chunk}"
+    else:
+        line_rank = "  [dim]unranked this tick[/dim]"
+
+    return "\n".join([line_action, line_trend, line_rank])
+
+
+def _timeframe_trend(
+    history: SignalHistorySummary | None,
+) -> tuple[str, str]:
+    """Map an episode's confidence delta to a (label, style) pair for
+    the trend cell. Mirrors the calibration used in
+    :mod:`src.intelligence.signal_profile`."""
+    if history is None or history.current.tick_count < 3:
+        return ("flat", "dim")
+    delta = history.current.confidence_last - history.current.confidence_first
+    if delta >= 0.10:
+        return ("strengthening", "bold green")
+    if delta <= -0.10:
+        return ("weakening", "bold red")
+    return ("flat", "dim")
+
+
+def _timeframe_reversal_state(
+    history: SignalHistorySummary | None,
+) -> tuple[str, str]:
+    """Map history to a (label, style) pair for the reversal cell.
+
+    Fires "fresh from <PRIOR>" when the current episode has run for
+    at most 3 ticks AND the prior episode was a different action.
+    Otherwise reports "none".
+    """
+    if history is None or not history.recent:
+        return ("none", "dim")
+    prior = history.recent[0]
+    if (
+        prior.action != history.current.action
+        and prior.action != SignalAction.HOLD
+        and history.current.tick_count <= 3
+    ):
+        return (f"fresh from {prior.action.value.upper()}", "bold yellow")
+    return ("none", "dim")
+
+
+def _format_align_summary(snap: DashboardSnapshot) -> str:
+    """Phase 2c ALIGN line — daily-vs-intraday stance aggregates.
+
+    Returns ``""`` when no row has an intraday read. Otherwise emits
+    colored counts:
+
+      ALIGN  3 aligned · 2 conflict · 1 intraday-only · 1 daily-only
+
+    Categories use the same vocabulary as
+    :class:`~src.intelligence.timeframe_compare.TimeframeStance`.
+    """
+    from src.intelligence.timeframe_compare import (
+        aggregate_counts,
+        compare_timeframes,
+    )
+
+    stances = compare_timeframes(snap)
+    if not stances:
+        return ""
+    counts = aggregate_counts(stances)
+    chunks: list[str] = []
+    aligned = counts.get("aligned_bullish", 0) + counts.get("aligned_bearish", 0)
+    if aligned:
+        chunks.append(f"[bold green]{aligned} aligned[/]")
+    if counts.get("conflict"):
+        chunks.append(f"[bold red]{counts['conflict']} conflict[/]")
+    if counts.get("intraday_only"):
+        chunks.append(f"[bold cyan]{counts['intraday_only']} intraday-only[/]")
+    if counts.get("daily_only"):
+        chunks.append(f"[bold yellow]{counts['daily_only']} daily-only[/]")
+    if counts.get("neutral"):
+        chunks.append(f"[dim]{counts['neutral']} neutral[/]")
+    return "  [dim]·[/]  ".join(chunks)
 
 
 def _format_intraday_summary(rows: list[RecommendationRow]) -> str:
@@ -1051,6 +1262,16 @@ class DetailPanel(Static):
                 opp_match = (rank, opp)
                 break
 
+        # Phase 2c: do the same lookup against the intraday ranker so
+        # the Daily / Intraday Intelligence blocks below can show each
+        # side's opp rank without re-ranking inside the formatter.
+        intraday_opp_match: tuple[int, RankedOpportunity] | None = None
+        if r.intraday is not None:
+            for rank, opp in enumerate(rank_opportunities_intraday(snap, n=3), start=1):
+                if opp.symbol == r.symbol:
+                    intraday_opp_match = (rank, opp)
+                    break
+
         signature = _detail_signature(
             r,
             snap,
@@ -1058,6 +1279,7 @@ class DetailPanel(Static):
             self.brief_text,
             self.brief_kind,
             opp_match=opp_match,
+            intraday_opp_match=intraday_opp_match,
         )
         if signature == self._last_signature:
             return self._last_rendered
@@ -1132,6 +1354,29 @@ class DetailPanel(Static):
                 r.action, r.intraday
             )
 
+        # Section: Daily Intelligence + Intraday Intelligence (MT2
+        # phase 2c). Two compact per-timeframe blocks summarizing
+        # action tier, confidence, tenure, trend, reversal state,
+        # opportunity rank, and strongest drivers. Only renders when
+        # the row carries an intraday read — otherwise the existing
+        # daily-only sections above already cover the picture.
+        timeframe_blocks: list[str] = []
+        if r.intraday is not None:
+            daily_block_text = _format_timeframe_intelligence(
+                r,
+                snap,
+                view=_VIEW_DAILY,
+                opp_match=opp_match,
+            )
+            timeframe_blocks.append("[bold cyan]Daily Intelligence[/]\n" + daily_block_text)
+            intraday_block_text = _format_timeframe_intelligence(
+                r,
+                snap,
+                view=_VIEW_INTRADAY,
+                opp_match=intraday_opp_match,
+            )
+            timeframe_blocks.append("[bold cyan]Intraday Intelligence[/]\n" + intraday_block_text)
+
         # Section: Opportunity Intelligence (only when this symbol ranks
         # in the top-N). Additive — non-OPP rows render unchanged. The
         # row is threaded through so action-aware state phrases
@@ -1175,6 +1420,8 @@ class DetailPanel(Static):
             sections.append(alerts_block)
         if intraday_block:
             sections.append(intraday_block)
+        for block in timeframe_blocks:
+            sections.append(block)
         if opp_block:
             sections.append(opp_block)
         if brief_block:

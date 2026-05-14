@@ -131,6 +131,12 @@ class SessionSnapshot(BaseModel):
     intraday_opp_membership: dict[str, list[bool]] = Field(default_factory=dict)
     intraday_opp_window: int = 10
 
+    # Intraday pulse history (MT2 phase 2c) — parallel to
+    # ``pulse_records``. Additive; pydantic default keeps schema v3
+    # snapshots loading without migration steps.
+    intraday_pulse_records: list[PulseRecord] = Field(default_factory=list)
+    intraday_pulse_window: int = 20
+
 
 class SessionStore:
     """JSON-file persistence for :class:`SessionSnapshot`.
