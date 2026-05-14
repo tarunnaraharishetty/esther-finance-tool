@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (MT2 workflow polish: active-view actions + StatusLine chip + DetailPanel swap + alignment labels).*
+*Last touched: 2026-05-14 (SessionStore status footer added to StatusLine).*
 
 ---
 
@@ -234,9 +234,15 @@ dashboard or exposed via the CLI.
   **Command palette** (Ctrl+P) lists every keybinding action by
   name; provider reuses the live `action_*` methods so it can't
   drift from the keys.
+- **SessionStore status footer** in `StatusLine` — surfaces
+  persistence health as a colored chip
+  (`STORE ok · 19:42:11 · 184 KB` / `STORE stale · last write 2m
+  ago` / `STORE degraded · write failed`). Three deterministic
+  health states from observable timestamps. Empty chip when no
+  store is wired.
 
 **Quality baseline**
-- 652 passing tests, 1 deselected (`slow`/`integration`)
+- 659 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
 - `mypy src` (`--strict`) green across all 51 source files
 - Documented exceptions live in `pyproject.toml`
@@ -259,13 +265,11 @@ work is opportunistic polish + the two follow-ups noted below.
 
 ### Dashboard polish backlog
 
-- Column tunables (let the trader hide / reorder watchlist
-  columns).
-- Textual command palette wired to controller actions.
+- In-app column-toggle modal bound to `c` (Settings.dashboard_columns
+  is already env-tunable; the modal would let the trader edit it
+  without restart).
 - A `--dry-run` flag on `esther backfill` so the trader can
   preview what would be fetched without paying the Alpaca quota.
-- Inline status footer for the SessionStore (last-write timestamp,
-  size) so the persistence layer's health is visible.
 
 ---
 
@@ -323,7 +327,6 @@ alignment label) routes through the active timeframe.
   `Settings.dashboard_columns` list for live editing.
 - `--dry-run` flag on `esther backfill` to preview without paying
   the Alpaca quota.
-- Inline SessionStore status footer (last-write timestamp, size).
 
 ---
 
@@ -331,7 +334,7 @@ alignment label) routes through the active timeframe.
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 652 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 659 passing
 ```
 
 MT2 is fully shipped (phases 2a / 2b / 2c). Remaining work is
@@ -353,13 +356,11 @@ Suggested opening prompt for whichever follow-up:
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `a22be29` (push to `origin/main`
-  pending — harness blocks direct push to default branch unless
-  the user runs it themselves; one commit queued locally).
-- **Tests:** 652 passing, 1 deselected (`slow`/`integration` mark).
+- **Branch:** `main` is clean at `c68a02b`, pushed to `origin/main`.
+- **Tests:** 659 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
-  across all 49 source files.
+  across all 51 source files.
 - **Dependencies installed in `.venv/`** (Python 3.14): all of
   `pyproject.toml`'s base set, plus `anthropic`, `pyyaml`, `textual`,
   `ruff`, `mypy`, `pytest`. `alembic` and `backtrader` removed.
