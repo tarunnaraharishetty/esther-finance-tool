@@ -3447,3 +3447,105 @@ async def test_hist_line_includes_sparkline_chars_when_signal_present() -> None:
         # variation.
         if "HIST" in text:
             assert any(c in text for c in _SPARKLINE_CHARS)
+
+
+async def test_column_toggle_modal_opens_on_c() -> None:
+    """`c` pushes the column-toggle modal; the selection list is
+    pre-populated from the app's active column set."""
+    from textual.widgets import SelectionList
+
+    from src.dashboard.app import ColumnToggleModal, DashboardApp
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+        columns=["SYM", "ACTION", "CONF"],
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.2)
+        await pilot.press("c")
+        await pilot.pause(0.15)
+        assert isinstance(app.screen, ColumnToggleModal)
+        selection = app.screen.query_one(SelectionList)
+        assert set(selection.selected) == {"SYM", "ACTION", "CONF"}
+
+
+async def test_column_toggle_modal_save_applies_new_columns() -> None:
+    """Toggling a column off + Save rebuilds the DataTable with the
+    new column set; the change is visible without waiting for a tick."""
+    from textual.widgets import DataTable, SelectionList
+
+    from src.dashboard.app import ColumnToggleModal, DashboardApp
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+        columns=["SYM", "ACTION", "CONF", "PRICE"],
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        table = app.query_one(DataTable)
+        assert len(table.columns) == 4
+        await pilot.press("c")
+        await pilot.pause(0.15)
+        selection = app.screen.query_one(SelectionList)
+        selection.deselect("CONF")
+        # Save button confirms — Enter is reserved for SelectionList's
+        # toggle. Drive the action method directly so the test stays
+        # robust to button-focus / tab-order tweaks.
+        modal = app.screen
+        assert isinstance(modal, ColumnToggleModal)
+        modal.action_confirm()
+        await pilot.pause(0.2)
+        table = app.query_one(DataTable)
+        assert len(table.columns) == 3
+        labels = [str(c.label) for c in table.columns.values()]
+        assert "CONF" not in labels
+
+
+async def test_column_toggle_modal_escape_keeps_columns() -> None:
+    """Escape dismisses the modal without mutating ``self._columns``."""
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import ColumnToggleModal, DashboardApp
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+        columns=["SYM", "ACTION", "CONF"],
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        before = len(app.query_one(DataTable).columns)
+        await pilot.press("c")
+        await pilot.pause(0.15)
+        assert isinstance(app.screen, ColumnToggleModal)
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert len(app.query_one(DataTable).columns) == before
+
+
+async def test_column_toggle_modal_empty_selection_is_noop() -> None:
+    """Submitting with zero columns checked is rejected — the dashboard
+    would render an unusable empty grid. Modal stays open; pressing
+    Escape lets the trader bail."""
+    from textual.widgets import SelectionList
+
+    from src.dashboard.app import ColumnToggleModal, DashboardApp
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+        columns=["SYM", "ACTION"],
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        await pilot.press("c")
+        await pilot.pause(0.15)
+        modal = app.screen
+        assert isinstance(modal, ColumnToggleModal)
+        selection = modal.query_one(SelectionList)
+        selection.deselect_all()
+        modal.action_confirm()
+        await pilot.pause(0.1)
+        assert isinstance(app.screen, ColumnToggleModal)

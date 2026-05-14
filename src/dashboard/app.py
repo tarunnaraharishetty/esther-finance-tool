@@ -31,7 +31,16 @@ from textual.containers import Container, Vertical
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
+from textual.widgets import (
+    Button,
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    RichLog,
+    SelectionList,
+    Static,
+)
 
 from src.dashboard.state import DashboardSnapshot, RecommendationRow
 from src.intelligence.explain import Explanation, explain
@@ -1771,6 +1780,71 @@ class AddSymbolModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class ColumnToggleModal(ModalScreen["tuple[str, ...] | None"]):
+    """Modal that lets the trader toggle visible watchlist columns live.
+
+    Returns a tuple of column names in canonical display order on Save,
+    or ``None`` on Escape / Cancel. Empty selection is rejected
+    (would render an unusable empty grid) — clicking Save with zero
+    boxes checked is a silent no-op so the trader can re-check then
+    save without re-opening the modal.
+
+    Enter cannot be the confirm key here: SelectionList inherits
+    OptionList's enter-bound ``action_select``, which toggles the
+    highlighted option and stops propagation. The Save button avoids
+    that conflict and keeps Space dedicated to per-row toggling.
+    """
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape", "cancel", "cancel", show=False),
+    ]
+
+    def __init__(self, active: tuple[str, ...]) -> None:
+        super().__init__()
+        self._active = set(active)
+
+    def compose(self) -> ComposeResult:
+        with Container(id="column_toggle_modal"):
+            yield Static(
+                "[bold]Toggle visible columns[/bold]\n"
+                "[dim]space toggles · tab → save · esc cancels[/dim]"
+            )
+            yield SelectionList[str](
+                *(
+                    (name, name, name in self._active)
+                    for name, _ in _COLUMN_DEFS
+                ),
+                id="column_selection",
+            )
+            yield Button("Save", id="column_save", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one(SelectionList).focus()
+
+    @on(Button.Pressed, "#column_save")
+    def _on_save(self, _event: Button.Pressed) -> None:
+        selection = self.query_one(SelectionList)
+        chosen = set(selection.selected)
+        if not chosen:
+            return
+        ordered = tuple(name for name, _ in _COLUMN_DEFS if name in chosen)
+        self.dismiss(ordered)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_confirm(self) -> None:
+        """Test-friendly hook: programmatically invoke Save without
+        synthesizing a button press. Mirrors the production button
+        path so the dismissal payload is identical."""
+        selection = self.query_one(SelectionList)
+        chosen = set(selection.selected)
+        if not chosen:
+            return
+        ordered = tuple(name for name, _ in _COLUMN_DEFS if name in chosen)
+        self.dismiss(ordered)
+
+
 def _cell_symbol(r: RecommendationRow, _view: str) -> object:
     return r.symbol
 
@@ -1877,6 +1951,7 @@ _HELP_TEXT = (
     "[bold cyan]a[/]      add a symbol to the watchlist\n"
     "[bold cyan]x[/]      remove the selected symbol\n"
     "[bold cyan]t[/]      toggle daily / intraday view\n"
+    "[bold cyan]c[/]      toggle visible columns\n"
     "[bold cyan]?[/]      show / close this help overlay\n"
     "[bold cyan]↑ ↓[/]    select rows in the watchlist\n\n"
     "[dim]Esc or ? to close.[/dim]"
@@ -1928,6 +2003,11 @@ _PALETTE_COMMANDS: tuple[tuple[str, str, str], ...] = (
         "Toggle daily / intraday view",
         "action_toggle_view",
         "Flip the table between timeframes (`t`)",
+    ),
+    (
+        "Toggle visible columns",
+        "action_toggle_columns",
+        "Open the column-toggle modal (`c`)",
     ),
     ("Quit dashboard", "action_quit", "Exit Esther"),
 )
@@ -1997,6 +2077,18 @@ class DashboardApp(App[None]):
         background: $surface;
         padding: 1 2;
     }
+
+    ColumnToggleModal { align: center middle; }
+    ColumnToggleModal #column_toggle_modal {
+        width: 40;
+        height: auto;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    ColumnToggleModal Static { margin-bottom: 1; }
+    ColumnToggleModal SelectionList { height: auto; max-height: 14; }
+    ColumnToggleModal Button { margin-top: 1; width: 100%; }
     """
 
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -2009,6 +2101,7 @@ class DashboardApp(App[None]):
         Binding("a", "add_symbol", "add symbol"),
         Binding("x", "remove_selected", "remove symbol"),
         Binding("t", "toggle_view", "view"),
+        Binding("c", "toggle_columns", "columns"),
         Binding("question_mark", "show_help", "help"),
         Binding("up,down", "noop", "select", show=False),
     ]
@@ -2193,6 +2286,45 @@ class DashboardApp(App[None]):
         detail.view_timeframe = self.view_timeframe
         detail._last_signature = None
         detail.refresh()
+
+    def action_toggle_columns(self) -> None:
+        """`c`: open the column-toggle modal.
+
+        Lets the trader edit the visible-column set live without
+        restarting / re-exporting ``DASHBOARD_COLUMNS``. Cancelling or
+        submitting the same set is a no-op; any change rebuilds the
+        DataTable's columns + re-renders the current snapshot so the
+        new layout shows on this same press.
+        """
+        active_names = tuple(name for name, _ in self._columns)
+
+        def on_dismiss(new_columns: tuple[str, ...] | None) -> None:
+            if new_columns is None or new_columns == active_names:
+                return
+            self._apply_columns(new_columns)
+            self.query_one("#events", RichLog).write(
+                f"[bold cyan]columns:[/] {', '.join(new_columns)}"
+            )
+
+        self.push_screen(ColumnToggleModal(active=active_names), on_dismiss)
+
+    def _apply_columns(self, names: tuple[str, ...]) -> None:
+        """Swap ``self._columns`` for the new ordered set and rebuild
+        the DataTable's header row.
+
+        ``DataTable.clear(columns=True)`` is the only way to drop a
+        column definition; rows are re-added from the current snapshot
+        immediately so the table never flashes empty.
+        """
+        name_set = set(names)
+        self._columns = tuple(
+            (name, factory) for name, factory in _COLUMN_DEFS if name in name_set
+        )
+        table = self.query_one(DataTable)
+        table.clear(columns=True)
+        table.add_columns(*(name for name, _ in self._columns))
+        if self._snapshot is not None:
+            self._render_table(self._snapshot)
 
     def action_add_symbol(self) -> None:
         """`a`: open the AddSymbolModal and append the entered symbol.

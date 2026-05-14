@@ -86,11 +86,18 @@ def initdb() -> None:
     is_flag=True,
     help="Bars only — skip news fetch (useful on Alpaca tiers without news entitlement).",
 )
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print the symbol/date plan without calling Alpaca. Useful for previewing "
+    "what would be fetched against your monthly quota.",
+)
 def backfill(
     symbols: tuple[str, ...],
     days: int,
     news_hours: int,
     skip_news: bool,
+    dry_run: bool,
 ) -> None:
     """Cache historical bars + news to ``data/cache/`` so the dashboard
     has warm history on first tick.
@@ -118,6 +125,34 @@ def backfill(
     end = datetime.now(UTC)
     bars_start = end - timedelta(days=days)
     news_start = end - timedelta(hours=news_hours)
+
+    if dry_run:
+        plan = Table(
+            title=f"Backfill plan (dry-run · no Alpaca calls) → {cache.cache_dir()}",
+            header_style="bold cyan",
+        )
+        plan.add_column("symbol")
+        plan.add_column("bars window", overflow="fold")
+        plan.add_column("news window", overflow="fold")
+        bars_window = (
+            f"{bars_start.strftime('%Y-%m-%d')} → {end.strftime('%Y-%m-%d')} "
+            f"({days}d, 1D bars)"
+        )
+        news_window = (
+            "[dim]skipped[/dim]"
+            if skip_news
+            else f"{news_start.strftime('%Y-%m-%d %H:%M')} → {end.strftime('%Y-%m-%d %H:%M')} "
+            f"UTC ({news_hours}h)"
+        )
+        for sym in watchlist:
+            plan.add_row(sym, bars_window, news_window)
+        console.print(plan)
+        console.print(
+            f"[dim]would fetch {len(watchlist)} symbol(s) × "
+            f"({'bars only' if skip_news else 'bars + news'}). "
+            "Re-run without --dry-run to execute.[/dim]"
+        )
+        return
 
     market = MarketDataService()
     news_source = None if skip_news else get_news_source()

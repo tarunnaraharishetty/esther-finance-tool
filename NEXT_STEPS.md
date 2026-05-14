@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (end-of-night wrap; backlog trimmed, stabilization plan written).*
+*Last touched: 2026-05-14 (final stabilization session — both polish backlog items shipped, repo green).*
 
 ---
 
@@ -224,13 +224,17 @@ dashboard or exposed via the CLI.
   Non-OPP rows render unchanged.
 - Keyboard shortcuts: `q` quit · `r` refresh · `p` pause · `s` brief
   · `o` cycle OPP · `b` OPP brief · `a` add symbol · `x` remove symbol
-  · `?` help overlay (lists every keybinding)
+  · `t` daily/intraday view · `c` toggle columns · `?` help overlay
 - **Refinements:** empty-watchlist hint on header + DetailPanel
   (mentions `a` and `?`); `dashboard_refresh_seconds` and
   `dashboard_burst_seconds` are Settings fields, env-overridable
   and surfaced via the `--refresh-seconds` / `--burst-seconds` CLI
   flags. **Column tunables** via `Settings.dashboard_columns` (env-
   overridable JSON list; field validator rejects unknown names).
+  **In-app column-toggle modal** (`c`) lets the trader edit
+  visibility live via a SelectionList + Save button — Space
+  toggles a row, Tab focuses Save, Escape cancels, empty
+  selection is rejected silently.
   **Command palette** (Ctrl+P) lists every keybinding action by
   name; provider reuses the live `action_*` methods so it can't
   drift from the keys.
@@ -242,7 +246,7 @@ dashboard or exposed via the CLI.
   store is wired.
 
 **Quality baseline**
-- 659 passing tests, 1 deselected (`slow`/`integration`)
+- 666 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
 - `mypy src` (`--strict`) green across all 51 source files
 - Documented exceptions live in `pyproject.toml`
@@ -254,17 +258,12 @@ dashboard or exposed via the CLI.
 The major roadmap is fully shipped — drilldown, news quality,
 persistence, multi-timeframe (phases 2a/2b/2c + workflow polish),
 pulse evolution, dashboard polish, brief-cache persistence, intraday
-alerts, SessionStore status footer. Remaining work is opportunistic.
+alerts, SessionStore status footer, in-app column-toggle modal,
+and `esther backfill --dry-run`.
 
-### Dashboard polish backlog
-
-- **In-app column-toggle modal** bound to `c`. `Settings.dashboard_columns`
-  is already env-tunable; the modal would let the trader edit it
-  without restart. Mirror `AddSymbolModal`'s shape.
-- **`esther backfill --dry-run`** so the trader can preview what
-  would be fetched without paying the Alpaca quota. Small CLI flag
-  + a path that prints the symbol/date plan without calling
-  `market.get_bars`.
+There is no remaining roadmap. Future work is opportunistic
+(see Technical debt below) or feature-additive (new
+intelligence modules, alternate data sources, web front-end).
 
 ---
 
@@ -317,60 +316,44 @@ shipped. The trader can flip views with `t` and every interaction
 (`o`, `b`, OPP drilldown, StatusLine chip, DetailPanel ordering,
 alignment label) routes through the active timeframe.
 
-**Polish backlog (opportunistic)**
-- In-app column-toggle modal (bound to `c`), surfacing the same
-  `Settings.dashboard_columns` list for live editing.
-- `--dry-run` flag on `esther backfill` to preview without paying
-  the Alpaca quota.
+**Polish backlog:** empty. Both items from the prior session
+(column-toggle modal · backfill --dry-run) shipped on
+2026-05-14.
 
 ---
 
-## Resume here tomorrow
+## Resume here next session
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 659 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 666 passing
 ```
 
-Every major theme is shipped. Tomorrow is a **final stabilization
-session**: tighten a few real items, ship one or two polish picks
-if you want a clean send-off, then call the build complete.
+The build is complete. Every roadmap and polish item that was
+named has been shipped. The remaining technical-debt list is
+honest but none of it blocks the product.
 
-### Final stabilization plan (suggested order)
+If you sit down again, the only worthwhile work is:
 
-1. **Walk the dashboard live** for ~10 minutes with `--mock` and
-   real data. Press every keybinding (`q`/`r`/`p`/`s`/`o`/`b`/`a`/
-   `x`/`t`/`?`/`Ctrl+P`). Toggle daily ↔ intraday a few times.
-   Watch the `STORE` chip cycle on tick. Note anything that feels
-   off — that's your real backlog.
-2. **Address technical debt only where you see it bite.** The list
-   below is honest but none of it blocks the product. The
-   highest-value cleanups are:
-   - Drop `requirements.txt` if `pip install -e .` works clean
-     in your venv (one-line removal + commit).
-   - Decide on `detect_opportunities` (kind-based) — keep both
-     ranker shapes or delete the older one. Only if you have time.
-3. **Pick at most one polish item:**
-   - In-app column-toggle modal (bound to `c`) — biggest UX win.
-   - `esther backfill --dry-run` — useful when you onboard new
-     symbols.
-4. **End-of-session checklist** — pytest, ruff, mypy all green;
-   working tree clean; commits pushed; this doc reflects reality.
-
-Suggested opening prompt for tomorrow:
-
-> Run pytest + ruff + mypy to confirm the repo is green at
-> `730c7b4`. Then walk the dashboard with `--mock` for 10 minutes,
-> note anything off, and pick one polish item from NEXT_STEPS.md
-> to ship. End the session with a clean commit + push + updated
-> NEXT_STEPS. Keep the scope tight.
+1. **Live-fly the dashboard** with real Alpaca paper credentials
+   for an hour or two and let it surface real-world UX rough
+   edges. Nothing else surfaces those reliably.
+2. **Cherry-pick one tech-debt item** if it bites — most likely
+   the `requirements.txt` deletion (now redundant with
+   `pip install -e .`) or the `detect_opportunities` vs.
+   `rank_opportunities` decision.
+3. **New surface area** belongs in a separate session and a
+   separate planning doc — see the final-stabilization summary
+   for candidates (web front-end, broker integration if scope
+   pivots, alternate data sources).
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `730c7b4`, pushed to `origin/main`.
-- **Tests:** 659 passing, 1 deselected (`slow`/`integration` mark).
+- **Branch:** `main` clean, pushed to `origin/main` after the
+  final stabilization commit.
+- **Tests:** 666 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
   across all 51 source files.
