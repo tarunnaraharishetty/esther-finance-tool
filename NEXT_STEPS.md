@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (MT2 phase 2c: intraday pulse + alerts + Intelligence blocks).*
+*Last touched: 2026-05-14 (intraday alerts auto-wired into main.py).*
 
 ---
 
@@ -154,7 +154,9 @@ dashboard or exposed via the CLI.
     rules: reversal acceleration, momentum collapse, timeframe
     disagreement (transition edge only), intraday OPP entry,
     rapid confidence decay. Cooldowns wired in
-    `_DEFAULT_COOLDOWNS`.
+    `_DEFAULT_COOLDOWNS`. **Auto-registered** in `main.py`'s
+    `dashboard` command when `settings.intraday_enabled` is on —
+    works whether or not the trader has a custom `alerts.yaml`.
 
 **Strategy**
 - RSI / MACD / Bollinger indicators
@@ -216,7 +218,7 @@ dashboard or exposed via the CLI.
   drift from the keys.
 
 **Quality baseline**
-- 641 passing tests, 1 deselected (`slow`/`integration`)
+- 643 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
 - `mypy src` (`--strict`) green across all 51 source files
 - Documented exceptions live in `pyproject.toml`
@@ -294,9 +296,6 @@ remains is opportunistic polish + small follow-ups around the
 edges. None are critical-path.
 
 **Open MT2 follow-ups (small, opportunistic):**
-- Wire the 5 intraday alert rules into `main.py`'s default
-  AlertEngine when `settings.intraday_enabled` so the trader gets
-  them without manual `alerts.yaml` setup.
 - `action_cycle_opportunity` + `action_brief_opportunity` could
   target the active view's ranking when `view_timeframe ==
   "intraday"` (currently both still use the daily ranker).
@@ -319,7 +318,7 @@ edges. None are critical-path.
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 641 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 643 passing
 ```
 
 MT2 is fully shipped (phases 2a / 2b / 2c). Remaining work is
@@ -341,10 +340,10 @@ Suggested opening prompt for whichever follow-up:
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `8aced8a` (push to `origin/main`
+- **Branch:** `main` is clean at `2dca97e` (push to `origin/main`
   pending — harness blocks direct push to default branch unless
   the user runs it themselves; one commit queued locally).
-- **Tests:** 641 passing, 1 deselected (`slow`/`integration` mark).
+- **Tests:** 643 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
   across all 49 source files.
