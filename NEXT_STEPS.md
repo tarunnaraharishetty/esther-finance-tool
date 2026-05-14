@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (SessionStore status footer added to StatusLine).*
+*Last touched: 2026-05-14 (end-of-night wrap; backlog trimmed, stabilization plan written).*
 
 ---
 
@@ -251,25 +251,20 @@ dashboard or exposed via the CLI.
 
 ## Remaining high-priority roadmap
 
-The roadmap is light — every major theme is shipped. Remaining
-work is opportunistic polish + the two follow-ups noted below.
-
-### Open follow-ups
-
-- **Multi-timeframe Phase 2**: separate intraday `SignalHistory` /
-  `OpportunityMembershipTracker` / `PulseHistoryTracker`, intraday-
-  specific alerts and opportunities, `SessionStore` schema bump
-  (`schema_version=2`) to persist intraday state. Justified when
-  intraday becomes part of the trader's primary read rather than
-  alignment context.
+The major roadmap is fully shipped — drilldown, news quality,
+persistence, multi-timeframe (phases 2a/2b/2c + workflow polish),
+pulse evolution, dashboard polish, brief-cache persistence, intraday
+alerts, SessionStore status footer. Remaining work is opportunistic.
 
 ### Dashboard polish backlog
 
-- In-app column-toggle modal bound to `c` (Settings.dashboard_columns
+- **In-app column-toggle modal** bound to `c`. `Settings.dashboard_columns`
   is already env-tunable; the modal would let the trader edit it
-  without restart).
-- A `--dry-run` flag on `esther backfill` so the trader can
-  preview what would be fetched without paying the Alpaca quota.
+  without restart. Mirror `AddSymbolModal`'s shape.
+- **`esther backfill --dry-run`** so the trader can preview what
+  would be fetched without paying the Alpaca quota. Small CLI flag
+  + a path that prints the symbol/date plan without calling
+  `market.get_bars`.
 
 ---
 
@@ -337,26 +332,44 @@ git pull                                  # confirm sync
 .venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 659 passing
 ```
 
-MT2 is fully shipped (phases 2a / 2b / 2c). Remaining work is
-opportunistic polish — pick whichever follow-up the trader hits
-first in practice. Most likely entry points:
+Every major theme is shipped. Tomorrow is a **final stabilization
+session**: tighten a few real items, ship one or two polish picks
+if you want a clean send-off, then call the build complete.
 
-- **Auto-register intraday alert rules** in `main.py` so they fire
-  without manual `alerts.yaml` setup when `settings.intraday_enabled`.
-- **Action keys `o` / `b`** target the active view's ranking.
+### Final stabilization plan (suggested order)
 
-Suggested opening prompt for whichever follow-up:
+1. **Walk the dashboard live** for ~10 minutes with `--mock` and
+   real data. Press every keybinding (`q`/`r`/`p`/`s`/`o`/`b`/`a`/
+   `x`/`t`/`?`/`Ctrl+P`). Toggle daily ↔ intraday a few times.
+   Watch the `STORE` chip cycle on tick. Note anything that feels
+   off — that's your real backlog.
+2. **Address technical debt only where you see it bite.** The list
+   below is honest but none of it blocks the product. The
+   highest-value cleanups are:
+   - Drop `requirements.txt` if `pip install -e .` works clean
+     in your venv (one-line removal + commit).
+   - Decide on `detect_opportunities` (kind-based) — keep both
+     ranker shapes or delete the older one. Only if you have time.
+3. **Pick at most one polish item:**
+   - In-app column-toggle modal (bound to `c`) — biggest UX win.
+   - `esther backfill --dry-run` — useful when you onboard new
+     symbols.
+4. **End-of-session checklist** — pytest, ruff, mypy all green;
+   working tree clean; commits pushed; this doc reflects reality.
 
-> Pick a small follow-up. The MT2 roadmap is fully shipped; the
-> backlog in NEXT_STEPS.md describes opportunistic polish. Use
-> whichever item is closest to a trader pain-point you've seen.
-> Keep the commit narrow and well-tested.
+Suggested opening prompt for tomorrow:
+
+> Run pytest + ruff + mypy to confirm the repo is green at
+> `730c7b4`. Then walk the dashboard with `--mock` for 10 minutes,
+> note anything off, and pick one polish item from NEXT_STEPS.md
+> to ship. End the session with a clean commit + push + updated
+> NEXT_STEPS. Keep the scope tight.
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `c68a02b`, pushed to `origin/main`.
+- **Branch:** `main` is clean at `730c7b4`, pushed to `origin/main`.
 - **Tests:** 659 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
