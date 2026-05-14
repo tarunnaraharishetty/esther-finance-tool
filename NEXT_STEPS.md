@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (brief-cache persistence shipped).*
+*Last touched: 2026-05-14 (dashboard polish: columns + command palette).*
 
 ---
 
@@ -181,10 +181,14 @@ dashboard or exposed via the CLI.
   (mentions `a` and `?`); `dashboard_refresh_seconds` and
   `dashboard_burst_seconds` are Settings fields, env-overridable
   and surfaced via the `--refresh-seconds` / `--burst-seconds` CLI
-  flags.
+  flags. **Column tunables** via `Settings.dashboard_columns` (env-
+  overridable JSON list; field validator rejects unknown names).
+  **Command palette** (Ctrl+P) lists every keybinding action by
+  name; provider reuses the live `action_*` methods so it can't
+  drift from the keys.
 
 **Quality baseline**
-- 596 passing tests, 1 deselected (`slow`/`integration`)
+- 601 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
 - `mypy src` (`--strict`) green across all 49 source files
 - Documented exceptions live in `pyproject.toml`
@@ -255,19 +259,23 @@ when the surrounding code is touched.
 
 ## Recommended next implementation order
 
-Sequenced for maximum compounding return.
+Sequenced for maximum compounding return. Only one major theme
+remains in the roadmap.
 
-**1. Dashboard polish backlog** *(start here tomorrow)*
-- Pick a small bundle of UX wins between bigger feature work.
-  Column tunables (hide/reorder watchlist columns) + Textual
-  command palette wired to controller actions are the two
-  highest-value items. Each is small in isolation; together
-  they're a focused refinement commit.
+**1. Multi-timeframe Phase 2** *(start here when intraday becomes
+the primary read)*
+- Separate intraday `SignalHistory` / `OpportunityMembershipTracker`
+  / `PulseHistoryTracker`, intraday-specific alerts and
+  opportunities, `SessionStore` schema bump (`schema_version=2`)
+  to persist intraday state. Plan the snapshot migration carefully
+  so the existing daily state migrates rather than starts cold.
 
-**2. Multi-timeframe Phase 2**
-- Bigger lift; only justify when intraday becomes the trader's
-  primary read. Plan the `schema_version=2` snapshot carefully so
-  the existing daily state migrates rather than starts cold.
+**Polish backlog (opportunistic)**
+- In-app column-toggle modal (bound to `c`), surfacing the same
+  Settings.dashboard_columns list for live editing.
+- `--dry-run` flag on `esther backfill` to preview without paying
+  the Alpaca quota.
+- Inline SessionStore status footer (last-write timestamp, size).
 
 ---
 
@@ -275,36 +283,34 @@ Sequenced for maximum compounding return.
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 596 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 601 passing
 ```
 
-Open this doc and start with **dashboard polish** (roadmap item
-#1). Two high-value items to bundle: column tunables (hide /
-reorder watchlist columns via a small Settings list + DataTable
-reconfig) and Textual's built-in command palette wired to the
-existing controller actions (refresh / pause / add / remove /
-brief / etc.).
+The major roadmap is done — only **multi-timeframe Phase 2** remains
+as a planned theme, and it's intentionally not started yet (waits
+on intraday becoming the trader's primary read rather than alignment
+context). Otherwise pick something from the opportunistic polish
+backlog or address a real user complaint.
 
-Suggested opening prompt to Claude:
+Suggested opening prompt to Claude when MT2 becomes urgent:
 
-> Add column tunables + the Textual command palette. For columns,
-> add a Settings.dashboard_columns: list[str] (defaulting to the
-> current 11-column order) so the user can env-override the
-> visible set; surface a small modal bound to `c` for in-app
-> toggling, mirroring AddSymbolModal's shape. For the command
-> palette, wire DashboardApp.ALLOW_IN_MAXIMIZED_VIEW + register a
-> CommandProvider that maps to the existing action_* methods.
-> Each piece should ship with a focused test set; preserve the
-> render-skip caches and the existing keybinding behavior.
+> Implement multi-timeframe Phase 2. Add parallel intraday
+> trackers (SignalHistory / OpportunityMembershipTracker /
+> PulseHistoryTracker) keyed off the intraday timeframe. Build
+> intraday-specific alerts and opportunities on top. Bump the
+> SessionStore schema to version 2 with a migration path that
+> preserves existing daily state — old snapshots load as version
+> 1 with empty intraday fields. Surface a dashboard view toggle
+> (`t`) that switches the primary read between daily and intraday.
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `f21eb5a` (push to `origin/main`
+- **Branch:** `main` is clean at `ef6e42d` (push to `origin/main`
   pending — harness blocks direct push to default branch unless
   the user runs it themselves; one commit queued locally).
-- **Tests:** 596 passing, 1 deselected (`slow`/`integration` mark).
+- **Tests:** 601 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
   across all 49 source files.
