@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-13 (dashboard refinement bundle shipped).*
+*Last touched: 2026-05-14 (brief-cache persistence shipped).*
 
 ---
 
@@ -93,6 +93,12 @@ dashboard or exposed via the CLI.
   `SessionStore` injection into the controller; tests stay
   ephemeral by omitting it. Default path
   `data/session_state.json`, env-overridable.
+- **Brief caches** (row + OPP) also persist in the same snapshot.
+  Saved text survives restarts so the next `s` / `b` keypress
+  surfaces the cached brief without re-billing the LLM. Schema
+  unchanged — new pydantic dict fields default to empty so older
+  snapshots load fine. Symbol removal prunes the controller mirror
+  too, so re-adding a wiped symbol doesn't resurrect its brief.
 
 **Pulse evolution**
 - `PulseEvolution` data (regime + trajectory patterns) attached to
@@ -178,7 +184,7 @@ dashboard or exposed via the CLI.
   flags.
 
 **Quality baseline**
-- 591 passing tests, 1 deselected (`slow`/`integration`)
+- 596 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
 - `mypy src` (`--strict`) green across all 49 source files
 - Documented exceptions live in `pyproject.toml`
@@ -192,10 +198,6 @@ work is opportunistic polish + the two follow-ups noted below.
 
 ### Open follow-ups
 
-- **Brief caches**: row + OPP LLM briefs live on `DashboardApp` and
-  aren't persisted yet. Small separate-section hook on
-  `SessionStore` (or sibling file). Saves Anthropic calls across
-  restarts.
 - **Multi-timeframe Phase 2**: separate intraday `SignalHistory` /
   `OpportunityMembershipTracker` / `PulseHistoryTracker`, intraday-
   specific alerts and opportunities, `SessionStore` schema bump
@@ -255,21 +257,17 @@ when the surrounding code is touched.
 
 Sequenced for maximum compounding return.
 
-**1. Brief-cache persistence** *(start here tomorrow)*
-- Smallest unshipped item with clear value. Extend `SessionStore`
-  with a brief-caches section (or a sibling file); `DashboardApp`
-  reads at mount, writes on each successful brief generation.
-  Saves Anthropic calls across restarts — directly reduces cost.
+**1. Dashboard polish backlog** *(start here tomorrow)*
+- Pick a small bundle of UX wins between bigger feature work.
+  Column tunables (hide/reorder watchlist columns) + Textual
+  command palette wired to controller actions are the two
+  highest-value items. Each is small in isolation; together
+  they're a focused refinement commit.
 
 **2. Multi-timeframe Phase 2**
 - Bigger lift; only justify when intraday becomes the trader's
   primary read. Plan the `schema_version=2` snapshot carefully so
   the existing daily state migrates rather than starts cold.
-
-**3. Dashboard polish backlog**
-- Pick small items between bigger features rather than as a
-  dedicated session. Column tunables and the command palette are
-  both reasonable next picks.
 
 ---
 
@@ -277,35 +275,36 @@ Sequenced for maximum compounding return.
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 591 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 596 passing
 ```
 
-Open this doc and start with **Brief-cache persistence** (roadmap
-item #1). The Anthropic-backed row + OPP briefs are cached in
-memory on `DashboardApp`; restarting the dashboard wipes them and
-the next press of `s` / `b` re-bills the LLM. Extending
-`SessionStore` (schema_version still 1; just add two new dict
-fields) plus app-side load/save hooks closes that gap.
+Open this doc and start with **dashboard polish** (roadmap item
+#1). Two high-value items to bundle: column tunables (hide /
+reorder watchlist columns via a small Settings list + DataTable
+reconfig) and Textual's built-in command palette wired to the
+existing controller actions (refresh / pause / add / remove /
+brief / etc.).
 
 Suggested opening prompt to Claude:
 
-> Add brief-cache persistence to SessionStore. Persist DashboardApp's
-> _brief_cache (keyed by (symbol, action)) and _opp_brief_cache
-> (keyed by (symbol, composite_bucket)) so AI briefs survive
-> restarts. Load in DashboardApp.on_mount via the controller's
-> session_store; save after each successful brief generation. Add
-> schema_version=1 fields with sensible defaults so old snapshots
-> still load. Keep brief text strings opaque to the persistence
-> layer — they're just dict values.
+> Add column tunables + the Textual command palette. For columns,
+> add a Settings.dashboard_columns: list[str] (defaulting to the
+> current 11-column order) so the user can env-override the
+> visible set; surface a small modal bound to `c` for in-app
+> toggling, mirroring AddSymbolModal's shape. For the command
+> palette, wire DashboardApp.ALLOW_IN_MAXIMIZED_VIEW + register a
+> CommandProvider that maps to the existing action_* methods.
+> Each piece should ship with a focused test set; preserve the
+> render-skip caches and the existing keybinding behavior.
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `18139e3` (push to `origin/main`
+- **Branch:** `main` is clean at `f21eb5a` (push to `origin/main`
   pending — harness blocks direct push to default branch unless
   the user runs it themselves; one commit queued locally).
-- **Tests:** 591 passing, 1 deselected (`slow`/`integration` mark).
+- **Tests:** 596 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
   across all 49 source files.
