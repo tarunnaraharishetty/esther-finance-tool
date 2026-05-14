@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (MT2 phase 2a: schema v2 + view toggle).*
+*Last touched: 2026-05-14 (MT2 phase 2b: intraday OPP ranker + tracker).*
 
 ---
 
@@ -129,6 +129,13 @@ dashboard or exposed via the CLI.
   flips the table's ACTION / CONF / BAR / TECH cells between
   daily and intraday; `WatchlistHeader` shows a VIEW chip while
   intraday is active.
+- **Phase 2b: intraday OPP ranker + tracker.** Schema v3 (additive
+  — intraday OPP membership fields). `rank_opportunities_intraday`
+  scores opportunities off `row.intraday` + intraday signal
+  history; tier maps from `intraday.action`. Parallel
+  `BaseController.intraday_opp_tracker` records top-N membership.
+  `WatchlistHeader`'s OPP block flips to `OPP-I` label + intraday
+  ranking in intraday view; daily view unchanged.
 
 **Strategy**
 - RSI / MACD / Bollinger indicators
@@ -190,7 +197,7 @@ dashboard or exposed via the CLI.
   drift from the keys.
 
 **Quality baseline**
-- 607 passing tests, 1 deselected (`slow`/`integration`)
+- 614 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
 - `mypy src` (`--strict`) green across all 49 source files
 - Documented exceptions live in `pyproject.toml`
@@ -263,16 +270,21 @@ when the surrounding code is touched.
 
 Sequenced for maximum compounding return.
 
-**1. MT2 phase 2b** *(start here when intraday becomes more than
-alignment context)*
-- Parallel intraday `OpportunityMembershipTracker` +
-  `PulseHistoryTracker` (mirroring how phase 2a added the parallel
-  `SignalHistory`).
-- Intraday-specific opportunities (`rank_opportunities_intraday`)
-  + alert rules keyed off `row.intraday`.
-- View toggle extends to OPP / REGIME / PATTERNS / DetailPanel /
-  StatusLine (currently only the table cells flip).
-- Schema v3 bump if/when new fields are needed.
+**1. MT2 phase 2c** *(natural follow-up once the OPP slice has
+been used)*
+- Parallel intraday `PulseHistoryTracker` — mirrors how 2a added
+  the SignalHistory and 2b added the OpportunityMembershipTracker.
+  Persisted via additive schema fields.
+- View toggle extends to the rest of the dashboard:
+  - `REGIME` + `PATTERNS` lines render from intraday pulse
+    history + evolution when in intraday view.
+  - `DetailPanel` "Opportunity Intelligence" block uses intraday
+    drilldown for symbols ranked in the intraday top-N.
+  - `StatusLine` reflects intraday read.
+- Action keys (`o`, `b`) target the active view's ranking so
+  cycling and OPP-brief work for intraday OPPs.
+- Intraday-specific alert rules (optional — defer if daily alerts
+  + the existing view toggle satisfy the trader).
 
 **Polish backlog (opportunistic)**
 - In-app column-toggle modal (bound to `c`), surfacing the same
@@ -287,36 +299,36 @@ alignment context)*
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 607 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 614 passing
 ```
 
-Phase 2a shipped the foundation (schema v2 with v1 migration,
-intraday signal history, view toggle on the table). The natural
-next slice is **Phase 2b**: extend the view toggle to the rest of
-the dashboard (OPP / REGIME / PATTERNS / DetailPanel / StatusLine)
-once intraday-specific trackers are in place.
+Phase 2a + 2b shipped the foundation (schema v3 with v1/v2
+migration, intraday signal + opp trackers, view toggle on the
+table cells + OPP block). Phase 2c is the natural follow-up:
+parallel intraday pulse tracker + view toggle on REGIME /
+PATTERNS / DetailPanel / StatusLine.
 
-Suggested opening prompt to Claude when MT2 phase 2b becomes urgent:
+Suggested opening prompt to Claude when MT2 phase 2c becomes urgent:
 
-> Implement MT2 phase 2b. Add parallel intraday
-> OpportunityMembershipTracker + PulseHistoryTracker that mirror
-> the daily ones (same shape as the phase 2a SignalHistory).
-> Build intraday-specific opportunities (rank_opportunities_intraday
-> in src/intelligence/opportunities.py) keyed off row.intraday.
-> Extend DashboardApp.view_timeframe to flip the OPP / REGIME /
-> PATTERNS / DetailPanel / StatusLine renders as well — phase 2a
-> only flipped the table cells. Add intraday-specific alert rules
-> if the trader needs them; otherwise reuse daily rules pointed at
-> the intraday tracker. Schema bump to v3 if needed.
+> Implement MT2 phase 2c. Add a parallel intraday PulseHistoryTracker
+> that mirrors how phase 2a / 2b added SignalHistory and the
+> OpportunityMembershipTracker — controller-owned, persisted via
+> additive snapshot fields. Extend the view toggle so REGIME /
+> PATTERNS / DetailPanel "Opportunity Intelligence" / StatusLine
+> all flip to intraday data when active. Update action_cycle_
+> opportunity and action_brief_opportunity to target the active
+> view's ranking. Defer intraday-specific alert rules unless the
+> trader has a concrete request — the existing view toggle on the
+> OPP block already surfaces the intraday risk.
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `93c4fe7` (push to `origin/main`
+- **Branch:** `main` is clean at `f7b43b1` (push to `origin/main`
   pending — harness blocks direct push to default branch unless
   the user runs it themselves; one commit queued locally).
-- **Tests:** 607 passing, 1 deselected (`slow`/`integration` mark).
+- **Tests:** 614 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
   across all 49 source files.
