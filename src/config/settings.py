@@ -112,6 +112,26 @@ class Settings(BaseSettings):
     dashboard_refresh_seconds: float = 5.0
     dashboard_burst_seconds: float = 1.5
 
+    # ---- Dashboard columns ----
+    # Visible columns in the watchlist DataTable, in display order.
+    # Override via the ``DASHBOARD_COLUMNS`` env var (JSON list, e.g.
+    # ``DASHBOARD_COLUMNS='["SYM","ACTION","CONF","PRICE","NEWS"]'``)
+    # when the full 11-column grid is too dense. Field validator
+    # rejects unknown names so a typo fails fast at startup.
+    dashboard_columns: list[str] = [
+        "SYM",
+        "ACTION",
+        "CONF",
+        "BAR",
+        "TECH",
+        "SENT",
+        "RSI",
+        "MACD",
+        "BBAND",
+        "PRICE",
+        "NEWS",
+    ]
+
     # ---- AI summaries (Anthropic) ----
     anthropic_api_key: SecretStr | None = None
     llm_model: str = "claude-opus-4-7"
@@ -127,6 +147,26 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
+
+    @field_validator("dashboard_columns")
+    @classmethod
+    def _validate_dashboard_columns(cls, v: list[str]) -> list[str]:
+        """Reject unknown column names so a typo fails fast at startup.
+
+        Empty list is allowed — the dashboard renders the table with
+        no columns (unusual but legal). The canonical name set is
+        defined in :mod:`src.dashboard.app`; importing lazily keeps
+        this module free of dashboard imports.
+        """
+        from src.dashboard.app import _COLUMN_NAMES
+
+        unknown = [name for name in v if name not in _COLUMN_NAMES]
+        if unknown:
+            valid = ", ".join(sorted(_COLUMN_NAMES))
+            raise ValueError(
+                f"dashboard_columns contains unknown name(s) {unknown}. Valid names: {valid}"
+            )
+        return v
 
     @property
     def is_paper_trading(self) -> bool:

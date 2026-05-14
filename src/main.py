@@ -846,6 +846,7 @@ def dashboard(
         burst_seconds=effective_burst_seconds,
         summarizer=summarizer,
         opportunity_briefer=opportunity_briefer,
+        columns=settings.dashboard_columns,
     ).run()
 
 

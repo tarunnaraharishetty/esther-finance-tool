@@ -1918,6 +1918,71 @@ async def test_watchlist_header_omits_intraday_line_when_disabled() -> None:
         assert "INTRADAY" not in text
 
 
+async def test_dashboard_respects_configured_column_subset() -> None:
+    """When the app is constructed with a column subset, the
+    DataTable only adds those columns — hidden columns drop out of
+    the header and every row."""
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+        columns=["SYM", "ACTION", "PRICE"],
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        table = app.query_one(DataTable)
+        assert len(table.columns) == 3
+        labels = [str(c.label) for c in table.columns.values()]
+        assert labels == ["SYM", "ACTION", "PRICE"]
+
+
+async def test_dashboard_columns_preserve_canonical_order() -> None:
+    """Even if the caller passes columns out of order, the dashboard
+    re-sorts to the canonical _COLUMN_DEFS order so the UI stays
+    predictable across configurations."""
+    from textual.widgets import DataTable
+
+    from src.dashboard.app import DashboardApp
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+        columns=["NEWS", "PRICE", "CONF", "ACTION"],
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        table = app.query_one(DataTable)
+        labels = [str(c.label) for c in table.columns.values()]
+        assert labels == ["ACTION", "CONF", "PRICE", "NEWS"]
+
+
+async def test_command_palette_provider_lists_every_action() -> None:
+    """Every entry in _PALETTE_COMMANDS must map to a real action
+    method — otherwise the palette would silently drop the entry."""
+    from src.dashboard.app import (
+        _PALETTE_COMMANDS,
+        DashboardApp,
+        DashboardCommandProvider,
+    )
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        for _name, action_name, _help in _PALETTE_COMMANDS:
+            assert hasattr(app, action_name), (
+                f"DashboardApp is missing {action_name} required by the palette"
+            )
+
+    # Provider is registered on the COMMANDS set so Ctrl+P surfaces it.
+    assert DashboardCommandProvider in DashboardApp.COMMANDS
+
+
 async def test_help_overlay_opens_and_closes() -> None:
     """`?` pushes the HelpOverlay listing every keybinding; pressing `?`
     again (or Esc) dismisses it. Keeps the dashboard interactive

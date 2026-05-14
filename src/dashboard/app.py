@@ -18,6 +18,7 @@ Layout::
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar
 
@@ -25,6 +26,7 @@ from rich.markup import escape as rich_escape
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
+from textual.command import Hit, Hits, Provider
 from textual.containers import Container, Vertical
 from textual.reactive import reactive
 from textual.screen import ModalScreen
@@ -1302,6 +1304,74 @@ class AddSymbolModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+def _cell_symbol(r: RecommendationRow) -> object:
+    return r.symbol
+
+
+def _cell_action(r: RecommendationRow) -> object:
+    return _tier_text(r.tier) if not r.error else "[red]ERR[/red]"
+
+
+def _cell_confidence(r: RecommendationRow) -> object:
+    return f"{r.confidence:.2f}" if not r.error else "—"
+
+
+def _cell_bar(r: RecommendationRow) -> object:
+    return _confidence_bar(r.confidence)
+
+
+def _cell_technical(r: RecommendationRow) -> object:
+    return _fmt_signed(r.technical_score) if not r.error else "—"
+
+
+def _cell_sentiment(r: RecommendationRow) -> object:
+    return _fmt_signed(r.sentiment_score) if not r.error else "—"
+
+
+def _cell_rsi(r: RecommendationRow) -> object:
+    return _fmt_signed(r.rsi)
+
+
+def _cell_macd(r: RecommendationRow) -> object:
+    return _fmt_signed(r.macd)
+
+
+def _cell_bband(r: RecommendationRow) -> object:
+    return _fmt_signed(r.bollinger)
+
+
+def _cell_price(r: RecommendationRow) -> object:
+    return _fmt_price(r.last_price)
+
+
+def _cell_news(r: RecommendationRow) -> object:
+    return str(r.num_news_articles) if not r.error else r.error or ""
+
+
+_COLUMN_DEFS: tuple[tuple[str, Callable[[RecommendationRow], object]], ...] = (
+    ("SYM", _cell_symbol),
+    ("ACTION", _cell_action),
+    ("CONF", _cell_confidence),
+    ("BAR", _cell_bar),
+    ("TECH", _cell_technical),
+    ("SENT", _cell_sentiment),
+    ("RSI", _cell_rsi),
+    ("MACD", _cell_macd),
+    ("BBAND", _cell_bband),
+    ("PRICE", _cell_price),
+    ("NEWS", _cell_news),
+)
+"""Single source of truth for the watchlist DataTable columns.
+
+Both :meth:`DashboardApp.compose` and :meth:`DashboardApp._render_table`
+iterate this list so adding or hiding a column is one entry change.
+Order in this tuple is also the canonical display order — the
+configured-columns list filters by name but preserves this ordering."""
+
+_COLUMN_NAMES: frozenset[str] = frozenset(name for name, _ in _COLUMN_DEFS)
+"""Lookup set for ``Settings.dashboard_columns`` validation."""
+
+
 _HELP_TEXT = (
     "[bold]Esther dashboard — keybindings[/bold]\n\n"
     "[bold cyan]q[/]      quit the dashboard\n"
@@ -1336,6 +1406,65 @@ class HelpOverlay(ModalScreen[None]):
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+
+_PALETTE_COMMANDS: tuple[tuple[str, str, str], ...] = (
+    ("Refresh now", "action_refresh_now", "Force a tick before the next scheduled refresh"),
+    ("Pause / resume auto-refresh", "action_toggle_pause", "Stop or start the tick loop"),
+    ("Add symbol to watchlist", "action_add_symbol", "Open the symbol-add modal (`a`)"),
+    ("Remove selected symbol", "action_remove_selected", "Drop the cursor row's symbol (`x`)"),
+    (
+        "AI brief for selected row",
+        "action_summarize_selected",
+        "Generate / show the per-row LLM brief (`s`)",
+    ),
+    (
+        "Cycle to next top-N opportunity",
+        "action_cycle_opportunity",
+        "Move the cursor to the next OPP (`o`)",
+    ),
+    (
+        "AI brief for selected opportunity",
+        "action_brief_opportunity",
+        "Generate / show the OPP LLM brief (`b`)",
+    ),
+    ("Show help overlay", "action_show_help", "List every keybinding (`?`)"),
+    ("Quit dashboard", "action_quit", "Exit Esther"),
+)
+"""Static palette inventory — each entry is
+``(display_name, action_method, help_text)``. Mirrors the existing
+keybindings so the command palette is a typeable alias for them
+rather than a parallel surface that could drift."""
+
+
+class DashboardCommandProvider(Provider):
+    """Surface every dashboard action through Textual's command palette.
+
+    Opens with ``Ctrl+P``; the search box matches against the display
+    names in :data:`_PALETTE_COMMANDS`. Selecting a hit invokes the
+    same ``action_*`` method that the keybinding would, so the palette
+    stays in lockstep with the keys — no risk of one drifting from
+    the other.
+    """
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        for name, action_name, help_text in _PALETTE_COMMANDS:
+            score = matcher.match(name)
+            if score > 0:
+                # The Textual command palette's callback type is loose
+                # at runtime; the lambda below avoids a bound-method
+                # lookup error on apps that don't define a given action.
+                action = getattr(self.app, action_name, None)
+                if action is None:
+                    continue
+                yield Hit(
+                    score,
+                    matcher.highlight(name),
+                    action,
+                    text=name,
+                    help=help_text,
+                )
 
 
 class DashboardApp(App[None]):
@@ -1383,6 +1512,15 @@ class DashboardApp(App[None]):
         Binding("up,down", "noop", "select", show=False),
     ]
 
+    # Textual's built-in command palette (Ctrl+P) — register our
+    # provider alongside the framework defaults so every dashboard
+    # action is searchable by name without leaving the keyboard. The
+    # ClassVar type matches App.COMMANDS' upstream typing (a union
+    # over plain provider classes and callables that return them).
+    COMMANDS: ClassVar[set[type[Provider] | Callable[[], type[Provider]]]] = App.COMMANDS | {
+        DashboardCommandProvider
+    }
+
     paused: reactive[bool] = reactive(False)
 
     def __init__(
@@ -1392,10 +1530,25 @@ class DashboardApp(App[None]):
         summarizer: Summarizer | None = None,
         opportunity_briefer: LLMOpportunityBriefer | None = None,
         burst_seconds: float = 1.5,
+        columns: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.controller = controller
         self.refresh_seconds = refresh_seconds
+        # Column visibility — defaults to every column in canonical
+        # order. Callers (typically main.py) may pass a subset taken
+        # from Settings.dashboard_columns. Names are pre-validated
+        # by the Settings field validator; we still iterate
+        # _COLUMN_DEFS to preserve display order regardless of input
+        # ordering.
+        if columns is None:
+            active = [name for name, _ in _COLUMN_DEFS]
+        else:
+            requested = set(columns)
+            active = [name for name, _ in _COLUMN_DEFS if name in requested]
+        self._columns: tuple[tuple[str, Callable[[RecommendationRow], object]], ...] = tuple(
+            (name, factory) for name, factory in _COLUMN_DEFS if name in active
+        )
         # Adaptive cadence: when a tick produces new alerts or any row's
         # action flips, schedule a one-shot follow-up at burst_seconds
         # instead of waiting for the next base interval. Cancelled and
@@ -1422,19 +1575,7 @@ class DashboardApp(App[None]):
         with Vertical():
             yield WatchlistHeader(id="watchlist_header")
             table: DataTable[object] = DataTable(zebra_stripes=True, cursor_type="row")
-            table.add_columns(
-                "SYM",
-                "ACTION",
-                "CONF",
-                "BAR",
-                "TECH",
-                "SENT",
-                "RSI",
-                "MACD",
-                "BBAND",
-                "PRICE",
-                "NEWS",
-            )
+            table.add_columns(*(name for name, _ in self._columns))
             yield table
             yield DetailPanel(id="detail")
             yield RichLog(id="alerts", highlight=False, markup=True, wrap=False)
@@ -1835,21 +1976,9 @@ class DashboardApp(App[None]):
         table = self.query_one(DataTable)
         table.clear(columns=False)
         for r in snap.rows:
-            tier_cell = _tier_text(r.tier) if not r.error else "[red]ERR[/red]"
-            bar = _confidence_bar(r.confidence)
-            row_cells: tuple[object, ...] = (
-                r.symbol,
-                tier_cell,
-                f"{r.confidence:.2f}" if not r.error else "—",
-                bar,
-                _fmt_signed(r.technical_score) if not r.error else "—",
-                _fmt_signed(r.sentiment_score) if not r.error else "—",
-                _fmt_signed(r.rsi),
-                _fmt_signed(r.macd),
-                _fmt_signed(r.bollinger),
-                _fmt_price(r.last_price),
-                str(r.num_news_articles) if not r.error else r.error or "",
-            )
+            # Build only the cells configured for this dashboard
+            # instance — hidden columns skip their factory call.
+            row_cells = tuple(factory(r) for _, factory in self._columns)
             table.add_row(*row_cells, key=r.symbol)
 
     def _render_panels(self, snap: DashboardSnapshot) -> None:
