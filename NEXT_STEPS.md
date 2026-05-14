@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-13 (multi-timeframe Phase 1 shipped).*
+*Last touched: 2026-05-13 (pulse evolution shipped).*
 
 ---
 
@@ -45,9 +45,9 @@ src/
 ├── intelligence/      # explain · summary · llm_summary · alerts ·
 │                      # alert_prioritizer · watchlist · history · tier ·
 │                      # rankings · recap · grounding · pulse ·
-│                      # pulse_history · opportunities · signal_profile ·
-│                      # opportunity_history · opportunity_brief ·
-│                      # opportunity_drilldown
+│                      # pulse_history · pulse_evolution · opportunities ·
+│                      # signal_profile · opportunity_history ·
+│                      # opportunity_brief · opportunity_drilldown
 ├── persistence/       # SessionStore (JSON snapshot for cross-restart
 │                      # state: signal_history, opp_history,
 │                      # pulse_history, alert_state, tick counter)
@@ -93,6 +93,19 @@ dashboard or exposed via the CLI.
   `SessionStore` injection into the controller; tests stay
   ephemeral by omitting it. Default path
   `data/session_state.json`, env-overridable.
+
+**Pulse evolution**
+- `PulseEvolution` data (regime + trajectory patterns) attached to
+  every `DashboardSnapshot`. Regime is one of `risk-on` / `risk-off`
+  / `mixed` / `indeterminate`, derived from net bull/bear tilt
+  across the last 6 ticks. Patterns fire from numeric gates: half-
+  window mean comparisons for breadth firming/fading, max-ratio for
+  alert spikes, sum-ratio for reversal clusters.
+- `WatchlistHeader` surfaces `REGIME` and `PATTERNS` lines when the
+  synthesis is meaningful (quiet on `indeterminate` / empty).
+- `RecapContext` carries the regime + patterns into the recap LLM
+  prompt as deterministic facts; existing anti-hallucination rules
+  already cover observational language so no new few-shot needed.
 
 **Multi-timeframe (Phase 1)**
 - **Per-row intraday read** alongside the daily pipeline. Opt-in
@@ -159,18 +172,19 @@ dashboard or exposed via the CLI.
   · `o` cycle OPP · `b` OPP brief · `a` add symbol · `x` remove symbol
 
 **Quality baseline**
-- 565 passing tests, 1 deselected (`slow`/`integration`)
+- 587 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
-- `mypy src` (`--strict`) green across all 48 source files
+- `mypy src` (`--strict`) green across all 49 source files
 - Documented exceptions live in `pyproject.toml`
 
 ---
 
 ## Remaining high-priority roadmap
 
-Three themes for upcoming sessions. (Drilldown, news quality scoring,
-`SessionStore` persistence, and multi-timeframe Phase 1 all shipped
-on 2026-05-13.) Two nice-to-have follow-ups:
+The remaining roadmap is small — most major themes shipped on
+2026-05-13 (drilldown, news quality scoring, `SessionStore`
+persistence, multi-timeframe Phase 1, pulse evolution). Two
+follow-ups still open:
 - **Brief caches** (row + OPP briefs in `DashboardApp`) aren't
   persisted yet — small separate-section hook on the SessionStore.
 - **Multi-timeframe Phase 2**: separate intraday `SignalHistory` /
@@ -180,14 +194,7 @@ on 2026-05-13.) Two nice-to-have follow-ups:
   intraday becomes part of the trader's primary read rather than
   alignment context.
 
-### 1. Smarter market pulse evolution
-The pulse currently classifies one tick. With pulse_history we have
-trajectory data. Natural next steps: pattern detection ("breadth
-firming for 8 ticks"), regime classification (risk-on / risk-off /
-mixed), or an LLM-driven read of the trajectory tied into the recap
-brief. Build on top of pulse_history; doesn't add new state.
-
-### 2. Dashboard refinement
+### 1. Dashboard refinement
 Ongoing polish that doesn't fit a neat feature box: column tunables,
 help-overlay (`?`), better empty-state messages, configurable burst
 window, perhaps a command palette via Textual's built-in. Best done
@@ -236,17 +243,20 @@ when the surrounding code is touched.
 
 Sequenced for maximum compounding return.
 
-**1. Smarter market pulse evolution** *(start here tomorrow)*
-- Builds naturally on the now-persistent pulse_history. Likely an
-  LLM-driven read of the trajectory tied into the recap brief —
-  regime detection (risk-on / risk-off / mixed), pattern callouts
-  ("breadth firming for 8 ticks"), trajectory commentary.
+**1. Dashboard refinement** *(start here tomorrow)*
+- Help overlay (`?`), command palette via Textual built-ins,
+  configurable burst window, empty-state polish, column tunables.
+  Pick up a few small items rather than chasing a single feature.
 
-**2. Dashboard refinement**
-- In parallel with the above. Pick up small items between bigger
-  features rather than as a dedicated session: help overlay (`?`),
-  command palette via Textual built-ins, configurable burst window,
-  empty-state polish.
+**2. Brief-cache persistence**
+- Small follow-up. Extend `SessionStore` with a brief-caches
+  section (or a sibling file); the `DashboardApp` reads at mount,
+  writes on each successful brief generation. Saves Anthropic
+  calls across restarts.
+
+**3. Multi-timeframe Phase 2**
+- Bigger lift; only justify when intraday becomes the trader's
+  primary read. Plan the `schema_version=2` snapshot carefully.
 
 ---
 
@@ -254,41 +264,35 @@ Sequenced for maximum compounding return.
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 565 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 587 passing
 ```
 
-Open this doc and start with **Smarter market pulse evolution**
-(roadmap item #1, recommended order step 1). The pulse currently
-classifies one tick; `PulseHistoryTracker` gives us a rolling
-trajectory; persistence keeps that trajectory across restarts.
-The natural next step is reading that trajectory — pattern
-detection ("breadth firming for 8 ticks"), regime classification
-(risk-on / risk-off / mixed), or an LLM-driven trajectory commentary
-tied into the recap brief. Pure intelligence-layer work; no new
-data fetches.
+Open this doc and start with **Dashboard refinement** (roadmap
+item #1). The major features are all in; the next session is
+polish work — a help overlay (`?`), Textual's built-in command
+palette, configurable burst window, better empty-state messages.
+None of these are individually large, so pick a small bundle that
+adds visible UX wins.
 
 Suggested opening prompt to Claude:
 
-> Implement smarter pulse evolution on top of PulseHistoryTracker.
-> Add pattern detection (e.g. "momentum breadth firming for N
-> ticks"), a regime classifier (risk-on / risk-off / mixed) derived
-> from the trajectory, and an LLM-driven trajectory commentary that
-> the recap brief can call. All inputs are already on the persisted
-> pulse history — no new data layer work. Strict grounding: every
-> phrase derives from a numeric pattern over actual history values;
-> no forecasts.
+> Tackle dashboard refinement. Pick three items from the punch list:
+> a help overlay bound to `?` that lists every keybinding;
+> Textual's built-in command palette wired to controller actions;
+> a friendlier empty-state when the watchlist is cleared. Keep each
+> change small and well-tested; preserve render-skip caching.
 
 ---
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `29b7a05` (push to `origin/main`
+- **Branch:** `main` is clean at `c9f0d66` (push to `origin/main`
   pending — harness blocks direct push to default branch unless
-  the user runs it themselves; four commits queued locally).
-- **Tests:** 565 passing, 1 deselected (`slow`/`integration` mark).
+  the user runs it themselves; two commits queued locally).
+- **Tests:** 587 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
-  across all 48 source files.
+  across all 49 source files.
 - **Dependencies installed in `.venv/`** (Python 3.14): all of
   `pyproject.toml`'s base set, plus `anthropic`, `pyyaml`, `textual`,
   `ruff`, `mypy`, `pytest`. `alembic` and `backtrader` removed.
