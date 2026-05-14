@@ -1918,6 +1918,76 @@ async def test_watchlist_header_omits_intraday_line_when_disabled() -> None:
         assert "INTRADAY" not in text
 
 
+async def test_help_overlay_opens_and_closes() -> None:
+    """`?` pushes the HelpOverlay listing every keybinding; pressing `?`
+    again (or Esc) dismisses it. Keeps the dashboard interactive
+    discoverable without leaving the keyboard."""
+    from src.dashboard.app import DashboardApp, HelpOverlay
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        # No overlay open initially.
+        assert not isinstance(app.screen, HelpOverlay)
+        await pilot.press("question_mark")
+        await pilot.pause(0.05)
+        # Overlay should be on the screen stack now.
+        assert isinstance(app.screen, HelpOverlay)
+        # And it should mention at least the action labels from BINDINGS.
+        text = app.screen.query_one("#help_text").render()  # type: ignore[union-attr]
+        assert "quit" in str(text)
+        assert "AI brief" in str(text) or "brief" in str(text)
+        assert "add a symbol" in str(text)
+        # Esc dismisses.
+        await pilot.press("escape")
+        await pilot.pause(0.05)
+        assert not isinstance(app.screen, HelpOverlay)
+
+
+async def test_watchlist_header_shows_empty_state_when_no_rows() -> None:
+    """An empty watchlist surfaces an actionable hint instead of zero-
+    everywhere stub lines. Tells the trader exactly which key to press."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot
+
+    snap = DashboardSnapshot(tick=1, rows=[])
+    app = DashboardApp(
+        MockDashboardController(watchlist=[]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        assert "Watchlist is empty" in text
+        assert "Press" in text and "a" in text  # action hint
+
+
+async def test_detail_panel_shows_empty_state_when_no_rows() -> None:
+    """DetailPanel mirrors the WatchlistHeader empty-state pattern —
+    distinguishes 'no snapshot yet' from 'snapshot has zero rows' so
+    the trader gets an action hint, not a passive prompt."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot
+
+    snap = DashboardSnapshot(tick=1, rows=[])
+    app = DashboardApp(
+        MockDashboardController(watchlist=[]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        text = detail.render()
+        assert "No symbols on the watchlist" in text
+        assert "?" in text  # mention the help keybinding
+
+
 async def test_watchlist_header_renders_pulse_line_when_rows_present() -> None:
     """The pulse line is always at the top when any healthy rows
     exist. Tier values are stable schema (bullish/bearish/mixed/neutral
@@ -1942,15 +2012,31 @@ async def test_watchlist_header_renders_pulse_line_when_rows_present() -> None:
 
 async def test_watchlist_header_renders_alerts_summary_when_present() -> None:
     """When recent_alerts is non-empty, the header should show an
-    ALERTS line with severity counts."""
+    ALERTS line with severity counts. Needs at least one row so the
+    empty-watchlist short-circuit doesn't swallow the alerts line."""
     from src.dashboard.app import DashboardApp, WatchlistHeader
-    from src.dashboard.state import DashboardSnapshot
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
     from src.intelligence.alerts import Alert
 
     fired = datetime.now(UTC)
+    placeholder_row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.3,
+        combined_score=0.0,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=190.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
     snap = DashboardSnapshot(
         tick=1,
-        rows=[],  # don't care for this test
+        rows=[placeholder_row],
         recent_alerts=(
             Alert(
                 symbol="AAPL",

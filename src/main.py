@@ -215,9 +215,7 @@ def recommend(
     log = get_logger("recommend")
 
     if not settings.is_paper_trading:
-        console.print(
-            "[red]refusing to run: ALPACA_BASE_URL is not a paper-trading URL[/red]"
-        )
+        console.print("[red]refusing to run: ALPACA_BASE_URL is not a paper-trading URL[/red]")
         raise click.exceptions.Exit(1)
 
     watchlist = list(symbols) if symbols else ["AAPL", "MSFT", "NVDA", "SPY"]
@@ -253,7 +251,9 @@ def recommend(
             try:
                 bars = await market.get_bars([sym], TimeFrame.DAY_1, bars_start, end)
                 news = (
-                    [] if no_sentiment else await news_source.fetch([sym], news_start, end, limit=20)
+                    []
+                    if no_sentiment
+                    else await news_source.fetch([sym], news_start, end, limit=20)
                 )
                 df = market.to_dataframe(bars)
                 rec = engine.recommend(sym, df, news=news)
@@ -297,9 +297,7 @@ def recommend(
         )
 
     console.print(table)
-    console.print(
-        "[dim]decision-support output — no orders are submitted.[/dim]"
-    )
+    console.print("[dim]decision-support output — no orders are submitted.[/dim]")
 
 
 @cli.command()
@@ -373,11 +371,7 @@ def summarize(symbol: str, lookback_days: int, news_hours: int, no_sentiment: bo
         df = market.to_dataframe(bars)
         if df.empty:
             raise RuntimeError(f"no bars returned for {sym}")
-        news = (
-            []
-            if no_sentiment
-            else await news_source.fetch([sym], news_start, end, limit=20)
-        )
+        news = [] if no_sentiment else await news_source.fetch([sym], news_start, end, limit=20)
         rec = engine.recommend(sym, df, news=news)
         return rec, list(news)
 
@@ -404,14 +398,10 @@ def summarize(symbol: str, lookback_days: int, news_hours: int, no_sentiment: bo
             headlines=[a.headline for a in news[:5]],
         )
     except anthropic.AuthenticationError:
-        console.print(
-            "[red]Anthropic auth failed — check ANTHROPIC_API_KEY in .env.[/red]"
-        )
+        console.print("[red]Anthropic auth failed — check ANTHROPIC_API_KEY in .env.[/red]")
         raise click.exceptions.Exit(2) from None
     except anthropic.RateLimitError:
-        console.print(
-            "[yellow]Anthropic rate-limited — try again in a minute.[/yellow]"
-        )
+        console.print("[yellow]Anthropic rate-limited — try again in a minute.[/yellow]")
         raise click.exceptions.Exit(4) from None
     except anthropic.APIStatusError as e:
         console.print(f"[red]Anthropic API error ({e.status_code}): {e.message}[/red]")
@@ -424,9 +414,7 @@ def summarize(symbol: str, lookback_days: int, news_hours: int, no_sentiment: bo
             border_style="cyan",
         )
     )
-    console.print(
-        "[dim]decision support — research only, not execution advice.[/dim]"
-    )
+    console.print("[dim]decision support — research only, not execution advice.[/dim]")
 
 
 @cli.command()
@@ -522,8 +510,7 @@ def recap(
                 news = await news_source.fetch([sym], news_start, end, limit=20)
                 rec = engine.recommend(sym, df, news=news, now=end)
                 top_headlines = tuple(
-                    a.headline
-                    for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
+                    a.headline for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
                 )
                 rows.append(
                     _row_from_recommendation(
@@ -570,9 +557,7 @@ def recap(
             border_style="cyan",
         )
     )
-    console.print(
-        "[dim]decision support — research only, not execution advice.[/dim]"
-    )
+    console.print("[dim]decision support — research only, not execution advice.[/dim]")
 
 
 def _render_preflight_report(report: object) -> None:
@@ -672,9 +657,17 @@ def doctor(no_online: bool, init_env: bool, force: bool) -> None:
 )
 @click.option(
     "--refresh-seconds",
-    default=5.0,
-    show_default=True,
-    help="Seconds between dashboard refreshes.",
+    default=None,
+    type=float,
+    help="Seconds between dashboard refreshes. Falls back to "
+    "Settings.dashboard_refresh_seconds (5.0).",
+)
+@click.option(
+    "--burst-seconds",
+    default=None,
+    type=float,
+    help="Seconds for the adaptive burst follow-up after flips / alerts. "
+    "Falls back to Settings.dashboard_burst_seconds (1.5).",
 )
 @click.option(
     "--lookback-days",
@@ -705,7 +698,8 @@ def doctor(no_online: bool, init_env: bool, force: bool) -> None:
 )
 def dashboard(
     symbols: tuple[str, ...],
-    refresh_seconds: float,
+    refresh_seconds: float | None,
+    burst_seconds: float | None,
     lookback_days: int,
     news_hours: int,
     mock: bool,
@@ -736,6 +730,15 @@ def dashboard(
 
     settings = get_settings()
     watchlist = list(symbols) if symbols else ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
+
+    # CLI flags override; otherwise pull from Settings so env-config
+    # is the single tuning source for the cadence pair.
+    effective_refresh_seconds = (
+        refresh_seconds if refresh_seconds is not None else settings.dashboard_refresh_seconds
+    )
+    effective_burst_seconds = (
+        burst_seconds if burst_seconds is not None else settings.dashboard_burst_seconds
+    )
 
     # Load user-defined alert rules + prioritizer knobs from
     # config/alerts.yaml if present. Missing file = both default.
@@ -839,7 +842,8 @@ def dashboard(
 
     DashboardApp(
         controller,
-        refresh_seconds=refresh_seconds,
+        refresh_seconds=effective_refresh_seconds,
+        burst_seconds=effective_burst_seconds,
         summarizer=summarizer,
         opportunity_briefer=opportunity_briefer,
     ).run()

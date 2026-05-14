@@ -105,6 +105,13 @@ class Settings(BaseSettings):
     intraday_timeframe: TimeFrame = TimeFrame.MIN_15
     intraday_lookback_days: int = 5
 
+    # ---- Dashboard cadence ----
+    # Base refresh interval + adaptive-burst follow-up. Burst fires
+    # one extra tick at ``dashboard_burst_seconds`` when a snapshot
+    # produces fresh alerts or any healthy row's action flips.
+    dashboard_refresh_seconds: float = 5.0
+    dashboard_burst_seconds: float = 1.5
+
     # ---- AI summaries (Anthropic) ----
     anthropic_api_key: SecretStr | None = None
     llm_model: str = "claude-opus-4-7"

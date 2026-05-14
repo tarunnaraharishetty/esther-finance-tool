@@ -175,6 +175,15 @@ class WatchlistHeader(Static):
         snap = self.snapshot
         if snap is None:
             return "[dim]watchlist intel: loading…[/dim]"
+        if not snap.rows:
+            # Friendly empty-state — every section below assumes at
+            # least one row, and zero-row stubs in the action mix /
+            # rankings would just be visual noise.
+            return (
+                "[bold yellow]Watchlist is empty.[/]  "
+                "[dim]Press [bold]a[/bold] to add a symbol  ·  "
+                "run [bold]esther backfill[/bold] first to warm up cached bars.[/dim]"
+            )
 
         rankings = compute_rankings(snap, n=3)
         pulse = snap.pulse if snap.pulse is not None else compute_pulse(snap)
@@ -963,8 +972,17 @@ class DetailPanel(Static):
 
     def render(self) -> str:
         snap = self.snapshot
-        if snap is None or not snap.rows:
+        if snap is None:
             return "[dim]select a row for details[/dim]"
+        if not snap.rows:
+            # Distinguish "no snapshot yet" from "snapshot has zero
+            # rows" — the latter is the trader's empty-watchlist state
+            # and warrants an actionable hint, not a passive prompt.
+            return (
+                "[bold yellow]No symbols on the watchlist.[/]\n"
+                "[dim]Press [bold]a[/bold] to add one  ·  "
+                "[bold]?[/bold] for the full keybinding list.[/dim]"
+            )
         idx = max(0, min(self.row_index, len(snap.rows) - 1))
         r = snap.rows[idx]
 
@@ -1284,6 +1302,42 @@ class AddSymbolModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+_HELP_TEXT = (
+    "[bold]Esther dashboard — keybindings[/bold]\n\n"
+    "[bold cyan]q[/]      quit the dashboard\n"
+    "[bold cyan]r[/]      refresh now (force a tick)\n"
+    "[bold cyan]p[/]      pause / resume auto-refresh\n"
+    "[bold cyan]s[/]      AI brief for the selected row\n"
+    "[bold cyan]o[/]      cycle through top-N opportunities\n"
+    "[bold cyan]b[/]      AI brief for the selected opportunity\n"
+    "[bold cyan]a[/]      add a symbol to the watchlist\n"
+    "[bold cyan]x[/]      remove the selected symbol\n"
+    "[bold cyan]?[/]      show / close this help overlay\n"
+    "[bold cyan]↑ ↓[/]    select rows in the watchlist\n\n"
+    "[dim]Esc or ? to close.[/dim]"
+)
+
+
+class HelpOverlay(ModalScreen[None]):
+    """Modal listing every dashboard keybinding.
+
+    Bound to ``?`` and ``Esc`` for symmetric open/close. Stateless —
+    the text is constant and the modal closes via ``dismiss(None)``.
+    """
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape", "close", "close", show=False),
+        Binding("question_mark", "close", "close", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Container(id="help_overlay"):
+            yield Static(_HELP_TEXT, id="help_text")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class DashboardApp(App[None]):
     """Esther terminal dashboard — observational, no order submission."""
 
@@ -1305,6 +1359,15 @@ class DashboardApp(App[None]):
         padding: 1 2;
     }
     AddSymbolModal Static { margin-bottom: 1; }
+
+    HelpOverlay { align: center middle; }
+    HelpOverlay #help_overlay {
+        width: 56;
+        height: auto;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
     """
 
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -1316,6 +1379,7 @@ class DashboardApp(App[None]):
         Binding("b", "brief_opportunity", "OPP brief"),
         Binding("a", "add_symbol", "add symbol"),
         Binding("x", "remove_selected", "remove symbol"),
+        Binding("question_mark", "show_help", "help"),
         Binding("up,down", "noop", "select", show=False),
     ]
 
@@ -1416,6 +1480,10 @@ class DashboardApp(App[None]):
 
     def action_noop(self) -> None:  # bound for footer hint only
         pass
+
+    def action_show_help(self) -> None:
+        """`?`: push the help overlay listing every keybinding."""
+        self.push_screen(HelpOverlay())
 
     def action_add_symbol(self) -> None:
         """`a`: open the AddSymbolModal and append the entered symbol.
