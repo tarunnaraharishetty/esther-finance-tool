@@ -54,6 +54,9 @@ coverage.xml
 *~
 .DS_Store
 
+# Claude Code per-user settings (do not commit personal allow rules)
+.claude/settings.local.json
+
 # Secrets / env
 .env
 .env.local
