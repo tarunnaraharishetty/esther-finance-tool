@@ -19,7 +19,7 @@ Layout::
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, ClassVar
 
 from rich.markup import escape as rich_escape
@@ -56,6 +56,7 @@ from src.intelligence.watchlist import (
     action_breakdown,
     diff_snapshots,
 )
+from src.persistence.session_store import SessionStoreStatus
 from src.strategy.base import RecommendationTier, SignalAction
 from src.strategy.multi_timeframe import IntradayRead, is_divergent
 
@@ -871,6 +872,73 @@ def _timeframe_reversal_state(
     return ("none", "dim")
 
 
+_STORE_HEALTH_STYLES: dict[str, str] = {
+    "ok": "bold green",
+    "stale": "bold yellow",
+    "degraded": "bold red",
+}
+
+
+def _format_store_status_chip(
+    status: SessionStoreStatus | None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Render the persistence-health chip for the StatusLine.
+
+    Returns ``""`` when ``status is None`` (no SessionStore wired)
+    so daily-only / ephemeral sessions stay tight. Otherwise emits
+    one of three colored variants:
+
+      STORE ok · 19:42:11 · 184 KB
+      STORE stale · last write 2m ago
+      STORE degraded · write failed
+    """
+    if status is None:
+        return ""
+    style = _STORE_HEALTH_STYLES.get(status.health, "white")
+    chunks: list[str] = [f"[{style}]STORE {status.health}[/]"]
+    moment = now if now is not None else datetime.now(UTC)
+    if status.health == "ok" and status.last_success_at is not None:
+        clock = status.last_success_at.strftime("%H:%M:%S")
+        chunks.append(f"[dim]{clock}[/dim]")
+        if status.bytes is not None:
+            chunks.append(f"[dim]{_format_bytes(status.bytes)}[/dim]")
+    elif status.health == "stale" and status.last_success_at is not None:
+        age = _format_age(moment - status.last_success_at)
+        chunks.append(f"[dim]last write {age}[/dim]")
+    elif status.health == "degraded":
+        # If a real error was recorded, the trader benefits from seeing
+        # the failure tag; otherwise fall back to the generic phrase.
+        if status.last_error is not None:
+            chunks.append("[dim]write failed[/dim]")
+        else:
+            chunks.append("[dim]no write yet[/dim]")
+    return " · ".join(chunks)
+
+
+def _format_bytes(n: int) -> str:
+    """Human-readable byte size for the STORE chip — kept short so
+    the line stays compact. ``1234`` → ``1.2 KB``."""
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
+
+
+def _format_age(delta: timedelta) -> str:
+    """Compact age string for the STORE stale chip — coarsest unit
+    that fits the gap. ``2m ago`` reads better than ``137s ago`` on a
+    one-line status."""
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    return f"{seconds // 3600}h ago"
+
+
 def _format_intraday_status_chip(snap: DashboardSnapshot) -> str:
     """Compact intraday-state chip for the StatusLine.
 
@@ -1656,6 +1724,13 @@ class StatusLine(Static):
         intraday_chip = _format_intraday_status_chip(snap)
         if intraday_chip:
             chunks.append(intraday_chip)
+
+        # Polish item #3: SessionStore health chip. Empty when no
+        # store is wired (tests, ephemeral sessions) so the line
+        # stays tight.
+        store_chip = _format_store_status_chip(snap.session_store_status)
+        if store_chip:
+            chunks.append(store_chip)
 
         # Tick + clock.
         clock = snap.timestamp.strftime("%H:%M:%S")

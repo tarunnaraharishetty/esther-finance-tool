@@ -98,6 +98,57 @@ def test_v1_snapshot_migrates_to_v2_with_empty_intraday(tmp_path: Path) -> None:
     assert loaded.intraday_signal_episodes == {}
 
 
+def test_status_starts_degraded_when_no_writes_yet(tmp_path: Path) -> None:
+    """A fresh store with no save attempts reports ``degraded`` —
+    the persistence loop hasn't proven itself yet."""
+    store = SessionStore(tmp_path / "session.json")
+    status = store.status()
+    assert status.health == "degraded"
+    assert status.last_success_at is None
+    assert status.bytes is None
+
+
+def test_status_ok_after_successful_save(tmp_path: Path) -> None:
+    """After save() lands cleanly the next status() reports ``ok``
+    with a timestamp and a positive file size."""
+    store = SessionStore(tmp_path / "session.json")
+    store.save(SessionSnapshot(saved_at=datetime.now(UTC)))
+    status = store.status()
+    assert status.health == "ok"
+    assert status.last_success_at is not None
+    assert status.bytes is not None and status.bytes > 0
+    assert status.last_error is None
+
+
+def test_status_stale_when_success_older_than_window(tmp_path: Path) -> None:
+    """When the last successful write is older than ``stale_after``
+    the health string flips to ``stale``. ``now`` is a parameter so
+    tests don't need to clock-manipulate."""
+    store = SessionStore(tmp_path / "session.json")
+    store.save(SessionSnapshot(saved_at=datetime.now(UTC)))
+    assert store._last_success_at is not None
+    far_future = store._last_success_at + timedelta(minutes=5)
+    status = store.status(now=far_future, stale_after=timedelta(seconds=30))
+    assert status.health == "stale"
+
+
+def test_status_degraded_after_write_failure(tmp_path: Path) -> None:
+    """A failed save() marks the store degraded. The next successful
+    save() clears the degraded state — recovery is not sticky."""
+    store = SessionStore(tmp_path / "missing_dir_that_cannot_be_made")
+    # Point the store at a path with an illegal name on Windows /
+    # any platform that can't write under a NUL-name. Trigger
+    # _record_failure directly since constructing a guaranteed-fail
+    # path is fiddly across OSes.
+    store._record_failure("simulated error")
+    assert store.status().health == "degraded"
+    # Now record a success and confirm the state clears.
+    store._record_success(size=42)
+    fresh = store.status()
+    assert fresh.health == "ok"
+    assert fresh.bytes == 42
+
+
 def test_save_is_atomic_via_tmp_then_rename(tmp_path: Path) -> None:
     """The tmp file should never be left behind after a successful save."""
     target = tmp_path / "session.json"

@@ -15,6 +15,7 @@ from src.persistence.session_store import (
     PulseRecord,
     SessionSnapshot,
     SessionStore,
+    SessionStoreStatus,
 )
 
-__all__ = ["PulseRecord", "SessionSnapshot", "SessionStore"]
+__all__ = ["PulseRecord", "SessionSnapshot", "SessionStore", "SessionStoreStatus"]

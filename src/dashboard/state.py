@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from src.intelligence.pulse import MarketPulse
     from src.intelligence.pulse_evolution import PulseEvolution
     from src.intelligence.pulse_history import PulseHistory
+    from src.persistence.session_store import SessionStoreStatus
     from src.strategy.multi_timeframe import IntradayRead
 
 
@@ -118,6 +119,11 @@ class DashboardSnapshot:
     intraday_pulse: MarketPulse | None = None
     intraday_pulse_history: PulseHistory | None = None
     intraday_pulse_evolution: PulseEvolution | None = None
+    # SessionStore health snapshot (polish item #3). Populated by
+    # the controller after each tick's persist when a session store
+    # is wired. ``None`` when persistence is disabled — the status
+    # chip then renders empty.
+    session_store_status: SessionStoreStatus | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 

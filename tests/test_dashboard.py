@@ -2018,6 +2018,140 @@ async def test_view_toggle_renders_intraday_chip_in_header() -> None:
         assert "intraday" in text_intraday
 
 
+async def test_status_line_renders_store_chip_ok() -> None:
+    """Polish item #3: the StatusLine surfaces a STORE chip when
+    snap.session_store_status is present. ok-health status shows
+    timestamp + file size."""
+    from pathlib import Path
+
+    from src.dashboard.app import DashboardApp, StatusLine
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.persistence.session_store import SessionStoreStatus
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.3,
+        combined_score=0.0,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=190.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    status = SessionStoreStatus(
+        health="ok",
+        last_success_at=fired,
+        last_error_at=None,
+        last_error=None,
+        bytes=2048,
+        path=Path("/tmp/session.json"),
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row], session_store_status=status)
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        status_line = app.query_one(StatusLine)
+        status_line.snapshot = snap
+        text = status_line.render()
+        assert "STORE ok" in text
+        # 2048 B = 2.0 KB
+        assert "2.0 KB" in text
+
+
+async def test_status_line_renders_store_chip_degraded_on_error() -> None:
+    """A degraded status with a recorded error message renders the
+    ``write failed`` chip variant."""
+    from pathlib import Path
+
+    from src.dashboard.app import DashboardApp, StatusLine
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.persistence.session_store import SessionStoreStatus
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.3,
+        combined_score=0.0,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=190.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    snap = DashboardSnapshot(
+        tick=1,
+        rows=[row],
+        session_store_status=SessionStoreStatus(
+            health="degraded",
+            last_success_at=None,
+            last_error_at=fired,
+            last_error="disk full",
+            bytes=None,
+            path=Path("/tmp/session.json"),
+        ),
+    )
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        status_line = app.query_one(StatusLine)
+        status_line.snapshot = snap
+        text = status_line.render()
+        assert "STORE degraded" in text
+        assert "write failed" in text
+
+
+async def test_status_line_omits_store_chip_when_no_session_store() -> None:
+    """No SessionStore wired → snap.session_store_status is None →
+    chip is empty. The line stays tight on ephemeral sessions."""
+    from src.dashboard.app import DashboardApp, StatusLine
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.3,
+        combined_score=0.0,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=190.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        status_line = app.query_one(StatusLine)
+        status_line.snapshot = snap
+        text = status_line.render()
+        assert "STORE" not in text
+
+
 async def test_status_line_renders_intraday_chip_when_intraday_present() -> None:
     """Phase 2c follow-up: the StatusLine surfaces a compact intraday
     state chip when at least one row has an intraday read."""

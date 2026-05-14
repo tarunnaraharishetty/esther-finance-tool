@@ -21,7 +21,8 @@ discarded on next load.
 from __future__ import annotations
 
 import contextlib
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -144,6 +145,39 @@ class SessionSnapshot(BaseModel):
     intraday_opp_brief_cache: dict[str, str] = Field(default_factory=dict)
 
 
+_DEFAULT_STALE_AFTER = timedelta(seconds=30)
+"""Default freshness window for ``SessionStoreStatus.health``. The
+dashboard ticks every 5s by default; six missed ticks (30s) means
+the persist loop is genuinely behind, not just between cadences."""
+
+
+@dataclass(frozen=True)
+class SessionStoreStatus:
+    """Read-only health view of a :class:`SessionStore`.
+
+    ``health`` is one of three deterministic labels:
+
+    * ``"ok"`` — the most recent attempt succeeded and the success
+      is fresh (within ``stale_after`` of ``now``).
+    * ``"stale"`` — the most recent successful write is older than
+      ``stale_after``. No active error; the persist loop is just
+      behind.
+    * ``"degraded"`` — the most recent attempt was an error, OR no
+      successful write has ever landed.
+
+    All timestamps are timezone-aware UTC. ``bytes`` reflects the
+    file size after the last successful save; it stays ``None``
+    until the first success.
+    """
+
+    health: str
+    last_success_at: datetime | None
+    last_error_at: datetime | None
+    last_error: str | None
+    bytes: int | None
+    path: Path
+
+
 class SessionStore:
     """JSON-file persistence for :class:`SessionSnapshot`.
 
@@ -151,10 +185,19 @@ class SessionStore:
     :meth:`save` once per tick. Both operations are best-effort —
     failures are logged but never raised, because losing a session
     snapshot is not a reason to crash the trader's dashboard.
+
+    The store tracks the timestamp + size of the most recent
+    successful save and the most recent error. :meth:`status`
+    bundles those into a :class:`SessionStoreStatus` that the
+    dashboard surfaces in the status line.
     """
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._last_success_at: datetime | None = None
+        self._last_success_bytes: int | None = None
+        self._last_error_at: datetime | None = None
+        self._last_error: str | None = None
 
     def load(self) -> SessionSnapshot | None:
         """Read the snapshot if present, valid, and schema-compatible.
@@ -205,7 +248,9 @@ class SessionStore:
 
         Best-effort: parent-dir creation, write, rename, all swallow
         OSError into a logged warning. The dashboard keeps running on
-        a failed persist; the next tick will retry.
+        a failed persist; the next tick will retry. Success and
+        failure both update internal status fields so the dashboard
+        can surface persistence health.
         """
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,6 +260,7 @@ class SessionStore:
                 path=str(self.path.parent),
                 error=str(e),
             )
+            self._record_failure(f"mkdir failed: {e}")
             return
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         try:
@@ -229,6 +275,66 @@ class SessionStore:
             # Best-effort cleanup of the orphaned tmp file.
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
+            self._record_failure(str(e))
+            return
+        # Record size from the just-written canonical file. One stat
+        # call is cheap and avoids re-reading the JSON to count bytes.
+        size: int | None = None
+        with contextlib.suppress(OSError):
+            size = self.path.stat().st_size
+        self._record_success(size)
+
+    def status(
+        self,
+        *,
+        now: datetime | None = None,
+        stale_after: timedelta = _DEFAULT_STALE_AFTER,
+    ) -> SessionStoreStatus:
+        """Return the current persistence-health snapshot.
+
+        Pure read — no filesystem access. Health derivation is
+        deterministic: error-after-success → degraded; success older
+        than ``stale_after`` → stale; otherwise → ok. No write yet
+        AND no error logged → degraded (the persist loop hasn't
+        proven itself).
+        """
+        moment = now if now is not None else datetime.now(UTC)
+        health = self._derive_health(moment, stale_after)
+        return SessionStoreStatus(
+            health=health,
+            last_success_at=self._last_success_at,
+            last_error_at=self._last_error_at,
+            last_error=self._last_error,
+            bytes=self._last_success_bytes,
+            path=self.path,
+        )
+
+    def _record_success(self, size: int | None) -> None:
+        self._last_success_at = datetime.now(UTC)
+        self._last_success_bytes = size
+        # Clear the prior error once we've recovered — the chip
+        # shouldn't say "degraded" forever after a transient blip.
+        self._last_error = None
+        self._last_error_at = None
+
+    def _record_failure(self, message: str) -> None:
+        self._last_error_at = datetime.now(UTC)
+        self._last_error = message
+
+    def _derive_health(self, now: datetime, stale_after: timedelta) -> str:
+        # Active error (more recent than last success, or no success ever).
+        if self._last_error_at is not None and (
+            self._last_success_at is None or self._last_error_at > self._last_success_at
+        ):
+            return "degraded"
+        # No success yet, and no error either — opt-in feature not in
+        # use. The caller skips rendering rather than calling this a
+        # bona fide problem.
+        if self._last_success_at is None:
+            return "degraded"
+        if now - self._last_success_at > stale_after:
+            return "stale"
+        return "ok"
 
 
 __all__ = [
@@ -236,4 +342,5 @@ __all__ = [
     "PulseRecord",
     "SessionSnapshot",
     "SessionStore",
+    "SessionStoreStatus",
 ]

@@ -45,7 +45,11 @@ from src.intelligence.pulse import compute_pulse, compute_pulse_intraday
 from src.intelligence.pulse_evolution import evolve as evolve_pulse
 from src.intelligence.pulse_history import PulseHistoryTracker
 from src.intelligence.tier import promote_to_tier
-from src.persistence.session_store import SessionSnapshot, SessionStore
+from src.persistence.session_store import (
+    SessionSnapshot,
+    SessionStore,
+    SessionStoreStatus,
+)
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import SignalAction
 from src.strategy.multi_timeframe import IntradayRead
@@ -313,14 +317,17 @@ class BaseController(ABC):
             f"session restored from {self.session_store.path.name} (tick {snapshot.tick})"
         )
 
-    def _persist_if_enabled(self) -> None:
+    def _persist_if_enabled(self) -> SessionStoreStatus | None:
         """Write the current tracker state to the session store.
 
-        No-op when no store is wired up. Called at the end of each
-        ``fetch_snapshot`` in the concrete controllers.
+        Returns the post-save :class:`SessionStoreStatus` for the
+        snapshot's status footer; ``None`` when no store is wired
+        up (and the dashboard skips rendering the chip). Called at
+        the end of each ``fetch_snapshot`` in the concrete
+        controllers.
         """
         if self.session_store is None:
-            return
+            return None
         alert_log, alert_last_fired = self.alert_state.to_snapshot()
         snapshot = SessionSnapshot(
             saved_at=datetime.now(UTC),
@@ -338,6 +345,7 @@ class BaseController(ABC):
             intraday_opp_brief_cache=dict(self.intraday_opp_brief_cache),
         )
         self.session_store.save(snapshot)
+        return self.session_store.status()
 
     _BRIEF_KEY_DELIM = "|"
     """Joins the in-memory tuple key (``(symbol, action)`` /
@@ -472,7 +480,7 @@ class DashboardController(BaseController):
         snap.alerts = self.alert_prioritizer.prioritize(fresh_alerts, self.alert_state, now=now)
         self.alert_state.record(snap.alerts)
         snap.recent_alerts = self.alert_state.recent(20)
-        self._persist_if_enabled()
+        snap.session_store_status = self._persist_if_enabled()
         return snap
 
     async def _row_for(self, symbol: str, now: datetime) -> RecommendationRow:
@@ -636,7 +644,7 @@ class MockDashboardController(BaseController):
         snap.alerts = self.alert_prioritizer.prioritize(fresh_alerts, self.alert_state, now=now)
         self.alert_state.record(snap.alerts)
         snap.recent_alerts = self.alert_state.recent(20)
-        self._persist_if_enabled()
+        snap.session_store_status = self._persist_if_enabled()
         return snap
 
     def _mock_row(self, symbol: str, now: datetime) -> RecommendationRow:
