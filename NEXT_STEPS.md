@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (intraday alerts auto-wired into main.py).*
+*Last touched: 2026-05-14 (MT2 workflow polish: active-view actions + StatusLine chip + DetailPanel swap + alignment labels).*
 
 ---
 
@@ -157,6 +157,24 @@ dashboard or exposed via the CLI.
     `_DEFAULT_COOLDOWNS`. **Auto-registered** in `main.py`'s
     `dashboard` command when `settings.intraday_enabled` is on —
     works whether or not the trader has a custom `alerts.yaml`.
+- **Phase 2c workflow polish (active-view UX)**
+  - `o` (cycle OPP) and `b` (OPP brief) target the active view's
+    ranker — daily view operates on daily OPPs, intraday view
+    operates on intraday OPPs. No cross-view leakage.
+  - New `_intraday_opp_brief_cache` keeps daily and intraday
+    briefs distinct. Persisted via additive
+    `SessionSnapshot.intraday_opp_brief_cache`.
+  - `StatusLine` surfaces a compact intraday chip — `INTRA HOT`
+    / `INTRA REV` / `TF CONFLICT` / `DAILY+INTRA ALIGN` /
+    `INTRA ON` — derived strictly from observable state.
+  - `DetailPanel` flips block order in intraday view (Intraday
+    Intelligence first, Daily second) and sources the
+    Opportunity-Intelligence drilldown from the intraday ranker.
+  - `TimeframeStance.alignment_label` field with eight
+    trader-facing strings (`aligned bullish`, `momentum conflict`,
+    `intraday reversal`, `short-term pullback`, `strengthening
+    continuation`, etc.) — deterministic mapping from
+    ``(category, phrases)``.
 
 **Strategy**
 - RSI / MACD / Bollinger indicators
@@ -218,7 +236,7 @@ dashboard or exposed via the CLI.
   drift from the keys.
 
 **Quality baseline**
-- 643 passing tests, 1 deselected (`slow`/`integration`)
+- 652 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
 - `mypy src` (`--strict`) green across all 51 source files
 - Documented exceptions live in `pyproject.toml`
@@ -295,15 +313,10 @@ The MT2 roadmap is now fully shipped (phases 2a, 2b, 2c). What
 remains is opportunistic polish + small follow-ups around the
 edges. None are critical-path.
 
-**Open MT2 follow-ups (small, opportunistic):**
-- `action_cycle_opportunity` + `action_brief_opportunity` could
-  target the active view's ranking when `view_timeframe ==
-  "intraday"` (currently both still use the daily ranker).
-- `StatusLine` could flip to the intraday pulse's `sentiment` chip
-  when in intraday view (currently always daily).
-- DetailPanel "Opportunity Intelligence" drilldown could swap
-  between daily and intraday `RankedOpportunity` sources (currently
-  always daily).
+**Open MT2 follow-ups:** none — the workflow polish is fully
+shipped. The trader can flip views with `t` and every interaction
+(`o`, `b`, OPP drilldown, StatusLine chip, DetailPanel ordering,
+alignment label) routes through the active timeframe.
 
 **Polish backlog (opportunistic)**
 - In-app column-toggle modal (bound to `c`), surfacing the same
@@ -318,7 +331,7 @@ edges. None are critical-path.
 
 ```
 git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 643 passing
+.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 652 passing
 ```
 
 MT2 is fully shipped (phases 2a / 2b / 2c). Remaining work is
@@ -340,10 +353,10 @@ Suggested opening prompt for whichever follow-up:
 
 ## Repo state at handoff
 
-- **Branch:** `main` is clean at `2dca97e` (push to `origin/main`
+- **Branch:** `main` is clean at `a22be29` (push to `origin/main`
   pending — harness blocks direct push to default branch unless
   the user runs it themselves; one commit queued locally).
-- **Tests:** 643 passing, 1 deselected (`slow`/`integration` mark).
+- **Tests:** 652 passing, 1 deselected (`slow`/`integration` mark).
   Run with `pytest`.
 - **Lint/type:** `ruff check .` green; `mypy src --strict` green
   across all 49 source files.
