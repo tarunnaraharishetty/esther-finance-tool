@@ -44,6 +44,7 @@ from src.intelligence.tier import promote_to_tier
 from src.persistence.session_store import SessionSnapshot, SessionStore
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import SignalAction
+from src.strategy.multi_timeframe import IntradayRead
 from src.strategy.recommendation import RecommendationEngine
 
 # ---------------------------------------------------------------------------
@@ -329,14 +330,43 @@ class DashboardController(BaseController):
             top_headlines = tuple(
                 a.headline for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
             )
+            intraday_read = await self._fetch_intraday_read(symbol, now)
             return _row_from_recommendation(
                 rec,
                 last_price=float(df["close"].iloc[-1]),
                 headlines=top_headlines,
+                intraday=intraday_read,
             )
         except Exception as e:
             self.events.error(f"{symbol}: {e}")
             return _empty_row(symbol, now, error=str(e))
+
+    async def _fetch_intraday_read(self, symbol: str, now: datetime) -> IntradayRead | None:
+        """Fetch intraday bars and compute the secondary read.
+
+        No-op (returns ``None``) when ``settings.intraday_enabled`` is
+        off — the default. On a failure (no bars, transient API
+        error), returns ``None`` and logs an event; the daily row
+        still surfaces normally without the chip.
+        """
+        if not self.settings.intraday_enabled:
+            return None
+        intraday_tf = self.settings.intraday_timeframe
+        intraday_start = now - timedelta(days=self.settings.intraday_lookback_days)
+        try:
+            bars = await self.market.get_bars([symbol], intraday_tf, intraday_start, now)
+            df = self.market.to_dataframe(bars)
+            if df.empty:
+                df = bar_cache.merge_with_cache(symbol, intraday_tf, df)
+            if df.empty:
+                return None
+            for c in ("open", "high", "low", "close"):
+                df[c] = df[c].astype(float)
+            df["volume"] = df["volume"].astype(int)
+            return self.engine.recommend_intraday(symbol, df, timeframe=intraday_tf)
+        except Exception as e:
+            self.events.warn(f"{symbol}: intraday fetch failed: {e}")
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +527,10 @@ class MockDashboardController(BaseController):
 
 
 def _row_from_recommendation(
-    rec: object, last_price: float, headlines: tuple[str, ...] = ()
+    rec: object,
+    last_price: float,
+    headlines: tuple[str, ...] = (),
+    intraday: IntradayRead | None = None,
 ) -> RecommendationRow:
     """Convert a TradingRecommendation to a dashboard row."""
     indicators = getattr(rec, "indicator_scores", {}) or {}
@@ -520,6 +553,7 @@ def _row_from_recommendation(
         signal_quality=str(rec.signal_quality),  # type: ignore[attr-defined]
         stability=str(rec.stability),  # type: ignore[attr-defined]
         quality_reasons=tuple(rec.quality_reasons),  # type: ignore[attr-defined]
+        intraday=intraday,
     )
 
 

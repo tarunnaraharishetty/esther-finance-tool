@@ -1649,6 +1649,180 @@ async def test_detail_panel_quality_chips_render_for_high_conviction_row() -> No
         assert "stable BUY persistence" in text
 
 
+async def test_detail_panel_renders_intraday_line_when_intraday_present() -> None:
+    """A row carrying an IntradayRead surfaces an 'Intraday' section
+    in the DetailPanel with timeframe label, action chip, and the
+    'diverging' alignment word for daily-vs-intraday conflict."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.data.models import TimeFrame
+    from src.strategy.base import RecommendationTier
+    from src.strategy.multi_timeframe import IntradayRead
+
+    fired = datetime.now(UTC)
+    intraday = IntradayRead(
+        timeframe=TimeFrame.MIN_15,
+        action=SignalAction.SELL,
+        confidence=0.42,
+        combined_score=-0.42,
+        technical_score=-0.42,
+    )
+    row = RecommendationRow(
+        symbol="NVDA",
+        action=SignalAction.BUY,
+        confidence=0.7,
+        combined_score=0.6,
+        technical_score=0.5,
+        sentiment_score=0.5,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
+        last_price=520.0,
+        num_news_articles=2,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.BUY,
+        intraday=intraday,
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        detail.row_index = 0
+        text = detail.render()
+        assert "Intraday" in text
+        assert "15Min" in text  # timeframe label from the chip
+        assert "diverging" in text
+
+
+async def test_detail_panel_omits_intraday_when_absent() -> None:
+    """No intraday read on the row = no Intraday section. Default
+    state when intraday_enabled=False."""
+    from src.dashboard.app import DashboardApp, DetailPanel
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+
+    fired = datetime.now(UTC)
+    row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.HOLD,
+        confidence=0.2,
+        combined_score=0.1,
+        technical_score=0.0,
+        sentiment_score=0.0,
+        rsi=0.0,
+        macd=0.0,
+        bollinger=0.0,
+        last_price=150.0,
+        num_news_articles=0,
+        reasoning="",
+        timestamp=fired,
+    )
+    snap = DashboardSnapshot(tick=1, rows=[row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        detail = app.query_one(DetailPanel)
+        detail.snapshot = snap
+        detail.row_index = 0
+        text = detail.render()
+        assert "Intraday" not in text
+
+
+async def test_watchlist_header_renders_intraday_divergence_count() -> None:
+    """When at least one row carries an intraday read, the header
+    surfaces an INTRADAY line with the diverging / aligned counts."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.data.models import TimeFrame
+    from src.strategy.base import RecommendationTier
+    from src.strategy.multi_timeframe import IntradayRead
+
+    fired = datetime.now(UTC)
+    aligned_row = RecommendationRow(
+        symbol="AAPL",
+        action=SignalAction.BUY,
+        confidence=0.6,
+        combined_score=0.5,
+        technical_score=0.5,
+        sentiment_score=0.3,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
+        last_price=190.0,
+        num_news_articles=1,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.BUY,
+        intraday=IntradayRead(
+            timeframe=TimeFrame.MIN_15,
+            action=SignalAction.BUY,
+            confidence=0.5,
+            combined_score=0.4,
+            technical_score=0.4,
+        ),
+    )
+    diverging_row = RecommendationRow(
+        symbol="NVDA",
+        action=SignalAction.BUY,
+        confidence=0.7,
+        combined_score=0.6,
+        technical_score=0.5,
+        sentiment_score=0.5,
+        rsi=0.5,
+        macd=0.5,
+        bollinger=0.5,
+        last_price=520.0,
+        num_news_articles=2,
+        reasoning="",
+        timestamp=fired,
+        tier=RecommendationTier.BUY,
+        intraday=IntradayRead(
+            timeframe=TimeFrame.MIN_15,
+            action=SignalAction.SELL,
+            confidence=0.4,
+            combined_score=-0.4,
+            technical_score=-0.4,
+        ),
+    )
+    snap = DashboardSnapshot(tick=1, rows=[aligned_row, diverging_row])
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "NVDA"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        header = app.query_one(WatchlistHeader)
+        header.snapshot = snap
+        text = header.render()
+        assert "INTRADAY" in text
+        assert "1 diverging" in text
+        assert "1 aligned" in text
+
+
+async def test_watchlist_header_omits_intraday_line_when_disabled() -> None:
+    """Without IntradayRead data on any row the header skips the
+    INTRADAY line entirely — default behavior for daily-only mode."""
+    from src.dashboard.app import DashboardApp, WatchlistHeader
+
+    app = DashboardApp(
+        MockDashboardController(watchlist=["AAPL", "MSFT"]),
+        refresh_seconds=999.0,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause(0.3)
+        header = app.query_one(WatchlistHeader)
+        text = header.render()
+        assert "INTRADAY" not in text
+
+
 async def test_watchlist_header_renders_pulse_line_when_rows_present() -> None:
     """The pulse line is always at the top when any healthy rows
     exist. Tier values are stable schema (bullish/bearish/mixed/neutral

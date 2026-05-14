@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.data.models import TimeFrame
 from src.indicators.bollinger import BollingerBands
 from src.indicators.macd import MACD
 from src.indicators.rsi import RSI
@@ -27,6 +28,7 @@ from src.sentiment.news_quality import (
     weighted_sentiment_mean,
 )
 from src.strategy.base import RecommendationTier, SignalAction
+from src.strategy.multi_timeframe import IntradayRead
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -141,9 +143,7 @@ class RecommendationEngine:
         technical_score = self._combine_indicator_scores(indicator_scores)
 
         scored_articles = self._score_news(news or [], now=ts)
-        sentiment_score = (
-            weighted_sentiment_mean(scored_articles) if scored_articles else 0.0
-        )
+        sentiment_score = weighted_sentiment_mean(scored_articles) if scored_articles else 0.0
 
         combined = _clip(
             self.technical_weight * technical_score + self.sentiment_weight * sentiment_score
@@ -175,6 +175,41 @@ class RecommendationEngine:
             # src.intelligence.tier upgrades to STRONG when conditions
             # are met; the engine itself doesn't have history access.
             tier=RecommendationTier.from_action(action),
+        )
+
+    def recommend_intraday(
+        self,
+        symbol: str,
+        df: pd.DataFrame,
+        *,
+        timeframe: TimeFrame,
+    ) -> IntradayRead:
+        """Technical-only intraday read for one symbol.
+
+        Reuses the daily indicator-scoring path on a different bar
+        dataframe — same RSI / MACD / Bollinger math, just on bars at
+        ``timeframe``. Sentiment is skipped (news is timeframe-
+        agnostic), so ``combined_score == technical_score`` and
+        ``confidence == |combined_score|``. The result is meant as
+        alignment context for the daily recommendation, not as a
+        standalone signal — the dashboard surfaces it as a chip
+        beside the daily action.
+
+        Empty / too-thin dataframes return a HOLD with zero scores
+        so the renderer can still surface the chip without branching
+        on edge cases.
+        """
+        indicator_scores = self._score_indicators(df)
+        technical_score = self._combine_indicator_scores(indicator_scores)
+        combined = _clip(technical_score)
+        action = self._decide_action(combined)
+        confidence = _clip(abs(combined), 0.0, 1.0)
+        return IntradayRead(
+            timeframe=timeframe,
+            action=action,
+            confidence=confidence,
+            combined_score=combined,
+            technical_score=_clip(technical_score),
         )
 
     # -- technicals --------------------------------------------------------

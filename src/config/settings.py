@@ -13,6 +13,8 @@ from pathlib import Path
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.data.models import TimeFrame
+
 
 class AppEnv(StrEnum):
     DEV = "dev"
@@ -92,6 +94,16 @@ class Settings(BaseSettings):
     # at the end of each tick and read at controller startup so the
     # dashboard resumes mid-day instead of starting cold.
     session_state_path: Path = PROJECT_ROOT / "data" / "session_state.json"
+
+    # ---- Multi-timeframe ----
+    # Opt-in secondary intraday read alongside the daily pipeline.
+    # When enabled the controller fetches a second bar window per
+    # symbol per tick at ``intraday_timeframe`` and surfaces an
+    # alignment chip in the dashboard. Default off — doubles Alpaca
+    # bar-fetch volume when on.
+    intraday_enabled: bool = False
+    intraday_timeframe: TimeFrame = TimeFrame.MIN_15
+    intraday_lookback_days: int = 5
 
     # ---- AI summaries (Anthropic) ----
     anthropic_api_key: SecretStr | None = None

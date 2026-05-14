@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from src.intelligence.opportunity_history import OpportunityHistory
     from src.intelligence.pulse import MarketPulse
     from src.intelligence.pulse_history import PulseHistory
+    from src.strategy.multi_timeframe import IntradayRead
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,10 @@ class RecommendationRow:
     signal_quality: str = "moderate"
     stability: str = "stable"
     quality_reasons: tuple[str, ...] = ()
+    # Optional secondary intraday read — populated only when the
+    # controller's ``intraday_enabled`` Setting is on. ``None`` on
+    # symbols where the intraday fetch failed or the setting is off.
+    intraday: IntradayRead | None = None
     error: str | None = None  # populated if the per-symbol fetch failed
 
 

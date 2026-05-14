@@ -53,6 +53,7 @@ from src.intelligence.watchlist import (
     diff_snapshots,
 )
 from src.strategy.base import RecommendationTier, SignalAction
+from src.strategy.multi_timeframe import IntradayRead, is_divergent
 
 if TYPE_CHECKING:
     from src.dashboard.controller import BaseController
@@ -224,6 +225,14 @@ class WatchlistHeader(Static):
         if alerts_summary:
             lines.append(f"{_section_label('ALERTS')}{alerts_summary}")
 
+        # --- Intraday divergence count (skip when no intraday data) ---
+        # When at least one healthy row carries an intraday read, show
+        # how many of those rows disagree with the daily action. Quiet
+        # when intraday is disabled or every row aligns.
+        intraday_summary = _format_intraday_summary(snap.rows)
+        if intraday_summary:
+            lines.append(f"{_section_label('INTRADAY')}{intraday_summary}")
+
         # --- Top opportunities (skip when none qualify) ---------------
         # Ranked-composite output replaces the older kind-based view —
         # same screen real estate, richer per-line content. Skipped
@@ -316,6 +325,18 @@ def _detail_signature(
         hist_sig,
         symbol_alerts_sig,
         opp_sig,
+        # Intraday signature — when present, action + rounded scores
+        # invalidate the cache on a divergence flip or material score
+        # change. None signature when intraday is disabled or the
+        # secondary fetch failed.
+        (
+            row.intraday.timeframe.value,
+            row.intraday.action.value,
+            round(row.intraday.confidence, 3),
+            round(row.intraday.combined_score, 3),
+        )
+        if row.intraday is not None
+        else None,
         brief_state,
         brief_text,
         brief_kind,
@@ -400,6 +421,14 @@ def _header_signature(
         )
         for o in rank_opportunities(snap, n=3)
     )
+    # Intraday signature — the INTRADAY header line keys off per-row
+    # divergence vs daily action. Any (daily action, intraday action)
+    # pair change must invalidate the cache so the count line updates.
+    intraday_sig = tuple(
+        (r.symbol, r.action.value, r.intraday.action.value if r.intraday else None)
+        for r in snap.rows
+        if not r.error and r.intraday is not None
+    )
     return (
         rows_sig,
         prev_sig,
@@ -408,6 +437,7 @@ def _header_signature(
         pulse_sig,
         hist_sig,
         opp_sig,
+        intraday_sig,
     )
 
 
@@ -572,6 +602,66 @@ def _render_opportunity_drilldown(drilldown: OpportunityDrilldown) -> str:
             lines.append(f"    [dim]·[/]  [dim]{rich_escape(phrase)}[/dim]")
 
     return "\n".join(lines)
+
+
+def _format_intraday_summary(rows: list[RecommendationRow]) -> str:
+    """Header summary of intraday alignment across the watchlist.
+
+    Returns ``""`` when no row carries an intraday read (i.e. the
+    feature is disabled or every fetch failed) so the header skips
+    the line entirely. Otherwise reports counts:
+      INTRADAY  3 diverging · 12 aligned · 4 neutral
+    """
+    diverging = 0
+    aligned = 0
+    neutral = 0
+    has_any = False
+    for r in rows:
+        if r.error or r.intraday is None:
+            continue
+        has_any = True
+        if is_divergent(r.action, r.intraday):
+            diverging += 1
+        elif r.action == SignalAction.HOLD or r.intraday.action == SignalAction.HOLD:
+            neutral += 1
+        else:
+            aligned += 1
+    if not has_any:
+        return ""
+    chunks: list[str] = []
+    if diverging:
+        chunks.append(f"[bold red]{diverging} diverging[/]")
+    if aligned:
+        chunks.append(f"[bold green]{aligned} aligned[/]")
+    if neutral:
+        chunks.append(f"[dim]{neutral} neutral[/]")
+    return "  [dim]·[/]  ".join(chunks)
+
+
+def _format_intraday_line(daily_action: SignalAction, intraday: IntradayRead) -> str:
+    """One-line intraday alignment chip for the DetailPanel.
+
+    Color reflects agreement with the daily action: green when both
+    are directional and aligned, red when they're directional and
+    opposed, dim when either side is HOLD (no divergence — just
+    "intraday has no read").
+    """
+    if is_divergent(daily_action, intraday):
+        alignment_style = "bold red"
+        alignment_word = "diverging"
+    elif daily_action == SignalAction.HOLD or intraday.action == SignalAction.HOLD:
+        alignment_style = "dim"
+        alignment_word = "neutral"
+    else:
+        alignment_style = "bold green"
+        alignment_word = "aligned"
+    action_text = _action_text(intraday.action)
+    return (
+        f"  [dim]{intraday.timeframe.value:<6}[/]  {action_text}  "
+        f"[dim]conf[/] [bold]{intraday.confidence:.2f}[/]  "
+        f"[dim]combined[/] {_fmt_signed(intraday.combined_score)}  "
+        f"[dim]·[/]  [{alignment_style}]{alignment_word}[/]"
+    )
 
 
 def _format_opportunity(opp: Opportunity) -> str:
@@ -911,6 +1001,16 @@ class DetailPanel(Static):
             "[bold cyan]Alerts[/]\n" + _render_symbol_alerts(symbol_alerts) if symbol_alerts else ""
         )
 
+        # Section: Intraday — secondary timeframe read when enabled.
+        # The chip shows action/conf/combined plus an alignment word
+        # against the daily action. Absent rows + intraday-disabled
+        # controllers leave r.intraday=None and skip the section.
+        intraday_block = ""
+        if r.intraday is not None:
+            intraday_block = "[bold cyan]Intraday[/]\n" + _format_intraday_line(
+                r.action, r.intraday
+            )
+
         # Section: Opportunity Intelligence (only when this symbol ranks
         # in the top-N). Additive — non-OPP rows render unchanged. The
         # row is threaded through so action-aware state phrases
@@ -952,6 +1052,8 @@ class DetailPanel(Static):
             sections.append(history_block)
         if alerts_block:
             sections.append(alerts_block)
+        if intraday_block:
+            sections.append(intraday_block)
         if opp_block:
             sections.append(opp_block)
         if brief_block:
