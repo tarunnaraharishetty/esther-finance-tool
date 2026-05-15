@@ -12,13 +12,14 @@ import { SymbolDetail } from "./components/SymbolDetail";
  * trader workstation, not consumer app.
  *
  *  ┌─ header (connection chip) ───────────────────────────────────┐
+ *  ├─ stale banner (only when isStale) ───────────────────────────┤
  *  ├─ watchlist (left, full height) ─┬─ detail (right top) ──────┤
  *  │                                  ├─ pulse + opps (right mid)─┤
  *  │                                  ├─ alerts (right bottom) ───┤
  *  └──────────────────────────────────┴───────────────────────────┘
  */
 export default function App() {
-  const { snapshot, status } = useSnapshotStream();
+  const { snapshot, status, isStale, msSinceLastEvent } = useSnapshotStream();
   const [activeSymbol, setActiveSymbol] = useState<string | null>(null);
 
   // When a snapshot first arrives, default the active symbol to the
@@ -40,10 +41,22 @@ export default function App() {
         </div>
         <ConnectionIndicator
           status={status}
+          isStale={isStale}
           tick={snapshot?.tick ?? null}
           rowCount={snapshot?.rows.length ?? 0}
         />
       </header>
+
+      {/* Stale-data banner — only renders when the connection is
+          still open but no event has arrived in a while. Surfaces
+          the situation where the trader could otherwise be staring
+          at a frozen snapshot and not realize it. */}
+      {isStale && msSinceLastEvent !== null && (
+        <div className="banner banner--stale" role="status">
+          Data may be stale — last update {Math.round(msSinceLastEvent / 1000)}s ago.
+          Stream is open but no fresh tick has arrived.
+        </div>
+      )}
 
       <main className="app__main">
         {snapshot === null ? (

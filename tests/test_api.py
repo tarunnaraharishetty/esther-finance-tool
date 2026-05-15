@@ -40,6 +40,130 @@ def _build_client(watchlist: list[str] | None = None) -> tuple[TestClient, MockD
     return TestClient(app), controller
 
 
+def test_cors_default_allows_vite_dev_origin() -> None:
+    """The default CORS allowlist lets the Vite dev server hit the API.
+
+    Without this, ``npm run dev`` against a Python backend on a
+    different port would be blocked by the browser. We assert by
+    sending an Origin header and inspecting the
+    Access-Control-Allow-Origin response header.
+    """
+    client, _ = _build_client()
+    res = client.get(
+        "/api/health",
+        headers={"Origin": "http://localhost:5173"},
+    )
+    assert res.status_code == 200
+    assert res.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+def test_cors_rejects_unconfigured_origin() -> None:
+    """An origin NOT in the allowlist must not receive
+    Access-Control-Allow-Origin — the browser then blocks the
+    response from script access. Defensive against accidental
+    cross-origin leakage when the API ships behind same-origin in
+    production.
+    """
+    client, _ = _build_client()
+    res = client.get(
+        "/api/health",
+        headers={"Origin": "https://malicious.example.com"},
+    )
+    # Body still returns; the *header* is what gates browser access.
+    assert res.status_code == 200
+    assert "access-control-allow-origin" not in res.headers
+
+
+def test_cors_origins_explicit_override() -> None:
+    """Passing ``cors_origins`` explicitly to create_app overrides the
+    default — e.g. for a deploy that hosts the frontend at a known
+    domain."""
+    from src.api import create_app
+
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(
+        controller,
+        cors_origins=["https://esther.example.com"],
+    )
+    with TestClient(app) as client:
+        res = client.get(
+            "/api/health",
+            headers={"Origin": "https://esther.example.com"},
+        )
+        assert res.headers.get("access-control-allow-origin") == "https://esther.example.com"
+        # Default Vite origin is no longer in the list and should NOT match.
+        res2 = client.get("/api/health", headers={"Origin": "http://localhost:5173"})
+        assert "access-control-allow-origin" not in res2.headers
+
+
+def test_static_frontend_mount_serves_index_and_assets(tmp_path: Any) -> None:
+    """When ``frontend_dir`` exists, FastAPI serves the bundle:
+
+    - ``/``                → index.html
+    - ``/favicon.svg``     → root-level static file
+    - ``/assets/<hash>.js``→ hashed bundle file
+    - ``/some/random/path`` → SPA fallback to index.html
+    - ``/api/nonexistent`` → 404 (NOT index.html — the SPA fallback
+      must not swallow unknown API routes)
+    """
+    from pathlib import Path
+
+    from src.api import create_app
+
+    # Build a minimal "dist" tree on disk.
+    dist = Path(tmp_path) / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text(
+        "<!doctype html><div id='root'></div>", encoding="utf-8"
+    )
+    (dist / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+    (dist / "assets" / "index-abc123.js").write_text("console.log(1)", encoding="utf-8")
+
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, frontend_dir=dist)
+    with TestClient(app) as client:
+        # 1. Root serves index.html
+        r = client.get("/")
+        assert r.status_code == 200
+        assert "id='root'" in r.text
+
+        # 2. favicon.svg from dist root
+        r = client.get("/favicon.svg")
+        assert r.status_code == 200
+        assert r.text == "<svg/>"
+
+        # 3. Hashed asset from /assets
+        r = client.get("/assets/index-abc123.js")
+        assert r.status_code == 200
+        assert "console.log(1)" in r.text
+
+        # 4. Unknown frontend path → SPA fallback to index.html
+        r = client.get("/some/future/clientside/route")
+        assert r.status_code == 200
+        assert "id='root'" in r.text
+
+        # 5. Unknown /api/* must NOT fall through to index.html
+        r = client.get("/api/this-does-not-exist")
+        assert r.status_code == 404
+
+
+def test_frontend_mount_omitted_when_dist_missing(tmp_path: Any) -> None:
+    """If ``frontend_dir`` does not exist, the SPA routes are never
+    registered — production-API-only deploys must not 200 on `/`."""
+    from pathlib import Path
+
+    from src.api import create_app
+
+    nowhere = Path(tmp_path) / "does-not-exist"
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, frontend_dir=nowhere)
+    with TestClient(app) as client:
+        r = client.get("/")
+        assert r.status_code == 404
+        r = client.get("/api/health")
+        assert r.status_code == 200
+
+
 def test_health_endpoint_is_cheap_and_does_not_fetch() -> None:
     """Health probe should not advance the controller's tick counter.
 

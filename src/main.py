@@ -898,7 +898,18 @@ def serve(
         settings=settings,
         surface="API server",
     )
-    app = create_app(controller, stream_interval=stream_interval)
+    # Same-origin frontend serving: when `web/dist/` exists (built via
+    # `npm run build`), FastAPI serves the React bundle alongside the
+    # API on this single port. Missing → API-only mode (dev workflow
+    # where Vite serves the frontend on :5173 separately).
+    frontend_dir = settings.project_root / "web" / "dist"
+    app = create_app(
+        controller,
+        stream_interval=stream_interval,
+        cors_origins=settings.cors_origins,
+        frontend_dir=frontend_dir,
+    )
+    serving_frontend = frontend_dir.exists()
 
     if host not in {"127.0.0.1", "localhost", "::1"}:
         console.print(
@@ -908,14 +919,22 @@ def serve(
     stream_status = (
         f"stream every {stream_interval:.1f}s" if stream_interval else "stream disabled"
     )
+    frontend_status = "+frontend" if serving_frontend else "api-only (run `cd web && npm run dev`)"
     console.print(
         f"[green]Esther API live at[/green] http://{host}:{port} · "
-        f"[dim]{stream_status} · watchlist: {', '.join(watchlist) or '(empty)'}[/dim]"
+        f"[dim]{stream_status} · {frontend_status} · "
+        f"watchlist: {', '.join(watchlist) or '(empty)'}[/dim]"
     )
-    console.print(
-        f"[dim]Endpoints: /api/health · /api/snapshot · /api/stream "
-        f"(http://{host}:{port}/api/stream)[/dim]"
-    )
+    if serving_frontend:
+        console.print(
+            f"[dim]Open http://{host}:{port}/ in a browser — "
+            "frontend + API on the same origin.[/dim]"
+        )
+    else:
+        console.print(
+            f"[dim]Endpoints: /api/health · /api/snapshot · /api/stream "
+            f"(http://{host}:{port}/api/stream)[/dim]"
+        )
     console.print("[dim]Ctrl+C to stop.[/dim]")
     # log_level=warning keeps uvicorn's per-request access logs out of
     # the terminal — Esther's own structlog setup handles request

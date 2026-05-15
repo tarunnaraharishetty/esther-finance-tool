@@ -137,6 +137,19 @@ class Settings(BaseSettings):
     llm_model: str = "claude-opus-4-7"
     llm_max_tokens: int = 1024
 
+    # ---- HTTP API ----
+    # Origins allowed to hit the API cross-origin. Default is the Vite
+    # dev-server (5173) so `npm run dev` works out of the box. In
+    # production, when FastAPI serves the bundled React app from
+    # ``web/dist/`` on the same origin, browsers never make CORS
+    # requests at all — these origins are irrelevant unless you host
+    # the frontend separately. Override with ``CORS_ORIGINS=`` (empty
+    # = block all cross-origin) or a comma/JSON list.
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
     # ---- Paths ----
     project_root: Path = PROJECT_ROOT
     data_dir: Path = PROJECT_ROOT / "data"
@@ -147,6 +160,24 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _split_cors_origins(cls, v: object) -> object:
+        """Accept ``CORS_ORIGINS=http://a,http://b`` in addition to a JSON list.
+
+        Deploy hosts (Railway / Render) usually pass env vars as plain
+        strings; comma-separated is the friendlier form. JSON-list also
+        works for parity with the rest of the settings layer.
+        """
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                return v  # let pydantic parse the JSON list
+            return [piece.strip() for piece in stripped.split(",") if piece.strip()]
+        return v
 
     @field_validator("dashboard_columns")
     @classmethod

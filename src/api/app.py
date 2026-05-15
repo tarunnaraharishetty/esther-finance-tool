@@ -42,11 +42,14 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
-from starlette.responses import StreamingResponse
+from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import FileResponse, StreamingResponse
+from starlette.staticfiles import StaticFiles
 
 from src.api.broker import SnapshotBroker
 
@@ -65,6 +68,8 @@ def create_app(
     controller: BaseController,
     *,
     stream_interval: float | None = None,
+    cors_origins: list[str] | None = None,
+    frontend_dir: Path | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a controller.
 
@@ -80,6 +85,20 @@ def create_app(
             is started — useful in tests that only exercise the REST
             endpoints. The ``esther serve`` CLI passes
             ``Settings.dashboard_refresh_seconds`` here.
+        cors_origins: Explicit allow-list of origins for cross-origin
+            requests. ``None`` falls back to the safe default
+            ``["http://localhost:5173", "http://127.0.0.1:5173"]``
+            (the Vite dev server). In production same-origin deploys
+            CORS is never invoked by the browser, so the value is
+            irrelevant — but we always wire the middleware for parity.
+            Pass ``[]`` to disable cross-origin entirely.
+        frontend_dir: If set and the directory exists, mount the Vite
+            build at the app's root: ``/assets/*`` serves hashed bundle
+            files and any unmatched non-``/api`` route returns
+            ``index.html``. The ``esther serve`` CLI passes
+            ``settings.project_root / "web" / "dist"``. ``None`` or a
+            non-existent path = API-only mode (the dev workflow, where
+            Vite serves the frontend on its own port).
     """
 
     @asynccontextmanager
@@ -218,23 +237,71 @@ def create_app(
             },
         )
 
-    # Always-on Cross-Origin Resource Sharing for the read-only API.
-    # The browser frontend lives at a different origin in dev (Vite
-    # default :5173) than the API (:8000). We deliberately allow any
-    # origin here because there's no auth or mutation surface — the
-    # entire API is GET-only read access to a paper-data pipeline.
-    # When auth lands in Phase 3, this opens up to a configured
-    # allowlist instead.
-    from starlette.middleware.cors import CORSMiddleware
-
+    # CORS for the read-only API. In production the bundled frontend
+    # is served from the same origin as the API (see frontend_dir
+    # below), so browsers never make CORS requests and this list is
+    # irrelevant. The default — Vite's dev server on :5173 — keeps
+    # `npm run dev` working out of the box. Override via the
+    # ``CORS_ORIGINS`` env var (comma-separated or JSON list).
+    effective_origins = cors_origins if cors_origins is not None else [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=effective_origins,
         allow_methods=["GET"],
         allow_headers=["*"],
     )
 
+    # Static frontend mount — production same-origin path.
+    #
+    # When `web/dist/` exists (produced by `npm run build`), FastAPI
+    # serves the Vite bundle:
+    #   - /assets/*     → hashed JS/CSS chunks
+    #   - /favicon.svg  → root-level static files (favicon, robots.txt, ...)
+    #   - everything-else-not-/api → index.html (SPA-style fallback,
+    #     even though Esther doesn't currently use client-side routing —
+    #     leaves the door open without costing anything today)
+    # Routes are registered AFTER the API routes above so /api/* wins.
+    if frontend_dir is not None and frontend_dir.exists():
+        _mount_frontend(app, frontend_dir)
+
     return app
+
+
+def _mount_frontend(app: FastAPI, dist: Path) -> None:
+    """Wire the static-file + SPA-fallback routes for ``dist``.
+
+    Split out so ``create_app`` stays focused on the API surface and
+    the static-serving logic has a clear seam for future hardening
+    (e.g. cache-control headers on the bundle).
+    """
+    assets_dir = dist / "assets"
+    if assets_dir.exists():
+        # Mount the hashed-bundle directory. Vite emits filenames like
+        # ``index-BXzIQ50v.js`` so these can be cached forever; we let
+        # the host (Railway/Render) decide cache headers since they
+        # vary by deployment shape.
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    index_html = dist / "index.html"
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str) -> FileResponse:
+        """Serve a root-level static file if one exists; else index.html.
+
+        404s any unmatched ``/api/*`` so the SPA fallback doesn't swallow
+        what would otherwise be a clean API miss.
+        """
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(status_code=404, detail="Not Found")
+        candidate = dist / full_path
+        # Only serve files directly under dist (not directories — those
+        # fall through to index.html).
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(index_html)
 
 
 # Re-export the contract for callers that need to type-annotate it

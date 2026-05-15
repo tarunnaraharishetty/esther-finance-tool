@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Esther favicon: stylized upward-step chart, no horizontal axis,
+     monospace E baseline. Dark background matches the app's #0d1117. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="6" fill="#0d1117"/>
+  <!-- Three rising bars: hold (yellow), buy (green), strong-buy (bright green) -->
+  <rect x="5"  y="18" width="5" height="9"  fill="#d29922"/>
+  <rect x="13" y="13" width="5" height="14" fill="#3fb950"/>
+  <rect x="21" y="7"  width="5" height="20" fill="#56d364"/>
+  <!-- Subtle baseline tick so it reads as a chart, not stacked rects -->
+  <line x1="4" y1="27" x2="28" y2="27" stroke="#2a313c" stroke-width="1"/>
+</svg>
