@@ -1,0 +1,152 @@
+/* Esther web — dense terminal-aesthetic styling.
+ *
+ * Principles:
+ *   - Monospace by default; data is the focal point, not chrome.
+ *   - Dark background, high-contrast text. Trading floors stay dim.
+ *   - Tight padding (0.25rem-0.75rem). Whitespace is signal density,
+ *     not luxury. We will need every pixel for the panel grid.
+ *   - Semantic color tokens (--c-buy, --c-sell, --c-warn) keep the
+ *     panel components colorblind-friendly via consistent mapping.
+ */
+
+:root {
+  color-scheme: dark;
+
+  --bg: #0d1117;
+  --bg-elev: #161b22;
+  --bg-elev-2: #1f2630;
+  --border: #2a313c;
+  --border-soft: #1c222b;
+
+  --fg: #e6edf3;
+  --fg-dim: #8b949e;
+  --fg-faint: #565f6a;
+
+  --c-buy: #3fb950;
+  --c-sell: #f85149;
+  --c-hold: #d29922;
+  --c-info: #58a6ff;
+  --c-warn: #d29922;
+  --c-critical: #f85149;
+  --c-ok: #3fb950;
+
+  --font-mono: "SF Mono", "JetBrains Mono", "Cascadia Code", Consolas,
+    "Liberation Mono", Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.app__title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.app__brand {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.app__subtitle {
+  color: var(--fg-faint);
+  font-size: 12px;
+}
+
+.app__main {
+  flex: 1;
+  overflow: auto;
+  padding: 1rem;
+}
+
+/* --- connection indicator --------------------------------------------- */
+
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--bg-elev-2);
+}
+
+.conn__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--fg-faint);
+}
+
+.conn--open .conn__dot {
+  background: var(--c-ok);
+  box-shadow: 0 0 0 2px rgba(63, 185, 80, 0.15);
+}
+
+.conn--connecting .conn__dot {
+  background: var(--c-warn);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.conn--error .conn__dot {
+  background: var(--c-critical);
+}
+
+.conn__meta {
+  color: var(--fg-dim);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* --- placeholders (will be replaced when panels land) ------------------ */
+
+.placeholder {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.placeholder--debug {
+  font-style: normal;
+  white-space: pre-wrap;
+  color: var(--fg);
+}
