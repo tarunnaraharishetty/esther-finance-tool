@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (final stabilization session — both polish backlog items shipped, repo green).*
+*Last touched: 2026-05-14 (Phase 0 FastAPI scaffold — REST snapshot endpoint shipped on top of the controller).*
 
 ---
 
@@ -246,24 +246,35 @@ dashboard or exposed via the CLI.
   store is wired.
 
 **Quality baseline**
-- 666 passing tests, 1 deselected (`slow`/`integration`)
+- 672 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
-- `mypy src` (`--strict`) green across all 51 source files
+- `mypy src` (`--strict`) green across all 53 source files
 - Documented exceptions live in `pyproject.toml`
 
 ---
 
 ## Remaining high-priority roadmap
 
-The major roadmap is fully shipped — drilldown, news quality,
-persistence, multi-timeframe (phases 2a/2b/2c + workflow polish),
-pulse evolution, dashboard polish, brief-cache persistence, intraday
-alerts, SessionStore status footer, in-app column-toggle modal,
-and `esther backfill --dry-run`.
+The core dashboard product is complete. The frontend/web phase
+is now in motion:
 
-There is no remaining roadmap. Future work is opportunistic
-(see Technical debt below) or feature-additive (new
-intelligence modules, alternate data sources, web front-end).
+**Phase 0 — Foundations (in progress)**
+- ✅ FastAPI app factory at `src/api/app.py`, REST `GET /api/snapshot`
+  + `GET /api/health` endpoints binding to a `BaseController` instance.
+  Uses FastAPI's `jsonable_encoder` on the DashboardSnapshot tree —
+  no parallel Pydantic models (yet). 6 tests via `TestClient`.
+- ⏳ `esther serve [--host 127.0.0.1] [--port 8000] [--mock]` CLI
+  command that boots uvicorn against the same factory.
+- ⏳ SSE / WebSocket stream endpoint that pushes one snapshot per
+  tick. Requires deciding how the controller's tick loop integrates
+  with the HTTP server's event loop.
+
+**Phase 1 — Read-only web mirror (not started)**
+- React + TypeScript + Vite shell consuming `/api/snapshot`.
+- Component-per-widget (WatchlistTable, DetailPanel, PulseCard,
+  AlertsFeed). Map 1-to-1 to the TUI for now.
+
+See `PRODUCTION_READINESS.md` for the in/out cut for v0.
 
 ---
 
