@@ -97,6 +97,28 @@ export interface OpportunityHistory {
   window: number;
 }
 
+export interface SignalProfile {
+  stability: string;
+  trend: string;
+  persistence: string;
+  [extra: string]: unknown;
+}
+
+export interface RankedOpportunity {
+  symbol: string;
+  tier: RecommendationTier;
+  composite_score: number;
+  profile: SignalProfile;
+  rationale: string[];
+  technical_alignment: number;
+  sentiment_alignment: number;
+  confidence_acceleration: number;
+  momentum_persistence: number;
+  unusual_activity: number;
+  reversal_strength: number;
+  signal_quality_score: number;
+}
+
 export interface DashboardSnapshot {
   tick: number;
   timestamp: string;
@@ -106,11 +128,13 @@ export interface DashboardSnapshot {
   recent_alerts: Alert[];
   signal_history: Record<string, unknown>;
   opp_history: Record<string, OpportunityHistory>;
+  ranked_opportunities: RankedOpportunity[];
   pulse: MarketPulse | null;
   pulse_history: unknown;
   pulse_evolution: PulseEvolution | null;
   intraday_signal_history: Record<string, unknown>;
   intraday_opp_history: Record<string, OpportunityHistory>;
+  intraday_ranked_opportunities: RankedOpportunity[];
   intraday_pulse: MarketPulse | null;
   intraday_pulse_history: unknown;
   intraday_pulse_evolution: PulseEvolution | null;

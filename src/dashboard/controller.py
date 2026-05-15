@@ -194,40 +194,47 @@ class BaseController(ABC):
             snap.intraday_pulse_history = self.intraday_pulse_tracker.summary()
             snap.intraday_pulse_evolution = evolve_pulse(snap.intraday_pulse_history)
 
-    def _record_opp_history(self, snap: DashboardSnapshot) -> dict[str, OpportunityHistory]:
-        """Update the membership tracker for this tick + return per-symbol
-        summaries for the symbols currently in top-N.
+    def _record_opportunities(self, snap: DashboardSnapshot) -> None:
+        """Compute the daily top-N ranking once and attach two views of
+        it to the snapshot.
 
-        Symbols outside top-N are intentionally excluded from the result
-        — the renderer only consults this for OPP lines it draws, and
-        carrying summaries for absent symbols would just be dead weight
-        on the snapshot.
+        - ``snap.ranked_opportunities`` — the full ``RankedOpportunity``
+          tuples, so HTTP / web clients render the same composite-rank
+          ordering as the TUI without re-running the ranker.
+        - ``snap.opp_history`` — per-symbol tenure summaries for the
+          top-N symbols only. Symbols outside top-N are absent (the
+          renderer only consults history for OPP lines it draws).
+
+        The tracker is advanced as a side effect so subsequent ticks
+        see the right "appearances within window" counts.
         """
         ranked = rank_opportunities(snap, n=_OPP_TOP_N)
         top_symbols = [opp.symbol for opp in ranked]
         self.opp_tracker.record(top_symbols)
-        out: dict[str, OpportunityHistory] = {}
+        history: dict[str, OpportunityHistory] = {}
         for symbol in top_symbols:
             summary = self.opp_tracker.summary_for(symbol)
             if summary is not None:
-                out[symbol] = summary
-        return out
+                history[symbol] = summary
+        snap.ranked_opportunities = tuple(ranked)
+        snap.opp_history = history
 
-    def _record_intraday_opp_history(
-        self, snap: DashboardSnapshot
-    ) -> dict[str, OpportunityHistory]:
-        """Parallel to ``_record_opp_history`` — operates on the
-        intraday ranking + intraday tracker. Returns per-symbol
-        summaries for symbols currently in the intraday top-N."""
+    def _record_intraday_opportunities(self, snap: DashboardSnapshot) -> None:
+        """Parallel to ``_record_opportunities`` — operates on the
+        intraday ranking + intraday tracker. Sets both
+        ``snap.intraday_ranked_opportunities`` and
+        ``snap.intraday_opp_history`` so view-toggling clients can
+        flip timeframes without re-ranking."""
         ranked = rank_opportunities_intraday(snap, n=_OPP_TOP_N)
         top_symbols = [opp.symbol for opp in ranked]
         self.intraday_opp_tracker.record(top_symbols)
-        out: dict[str, OpportunityHistory] = {}
+        history: dict[str, OpportunityHistory] = {}
         for symbol in top_symbols:
             summary = self.intraday_opp_tracker.summary_for(symbol)
             if summary is not None:
-                out[symbol] = summary
-        return out
+                history[symbol] = summary
+        snap.intraday_ranked_opportunities = tuple(ranked)
+        snap.intraday_opp_history = history
 
     def _record_history(
         self, rows: list[RecommendationRow], now: datetime
@@ -473,8 +480,8 @@ class DashboardController(BaseController):
             timestamp=now,
         )
         self._record_pulse(snap)
-        snap.opp_history = self._record_opp_history(snap)
-        snap.intraday_opp_history = self._record_intraday_opp_history(snap)
+        self._record_opportunities(snap)
+        self._record_intraday_opportunities(snap)
         fresh_alerts = self.alert_engine.evaluate(rows_list)
         fresh_alerts.extend(self.alert_engine.evaluate_snapshot(snap))
         snap.alerts = self.alert_prioritizer.prioritize(fresh_alerts, self.alert_state, now=now)
@@ -637,8 +644,8 @@ class MockDashboardController(BaseController):
             timestamp=now,
         )
         self._record_pulse(snap)
-        snap.opp_history = self._record_opp_history(snap)
-        snap.intraday_opp_history = self._record_intraday_opp_history(snap)
+        self._record_opportunities(snap)
+        self._record_intraday_opportunities(snap)
         fresh_alerts = self.alert_engine.evaluate(rows)
         fresh_alerts.extend(self.alert_engine.evaluate_snapshot(snap))
         snap.alerts = self.alert_prioritizer.prioritize(fresh_alerts, self.alert_state, now=now)

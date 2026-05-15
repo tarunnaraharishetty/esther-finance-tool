@@ -16,6 +16,7 @@ from src.strategy.base import RecommendationTier, SignalAction
 if TYPE_CHECKING:
     from src.intelligence.alerts import Alert
     from src.intelligence.history import SignalHistorySummary
+    from src.intelligence.opportunities import RankedOpportunity
     from src.intelligence.opportunity_history import OpportunityHistory
     from src.intelligence.pulse import MarketPulse
     from src.intelligence.pulse_evolution import PulseEvolution
@@ -90,6 +91,12 @@ class DashboardSnapshot:
     # are intentionally absent (the renderer only consults this for OPP
     # lines it's already drawing).
     opp_history: dict[str, OpportunityHistory] = field(default_factory=dict)
+    # Pre-computed top-N ranked opportunities for the current tick.
+    # Carried on the snapshot so HTTP / web clients render the same
+    # composite-score ordering as the TUI without having to re-run
+    # ``rank_opportunities`` themselves. Empty tuple when no symbol
+    # qualifies (default RankedOpportunity threshold).
+    ranked_opportunities: tuple[RankedOpportunity, ...] = ()
     # Pulse: pre-computed once by the controller so the renderer,
     # signature cache, status line, and snapshot rules all see the
     # same value. ``None`` means the snapshot was constructed outside
@@ -114,6 +121,11 @@ class DashboardSnapshot:
     # ``rank_opportunities_intraday`` + the controller's parallel
     # intraday tracker.
     intraday_opp_history: dict[str, OpportunityHistory] = field(default_factory=dict)
+    # Parallel intraday ranked opportunities. Mirrors
+    # ``ranked_opportunities`` but sourced from
+    # ``rank_opportunities_intraday`` so the active-view OPP panel can
+    # flip between timeframes without recomputing client-side.
+    intraday_ranked_opportunities: tuple[RankedOpportunity, ...] = ()
     # Parallel intraday pulse triad (MT2 phase 2c). All three fields
     # default to ``None`` so daily-only sessions render unchanged.
     intraday_pulse: MarketPulse | None = None

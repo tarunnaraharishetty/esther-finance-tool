@@ -74,11 +74,13 @@ def test_snapshot_endpoint_returns_dataclass_shape() -> None:
         "recent_alerts",
         "signal_history",
         "opp_history",
+        "ranked_opportunities",
         "pulse",
         "pulse_history",
         "pulse_evolution",
         "intraday_signal_history",
         "intraday_opp_history",
+        "intraday_ranked_opportunities",
         "intraday_pulse",
         "intraday_pulse_history",
         "intraday_pulse_evolution",
@@ -113,6 +115,49 @@ def test_snapshot_endpoint_advances_tick_across_requests() -> None:
     client, _ = _build_client()
     ticks = [client.get("/api/snapshot").json()["tick"] for _ in range(3)]
     assert ticks == [1, 2, 3]
+
+
+def test_snapshot_carries_pre_computed_ranked_opportunities() -> None:
+    """``ranked_opportunities`` is the API contract for "what's hot
+    this tick" — frontend clients render the panel from this field
+    without re-running ``rank_opportunities`` themselves.
+
+    Each entry should carry the symbol, tier, composite_score, and
+    the seven driver fields the TUI uses in its drilldown. We assert
+    the structural shape; the ordering and threshold semantics are
+    covered by the opportunities-ranker tests, not here.
+    """
+    client, _ = _build_client(watchlist=["AAPL", "MSFT", "NVDA", "TSLA", "SPY"])
+    body = client.get("/api/snapshot").json()
+
+    assert "ranked_opportunities" in body
+    assert "intraday_ranked_opportunities" in body
+    ranked = body["ranked_opportunities"]
+    assert isinstance(ranked, list)
+    # Mock controller produces enough motion that *some* symbol clears
+    # the threshold; defensive against quiet ticks where it's empty.
+    for opp in ranked:
+        assert {
+            "symbol",
+            "tier",
+            "composite_score",
+            "profile",
+            "rationale",
+            "technical_alignment",
+            "sentiment_alignment",
+            "confidence_acceleration",
+            "momentum_persistence",
+            "unusual_activity",
+            "reversal_strength",
+            "signal_quality_score",
+        }.issubset(opp.keys())
+        assert isinstance(opp["composite_score"], float)
+        # Tier should be a string enum value (post-jsonable_encoder).
+        assert isinstance(opp["tier"], str)
+
+    # Daily-only sessions (intraday feature off) leave the intraday
+    # ranked field empty rather than absent.
+    assert body["intraday_ranked_opportunities"] == []
 
 
 def test_snapshot_payload_is_json_roundtrippable() -> None:

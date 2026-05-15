@@ -487,7 +487,7 @@ body,
 
 .opps__row {
   display: grid;
-  grid-template-columns: auto auto auto 1fr;
+  grid-template-columns: auto auto auto auto auto 1fr;
   gap: 0.5rem;
   align-items: center;
   padding: 0.3rem 0.4rem;
@@ -538,6 +538,21 @@ body,
 }
 
 .opps__detail {
+  color: var(--fg-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opps__score {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.opps__rationale {
   color: var(--fg-dim);
   font-size: 11px;
   overflow: hidden;
