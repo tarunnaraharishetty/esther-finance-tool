@@ -21,9 +21,29 @@ from src.dashboard.state import (
 )
 from src.data.models import NewsArticle
 from src.intelligence.alerts import AlertEngine
+from src.intelligence.opportunities import (
+    rank_opportunities,
+    rank_opportunities_intraday,
+)
 from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentScore
 from src.strategy.base import RecommendationTier, SignalAction
 from src.strategy.recommendation import RecommendationEngine
+
+
+def _populate_opps(snap: DashboardSnapshot) -> DashboardSnapshot:
+    """Pre-compute and attach ranked-opportunity tuples to a hand-built
+    snapshot, mirroring what ``BaseController._record_opportunities``
+    does in production.
+
+    The TUI now reads ``snap.ranked_opportunities`` / ``intraday_``
+    directly rather than calling the ranker at render time. Test
+    fixtures that construct snapshots by hand must pre-populate the
+    field if they want OPP behavior to render. Returns the snapshot
+    so callers can chain.
+    """
+    snap.ranked_opportunities = tuple(rank_opportunities(snap, n=3))
+    snap.intraday_ranked_opportunities = tuple(rank_opportunities_intraday(snap, n=3))
+    return snap
 
 # ---------------------------------------------------------------------------
 # State plumbing
@@ -1238,7 +1258,7 @@ async def test_watchlist_header_renders_opp_lines_when_qualifying_rows_exist() -
         reasoning="",
         timestamp=fired,
     )
-    snap = DashboardSnapshot(tick=1, rows=[qualifying])
+    snap = _populate_opps(DashboardSnapshot(tick=1, rows=[qualifying]))
 
     app = DashboardApp(
         MockDashboardController(watchlist=["AAPL"]),
@@ -1294,7 +1314,7 @@ async def test_opp_line_shows_composite_score_and_profile_chip() -> None:
         signal_quality="high",
         stability="stable",
     )
-    snap = DashboardSnapshot(tick=1, rows=[row])
+    snap = _populate_opps(DashboardSnapshot(tick=1, rows=[row]))
 
     app = DashboardApp(
         MockDashboardController(watchlist=["NVDA"]),
@@ -1501,12 +1521,14 @@ async def test_detail_panel_renders_opportunity_intelligence_when_in_top_n() -> 
         signal_quality="high",
         stability="stable",
     )
-    snap = DashboardSnapshot(
-        tick=1,
-        rows=[row],
-        opp_history={
-            "NVDA": OpportunityHistory(streak=3, appearances=4, window=10),
-        },
+    snap = _populate_opps(
+        DashboardSnapshot(
+            tick=1,
+            rows=[row],
+            opp_history={
+                "NVDA": OpportunityHistory(streak=3, appearances=4, window=10),
+            },
+        )
     )
 
     app = DashboardApp(
@@ -1617,12 +1639,14 @@ async def test_detail_panel_quality_chips_render_for_high_conviction_row() -> No
         confidence_first=0.60,
         confidence_last=0.90,
     )
-    snap = DashboardSnapshot(
-        tick=5,
-        rows=[row],
-        signal_history={
-            "MSFT": SignalHistorySummary(current=current_episode, recent=()),
-        },
+    snap = _populate_opps(
+        DashboardSnapshot(
+            tick=5,
+            rows=[row],
+            signal_history={
+                "MSFT": SignalHistorySummary(current=current_episode, recent=()),
+            },
+        )
     )
     app = DashboardApp(
         MockDashboardController(watchlist=["MSFT"]),
@@ -2360,10 +2384,12 @@ async def test_action_cycle_opportunity_targets_intraday_in_intraday_view() -> N
         timestamp=fired,
         tier=RecommendationTier.HOLD,
     )
-    snap = DashboardSnapshot(
-        tick=1,
-        rows=[msft_row, aapl_row],
-        intraday_signal_history={"AAPL": intraday_history},
+    snap = _populate_opps(
+        DashboardSnapshot(
+            tick=1,
+            rows=[msft_row, aapl_row],
+            intraday_signal_history={"AAPL": intraday_history},
+        )
     )
     app = DashboardApp(
         MockDashboardController(watchlist=["MSFT", "AAPL"]),
@@ -2542,7 +2568,7 @@ async def test_watchlist_header_opp_lines_flip_to_intraday_on_view_toggle() -> N
             technical_score=-0.6,
         ),
     )
-    snap = DashboardSnapshot(tick=1, rows=[row])
+    snap = _populate_opps(DashboardSnapshot(tick=1, rows=[row]))
     app = DashboardApp(
         MockDashboardController(watchlist=["NVDA"]),
         refresh_seconds=999.0,
@@ -3056,7 +3082,6 @@ async def test_cycle_opportunity_walks_through_ranked_opps_in_order() -> None:
 
     from src.dashboard.app import DashboardApp
     from src.dashboard.state import DashboardSnapshot
-    from src.intelligence.opportunities import rank_opportunities
 
     rows = [
         _opp_drill_row("AAPL"),
@@ -3064,8 +3089,8 @@ async def test_cycle_opportunity_walks_through_ranked_opps_in_order() -> None:
         _opp_drill_row("NVDA"),
         _opp_drill_hold_row("SPY"),  # never ranks; cycle should skip it
     ]
-    snap = DashboardSnapshot(tick=1, rows=rows)
-    expected = [opp.symbol for opp in rank_opportunities(snap, n=3)]
+    snap = _populate_opps(DashboardSnapshot(tick=1, rows=rows))
+    expected = [opp.symbol for opp in snap.ranked_opportunities]
     # Sanity check: at least 2 OPPs so cycling is meaningful.
     assert len(expected) >= 2
 
@@ -3104,15 +3129,14 @@ async def test_cycle_opportunity_jumps_to_first_when_off_an_opp() -> None:
 
     from src.dashboard.app import DashboardApp
     from src.dashboard.state import DashboardSnapshot
-    from src.intelligence.opportunities import rank_opportunities
 
     rows = [
         _opp_drill_hold_row("SPY"),  # index 0: never ranks
         _opp_drill_row("AAPL"),
         _opp_drill_row("MSFT"),
     ]
-    snap = DashboardSnapshot(tick=1, rows=rows)
-    expected = [opp.symbol for opp in rank_opportunities(snap, n=3)]
+    snap = _populate_opps(DashboardSnapshot(tick=1, rows=rows))
+    expected = [opp.symbol for opp in snap.ranked_opportunities]
     assert len(expected) >= 1
 
     app = DashboardApp(
@@ -3170,7 +3194,7 @@ async def test_app_b_keypress_with_no_briefer_surfaces_error() -> None:
     from src.dashboard.state import DashboardSnapshot
 
     rows = [_opp_drill_row("AAPL"), _opp_drill_row("MSFT")]
-    snap = DashboardSnapshot(tick=1, rows=rows)
+    snap = _populate_opps(DashboardSnapshot(tick=1, rows=rows))
 
     app = DashboardApp(
         MockDashboardController(watchlist=["AAPL", "MSFT"]),
@@ -3229,7 +3253,6 @@ async def test_app_b_keypress_briefs_top_opp_from_non_opp_row() -> None:
 
     from src.dashboard.app import DashboardApp, DetailPanel
     from src.dashboard.state import DashboardSnapshot
-    from src.intelligence.opportunities import rank_opportunities
 
     briefer = MagicMock()
     briefer.brief = MagicMock(return_value="NVDA leads at composite 0.8.")
@@ -3239,8 +3262,8 @@ async def test_app_b_keypress_briefs_top_opp_from_non_opp_row() -> None:
         _opp_drill_row("AAPL"),
         _opp_drill_row("MSFT"),
     ]
-    snap = DashboardSnapshot(tick=1, rows=rows)
-    expected_top = rank_opportunities(snap, n=3)[0].symbol
+    snap = _populate_opps(DashboardSnapshot(tick=1, rows=rows))
+    expected_top = snap.ranked_opportunities[0].symbol
 
     app = DashboardApp(
         MockDashboardController(watchlist=[r.symbol for r in rows]),
@@ -3274,7 +3297,6 @@ async def test_app_b_keypress_briefs_currently_selected_opp() -> None:
 
     from src.dashboard.app import DashboardApp
     from src.dashboard.state import DashboardSnapshot
-    from src.intelligence.opportunities import rank_opportunities
 
     briefer = MagicMock()
     briefer.brief = MagicMock(return_value="brief text")
@@ -3284,8 +3306,8 @@ async def test_app_b_keypress_briefs_currently_selected_opp() -> None:
         _opp_drill_row("MSFT"),
         _opp_drill_row("NVDA"),
     ]
-    snap = DashboardSnapshot(tick=1, rows=rows)
-    ranked = rank_opportunities(snap, n=3)
+    snap = _populate_opps(DashboardSnapshot(tick=1, rows=rows))
+    ranked = snap.ranked_opportunities
     assert len(ranked) >= 2
 
     # Pick an OPP that ISN'T rank 1 so we can prove we briefed the
@@ -3323,7 +3345,7 @@ async def test_app_b_keypress_caches_brief_by_composite_bucket() -> None:
     briefer.brief = MagicMock(return_value="cached brief")
 
     rows = [_opp_drill_row("NVDA"), _opp_drill_row("AAPL")]
-    snap = DashboardSnapshot(tick=1, rows=rows)
+    snap = _populate_opps(DashboardSnapshot(tick=1, rows=rows))
 
     app = DashboardApp(
         MockDashboardController(watchlist=["NVDA", "AAPL"]),

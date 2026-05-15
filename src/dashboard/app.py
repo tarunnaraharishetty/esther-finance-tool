@@ -48,8 +48,6 @@ from src.intelligence.history import SignalEpisode, SignalHistorySummary
 from src.intelligence.opportunities import (
     Opportunity,
     RankedOpportunity,
-    rank_opportunities,
-    rank_opportunities_intraday,
 )
 from src.intelligence.opportunity_drilldown import (
     OpportunityDrilldown,
@@ -91,6 +89,30 @@ _ACTION_STYLES = {
 # WatchlistHeader can all reference the same constants.
 _VIEW_DAILY = "daily"
 _VIEW_INTRADAY = "intraday"
+
+
+def _ranked_opportunities_for_view(
+    snap: DashboardSnapshot, view: str
+) -> tuple[RankedOpportunity, ...]:
+    """Pick the right ranked-opportunity list for the active view.
+
+    Every render path that used to call ``rank_opportunities(snap)`` /
+    ``rank_opportunities_intraday(snap)`` goes through this helper
+    instead. The values are pre-computed once per tick by
+    ``BaseController._record_opportunities`` and carried on the
+    snapshot — so the TUI, the SSE stream, and any HTTP client all
+    render from the same ranking pass. Empty tuple when no symbol
+    qualifies.
+
+    Snapshots constructed outside the controller (typically test
+    fixtures) must pre-populate ``ranked_opportunities`` /
+    ``intraday_ranked_opportunities`` if they want OPP behavior to
+    render — the helper is intentionally non-falling-back so the
+    invariant stays load-bearing rather than silently re-computing.
+    """
+    if view == _VIEW_INTRADAY:
+        return snap.intraday_ranked_opportunities
+    return snap.ranked_opportunities
 
 
 def _fmt_signed(x: float) -> str:
@@ -319,15 +341,15 @@ class WatchlistHeader(Static):
             lines.append(f"{_section_label('INTRADAY')}{intraday_summary}")
 
         # --- Top opportunities (skip when none qualify) ---------------
-        # Phase 2b: in intraday view the OPP lines render from
-        # ``rank_opportunities_intraday`` + the parallel intraday
-        # history tracker. Daily view stays unchanged.
+        # Phase 2b: in intraday view the OPP lines render from the
+        # intraday ranker output + parallel intraday history tracker.
+        # Both views read pre-computed snapshot fields populated by the
+        # controller, so we never re-rank during render.
+        opportunities = _ranked_opportunities_for_view(snap, self.view_timeframe)
         if self.view_timeframe == _VIEW_INTRADAY:
-            opportunities = rank_opportunities_intraday(snap, n=3)
             opp_history_source = snap.intraday_opp_history
             opp_label = "OPP-I"  # disambiguate so the trader can tell at a glance
         else:
-            opportunities = rank_opportunities(snap, n=3)
             opp_history_source = snap.opp_history
             opp_label = "OPP"
         for opp in opportunities:
@@ -527,13 +549,13 @@ def _header_signature(
     # Opportunities + their history badges drive the OPP lines.
     # Phase 2b: in intraday view the OPP section reads from the
     # intraday ranker + intraday history mirror, so the cache
-    # fingerprint has to switch sources too.
-    if view_timeframe == _VIEW_INTRADAY:
-        ranked_for_sig = rank_opportunities_intraday(snap, n=3)
-        opp_history_for_sig = snap.intraday_opp_history
-    else:
-        ranked_for_sig = rank_opportunities(snap, n=3)
-        opp_history_for_sig = snap.opp_history
+    # fingerprint has to switch sources too. Both come pre-computed
+    # on the snapshot — _ranked_opportunities_for_view is the single
+    # source of truth.
+    ranked_for_sig = _ranked_opportunities_for_view(snap, view_timeframe)
+    opp_history_for_sig = (
+        snap.intraday_opp_history if view_timeframe == _VIEW_INTRADAY else snap.opp_history
+    )
     opp_sig = tuple(
         (
             o.symbol,
@@ -1380,22 +1402,21 @@ class DetailPanel(Static):
         idx = max(0, min(self.row_index, len(snap.rows) - 1))
         r = snap.rows[idx]
 
-        # OPP match: compute once so the signature builder and the
-        # drilldown render see the same RankedOpportunity. Pure call,
-        # negligible cost — same data the WatchlistHeader already
-        # recomputes on its own render.
+        # OPP match: read the pre-computed top-N from the snapshot so
+        # the signature builder and the drilldown render see the same
+        # RankedOpportunity the controller produced for this tick.
         opp_match: tuple[int, RankedOpportunity] | None = None
-        for rank, opp in enumerate(rank_opportunities(snap, n=3), start=1):
+        for rank, opp in enumerate(snap.ranked_opportunities, start=1):
             if opp.symbol == r.symbol:
                 opp_match = (rank, opp)
                 break
 
-        # Phase 2c: do the same lookup against the intraday ranker so
-        # the Daily / Intraday Intelligence blocks below can show each
+        # Phase 2c: same lookup against the intraday ranking so the
+        # Daily / Intraday Intelligence blocks below can show each
         # side's opp rank without re-ranking inside the formatter.
         intraday_opp_match: tuple[int, RankedOpportunity] | None = None
         if r.intraday is not None:
-            for rank, opp in enumerate(rank_opportunities_intraday(snap, n=3), start=1):
+            for rank, opp in enumerate(snap.intraday_ranked_opportunities, start=1):
                 if opp.symbol == r.symbol:
                     intraday_opp_match = (rank, opp)
                     break
@@ -2406,16 +2427,15 @@ class DashboardApp(App[None]):
 
         from src.intelligence.opportunity_brief import OpportunityBriefContext
 
-        # Phase 2c follow-up: route through the active view's ranker
-        # and brief cache. Daily and intraday OPPs cache separately
-        # so a brief from one view never displays for the other.
+        # Phase 2c follow-up: route through the active view's
+        # pre-computed ranking + brief cache. Daily and intraday OPPs
+        # cache separately so a brief from one view never displays for
+        # the other.
         intraday_view = self.view_timeframe == _VIEW_INTRADAY
-        if intraday_view:
-            ranked = rank_opportunities_intraday(snap, n=3)
-            cache_store = self._intraday_opp_brief_cache
-        else:
-            ranked = rank_opportunities(snap, n=3)
-            cache_store = self._opp_brief_cache
+        ranked = _ranked_opportunities_for_view(snap, self.view_timeframe)
+        cache_store = (
+            self._intraday_opp_brief_cache if intraday_view else self._opp_brief_cache
+        )
         if not ranked:
             return
 
@@ -2524,13 +2544,10 @@ class DashboardApp(App[None]):
         snap = self._snapshot
         if snap is None or not snap.rows:
             return
-        # Phase 2c follow-up: use the active view's ranker so `o`
-        # cycles through intraday OPPs when the trader is on the
-        # intraday view, and daily OPPs otherwise.
-        if self.view_timeframe == _VIEW_INTRADAY:
-            ranked = rank_opportunities_intraday(snap, n=3)
-        else:
-            ranked = rank_opportunities(snap, n=3)
+        # Phase 2c follow-up: cycle through the active view's
+        # pre-computed top-N so `o` walks intraday OPPs in intraday
+        # view, daily OPPs in daily view.
+        ranked = _ranked_opportunities_for_view(snap, self.view_timeframe)
         if not ranked:
             return
 
