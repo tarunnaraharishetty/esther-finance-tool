@@ -32,6 +32,7 @@ dependencies = [
     "tenacity>=8.3",
     "pyyaml>=6.0",
     "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.optional-dependencies]

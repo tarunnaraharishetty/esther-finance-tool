@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (Phase 0 FastAPI scaffold — REST snapshot endpoint shipped on top of the controller).*
+*Last touched: 2026-05-14 (Phase 0 — `esther serve` CLI ships the API; only the stream endpoint is left for Phase 0).*
 
 ---
 
@@ -246,7 +246,7 @@ dashboard or exposed via the CLI.
   store is wired.
 
 **Quality baseline**
-- 672 passing tests, 1 deselected (`slow`/`integration`)
+- 676 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
 - `mypy src` (`--strict`) green across all 53 source files
 - Documented exceptions live in `pyproject.toml`
@@ -263,8 +263,11 @@ is now in motion:
   + `GET /api/health` endpoints binding to a `BaseController` instance.
   Uses FastAPI's `jsonable_encoder` on the DashboardSnapshot tree —
   no parallel Pydantic models (yet). 6 tests via `TestClient`.
-- ⏳ `esther serve [--host 127.0.0.1] [--port 8000] [--mock]` CLI
-  command that boots uvicorn against the same factory.
+- ✅ `esther serve [--host 127.0.0.1] [--port 8000] [--mock] ...`
+  CLI command that boots uvicorn against the factory. Reuses the
+  same `_build_controller` helper as `esther dashboard` so the two
+  commands can't drift on alerts / preflight / sentiment patching.
+  Warns when binding to a non-loopback host since the API has no auth.
 - ⏳ SSE / WebSocket stream endpoint that pushes one snapshot per
   tick. Requires deciding how the controller's tick loop integrates
   with the HTTP server's event loop.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 # Allow `python src/main.py` (script invocation) in addition to `python -m src.main`.
 # When run as a script, the project root is not on sys.path, so `import src` fails.
@@ -21,6 +22,13 @@ from rich.table import Table
 from src import __version__
 from src.config import Settings, get_settings
 from src.utils.logging import configure_logging, get_logger
+
+if TYPE_CHECKING:
+    # Imported only for the helper's type annotation. The runtime import
+    # lives inside _build_controller so `esther --help` stays fast — the
+    # dashboard.controller module transitively pulls in pandas, alpaca-py,
+    # and other heavy deps.
+    from src.dashboard.controller import BaseController
 
 console = Console()
 
@@ -749,19 +757,6 @@ def dashboard(
     is enabled) scores headlines with FinBERT.
     """
     from src.dashboard.app import DashboardApp
-    from src.dashboard.controller import (
-        BaseController,
-        DashboardController,
-        MockDashboardController,
-    )
-    from src.intelligence.alert_prioritizer import AlertPrioritizer
-    from src.intelligence.alerts import (
-        AlertEngine,
-        load_prioritizer_config_from_yaml,
-        load_rules_from_yaml,
-        load_snapshot_rules_from_yaml,
-    )
-    from src.strategy.recommendation import RecommendationEngine
 
     settings = get_settings()
     watchlist = list(symbols) if symbols else ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
@@ -775,113 +770,16 @@ def dashboard(
         burst_seconds if burst_seconds is not None else settings.dashboard_burst_seconds
     )
 
-    # Load user-defined alert rules + prioritizer knobs from
-    # config/alerts.yaml if present. Missing file = both default.
-    alerts_path = settings.config_dir / "alerts.yaml"
-    if alerts_path.exists():
-        try:
-            rules = load_rules_from_yaml(alerts_path)
-            snapshot_rules = load_snapshot_rules_from_yaml(alerts_path)
-            prio_config = load_prioritizer_config_from_yaml(alerts_path)
-            # YAML with no `snapshot_rules:` block returns an empty list,
-            # which would silence opportunity_entry. Fall back to defaults
-            # so the OPP alert stays on unless explicitly muted.
-            engine_kwargs: dict[str, object] = {"rules": rules}
-            if snapshot_rules:
-                engine_kwargs["snapshot_rules"] = snapshot_rules
-            alert_engine = AlertEngine(**engine_kwargs)  # type: ignore[arg-type]
-            alert_prioritizer = AlertPrioritizer(config=prio_config)  # type: ignore[arg-type]
-            console.print(
-                f"[dim]loaded {len(rules)} alert rule(s) + "
-                f"{len(snapshot_rules)} snapshot rule(s) from {alerts_path}[/dim]"
-            )
-        except ValueError as e:
-            console.print(f"[red]invalid {alerts_path}: {e}[/red]")
-            raise click.exceptions.Exit(2) from None
-    else:
-        alert_engine = AlertEngine()
-        alert_prioritizer = AlertPrioritizer()
-
-    # Auto-register intraday alert rules when the feature is on.
-    # Adds 3 per-row rules (reversal acceleration, momentum collapse,
-    # timeframe disagreement) and 2 snapshot rules (intraday OPP
-    # entry, rapid confidence decay). Cooldowns are merged into the
-    # active prioritizer config so YAML-loaded configs that didn't
-    # mention intraday rules still debounce them correctly.
-    if settings.intraday_enabled:
-        from dataclasses import replace as dc_replace
-
-        from src.intelligence.intraday_alerts import (
-            default_intraday_cooldowns,
-            default_intraday_rules,
-        )
-
-        extra_rules, extra_snapshot_rules = default_intraday_rules()
-        alert_engine.rules.extend(extra_rules)  # type: ignore[arg-type]
-        alert_engine.snapshot_rules.extend(extra_snapshot_rules)  # type: ignore[arg-type]
-        merged_cooldowns = {
-            **default_intraday_cooldowns(),
-            **alert_prioritizer.config.cooldowns,
-        }
-        alert_prioritizer.config = dc_replace(alert_prioritizer.config, cooldowns=merged_cooldowns)
-        console.print(
-            "[dim]intraday alerts wired: "
-            f"{len(extra_rules)} per-row + {len(extra_snapshot_rules)} snapshot rule(s)[/dim]"
-        )
-
-    controller: BaseController
-    if mock:
-        controller = MockDashboardController(
-            watchlist=watchlist,
-            use_sentiment=not no_sentiment,
-            alert_engine=alert_engine,
-            alert_prioritizer=alert_prioritizer,
-        )
-    else:
-        if not skip_preflight:
-            from src.utils.preflight import PreflightError, require_live_ok
-
-            try:
-                require_live_ok(settings, online=True)
-            except PreflightError as e:
-                console.print(
-                    "[red bold]Cannot launch live dashboard — preflight failed.[/red bold]"
-                )
-                _render_preflight_report(e.report)
-                console.print(
-                    "\n[dim]Run `esther doctor` for the same diagnostics, or "
-                    "pass `--mock` to run with synthetic data.[/dim]"
-                )
-                raise click.exceptions.Exit(2) from None
-
-        engine = RecommendationEngine()
-        if no_sentiment:
-            from src.sentiment.analyzer import (
-                SentimentAnalyzer,
-                SentimentLabel,
-                SentimentScore,
-            )
-
-            class _Neutral(SentimentAnalyzer):
-                def __init__(self) -> None:
-                    pass
-
-                def score_text(self, text: str) -> SentimentScore:
-                    return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
-
-                def score_article(self, article: object) -> SentimentScore:
-                    return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
-
-            engine.sentiment_analyzer = _Neutral()
-        controller = DashboardController(
-            watchlist=watchlist,
-            engine=engine,
-            settings=settings,
-            lookback_days=lookback_days,
-            news_hours=news_hours,
-            alert_engine=alert_engine,
-            alert_prioritizer=alert_prioritizer,
-        )
+    controller = _build_controller(
+        watchlist=watchlist,
+        mock=mock,
+        no_sentiment=no_sentiment,
+        skip_preflight=skip_preflight,
+        lookback_days=lookback_days,
+        news_hours=news_hours,
+        settings=settings,
+        surface="dashboard",
+    )
 
     # Try to build the LLM summarizer + OPP briefer; if ANTHROPIC_API_KEY
     # isn't set the dashboard still launches but the `s` and `b` keypresses
@@ -912,6 +810,234 @@ def dashboard(
     ).run()
 
 
+@cli.command()
+@click.option(
+    "-s",
+    "--symbol",
+    "symbols",
+    multiple=True,
+    help="Repeat for each ticker, e.g. -s AAPL -s MSFT. Defaults to AAPL MSFT NVDA TSLA SPY.",
+)
+@click.option("--host", default="127.0.0.1", show_default=True, help="Interface to bind.")
+@click.option("--port", default=8000, show_default=True, type=int, help="TCP port to bind.")
+@click.option(
+    "--lookback-days", default=60, show_default=True, help="OHLCV history window per snapshot."
+)
+@click.option(
+    "--news-hours", default=48, show_default=True, help="News lookback window per snapshot."
+)
+@click.option(
+    "--mock",
+    is_flag=True,
+    help="Use synthetic data — no Alpaca credentials required.",
+)
+@click.option(
+    "--no-sentiment",
+    is_flag=True,
+    help="Skip FinBERT — sentiment score forced to zero (no model download).",
+)
+@click.option(
+    "--skip-preflight",
+    is_flag=True,
+    help="Skip the preflight checks. Not recommended.",
+)
+def serve(
+    symbols: tuple[str, ...],
+    host: str,
+    port: int,
+    lookback_days: int,
+    news_hours: int,
+    mock: bool,
+    no_sentiment: bool,
+    skip_preflight: bool,
+) -> None:
+    """Launch the read-only HTTP/JSON API mirror of the dashboard.
+
+    Boots uvicorn against the FastAPI factory in ``src.api``. The server
+    exposes ``GET /api/health`` and ``GET /api/snapshot`` — the same
+    snapshot the Textual dashboard renders, JSON-encoded for a future
+    web / mobile / external client.
+
+    Decision-support data only — no order-submission endpoints, and the
+    upstream Alpaca client is paper-feed locked. Bind defaults to
+    localhost; only flip ``--host 0.0.0.0`` after wiring auth.
+    """
+    import uvicorn
+
+    from src.api import create_app
+
+    settings = get_settings()
+    watchlist = list(symbols) if symbols else ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
+
+    controller = _build_controller(
+        watchlist=watchlist,
+        mock=mock,
+        no_sentiment=no_sentiment,
+        skip_preflight=skip_preflight,
+        lookback_days=lookback_days,
+        news_hours=news_hours,
+        settings=settings,
+        surface="API server",
+    )
+    app = create_app(controller)
+
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        console.print(
+            f"[yellow]warning: binding to {host} — API has no auth yet, "
+            "exposing to a non-loopback address is risky.[/yellow]"
+        )
+    console.print(
+        f"[green]Esther API live at[/green] http://{host}:{port}/api/snapshot · "
+        f"[dim]watchlist: {', '.join(watchlist) or '(empty)'}[/dim]"
+    )
+    console.print("[dim]Ctrl+C to stop.[/dim]")
+    # log_level=warning keeps uvicorn's per-request access logs out of
+    # the terminal — Esther's own structlog setup handles request
+    # observability if needed.
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
+def _build_controller(
+    *,
+    watchlist: list[str],
+    mock: bool,
+    no_sentiment: bool,
+    skip_preflight: bool,
+    lookback_days: int,
+    news_hours: int,
+    settings: Settings,
+    surface: str,
+) -> BaseController:
+    """Construct the snapshot-producing controller for ``dashboard`` /
+    ``serve``.
+
+    Both commands need exactly the same setup: load ``alerts.yaml`` if
+    present, auto-register intraday rules when the feature is on,
+    optionally run the preflight gate on live mode, and patch the
+    sentiment analyzer to neutral on ``--no-sentiment``. Keeping this
+    in one place means a future tweak to either command's pipeline
+    can't drift apart from the other.
+
+    ``surface`` only colors the preflight-failure error message
+    ("Cannot launch live <surface> — preflight failed.") — the rest
+    of the pipeline is identical regardless of caller.
+    """
+    from src.dashboard.controller import (
+        DashboardController,
+        MockDashboardController,
+    )
+    from src.intelligence.alert_prioritizer import AlertPrioritizer
+    from src.intelligence.alerts import (
+        AlertEngine,
+        load_prioritizer_config_from_yaml,
+        load_rules_from_yaml,
+        load_snapshot_rules_from_yaml,
+    )
+    from src.strategy.recommendation import RecommendationEngine
+
+    # Load user-defined alert rules + prioritizer knobs from
+    # config/alerts.yaml if present. Missing file = both default.
+    alerts_path = settings.config_dir / "alerts.yaml"
+    if alerts_path.exists():
+        try:
+            rules = load_rules_from_yaml(alerts_path)
+            snapshot_rules = load_snapshot_rules_from_yaml(alerts_path)
+            prio_config = load_prioritizer_config_from_yaml(alerts_path)
+            # YAML with no `snapshot_rules:` block returns an empty list,
+            # which would silence opportunity_entry. Fall back to defaults
+            # so the OPP alert stays on unless explicitly muted.
+            engine_kwargs: dict[str, object] = {"rules": rules}
+            if snapshot_rules:
+                engine_kwargs["snapshot_rules"] = snapshot_rules
+            alert_engine = AlertEngine(**engine_kwargs)  # type: ignore[arg-type]
+            alert_prioritizer = AlertPrioritizer(config=prio_config)  # type: ignore[arg-type]
+            console.print(
+                f"[dim]loaded {len(rules)} alert rule(s) + "
+                f"{len(snapshot_rules)} snapshot rule(s) from {alerts_path}[/dim]"
+            )
+        except ValueError as e:
+            console.print(f"[red]invalid {alerts_path}: {e}[/red]")
+            raise click.exceptions.Exit(2) from None
+    else:
+        alert_engine = AlertEngine()
+        alert_prioritizer = AlertPrioritizer()
+
+    # Auto-register intraday alert rules when the feature is on.
+    if settings.intraday_enabled:
+        from dataclasses import replace as dc_replace
+
+        from src.intelligence.intraday_alerts import (
+            default_intraday_cooldowns,
+            default_intraday_rules,
+        )
+
+        extra_rules, extra_snapshot_rules = default_intraday_rules()
+        alert_engine.rules.extend(extra_rules)  # type: ignore[arg-type]
+        alert_engine.snapshot_rules.extend(extra_snapshot_rules)  # type: ignore[arg-type]
+        merged_cooldowns = {
+            **default_intraday_cooldowns(),
+            **alert_prioritizer.config.cooldowns,
+        }
+        alert_prioritizer.config = dc_replace(alert_prioritizer.config, cooldowns=merged_cooldowns)
+        console.print(
+            "[dim]intraday alerts wired: "
+            f"{len(extra_rules)} per-row + {len(extra_snapshot_rules)} snapshot rule(s)[/dim]"
+        )
+
+    if mock:
+        return MockDashboardController(
+            watchlist=watchlist,
+            use_sentiment=not no_sentiment,
+            alert_engine=alert_engine,
+            alert_prioritizer=alert_prioritizer,
+        )
+
+    if not skip_preflight:
+        from src.utils.preflight import PreflightError, require_live_ok
+
+        try:
+            require_live_ok(settings, online=True)
+        except PreflightError as e:
+            console.print(
+                f"[red bold]Cannot launch live {surface} — preflight failed.[/red bold]"
+            )
+            _render_preflight_report(e.report)
+            console.print(
+                "\n[dim]Run `esther doctor` for the same diagnostics, or "
+                "pass `--mock` to run with synthetic data.[/dim]"
+            )
+            raise click.exceptions.Exit(2) from None
+
+    engine = RecommendationEngine()
+    if no_sentiment:
+        from src.sentiment.analyzer import (
+            SentimentAnalyzer,
+            SentimentLabel,
+            SentimentScore,
+        )
+
+        class _Neutral(SentimentAnalyzer):
+            def __init__(self) -> None:
+                pass
+
+            def score_text(self, text: str) -> SentimentScore:
+                return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+            def score_article(self, article: object) -> SentimentScore:
+                return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+        engine.sentiment_analyzer = _Neutral()
+    return DashboardController(
+        watchlist=watchlist,
+        engine=engine,
+        settings=settings,
+        lookback_days=lookback_days,
+        news_hours=news_hours,
+        alert_engine=alert_engine,
+        alert_prioritizer=alert_prioritizer,
+    )
+
+
 def _print_banner(settings: Settings) -> None:
     body = (
         f"[bold]Esther[/bold] v{__version__}\n"
@@ -926,6 +1052,7 @@ def _print_banner(settings: Settings) -> None:
         "  esther summarize   AI-written brief for one symbol (needs ANTHROPIC_API_KEY)\n"
         "  esther recap       AI-written brief across the whole watchlist\n"
         "  esther dashboard   live Textual dashboard (use --mock for demo)\n"
+        "  esther serve       HTTP/JSON API mirror (use --mock for demo)\n"
     )
     console.print(Panel(body, title="market intelligence + decision support", border_style="cyan"))
 
