@@ -138,15 +138,581 @@ body,
   }
 }
 
-/* --- placeholders (will be replaced when panels land) ------------------ */
+/* --- placeholders ----------------------------------------------------- */
 
 .placeholder {
   color: var(--fg-dim);
   font-style: italic;
 }
 
-.placeholder--debug {
-  font-style: normal;
-  white-space: pre-wrap;
+/* --- grid layout ------------------------------------------------------- */
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
+  grid-template-areas:
+    "watchlist detail"
+    "watchlist pulse"
+    "alerts    opps";
+  gap: 0.5rem;
+  height: 100%;
+}
+
+.grid__watchlist {
+  grid-area: watchlist;
+  min-height: 0;
+  overflow: auto;
+}
+
+.grid__detail {
+  grid-area: detail;
+  min-height: 0;
+}
+
+.grid__pulse {
+  grid-area: pulse;
+  min-height: 0;
+}
+
+.grid__opps {
+  grid-area: opps;
+  min-height: 0;
+}
+
+.grid__alerts {
+  grid-area: alerts;
+  min-height: 0;
+}
+
+/* Single-column on narrow screens — keeps the app readable on a
+ * laptop in coffee-shop mode. We don't optimize for mobile; the
+ * dashboard's information density assumes a desktop. */
+@media (max-width: 900px) {
+  .grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "watchlist"
+      "detail"
+      "pulse"
+      "opps"
+      "alerts";
+  }
+}
+
+/* --- panel shell ------------------------------------------------------- */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  height: 100%;
+  min-height: 0;
+}
+
+.panel__title {
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.panel__badge {
+  font-size: 10px;
+  background: var(--c-critical);
+  color: #fff;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  font-weight: 700;
+}
+
+.panel__body {
+  padding: 0.5rem 0.75rem;
+  flex: 1;
+  min-height: 0;
+}
+
+.panel__body--scroll {
+  overflow: auto;
+}
+
+.panel__body--empty {
+  color: var(--fg-faint);
+  font-style: italic;
+}
+
+/* --- watchlist --------------------------------------------------------- */
+
+.watchlist {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.watchlist th {
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  background: var(--bg-elev);
+  position: sticky;
+  top: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-dim);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+
+.watchlist th.num {
+  text-align: right;
+}
+
+.watchlist td {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.watchlist td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.watchlist td.sym {
+  font-weight: 600;
+}
+
+.watchlist td.bar code {
+  color: var(--c-buy);
+  font-size: 11px;
+  letter-spacing: -0.1em;
+}
+
+.watchlist__row {
+  cursor: pointer;
+}
+
+.watchlist__row:hover {
+  background: var(--bg-elev-2);
+}
+
+.watchlist__row--active {
+  background: var(--bg-elev-2);
+  box-shadow: inset 2px 0 0 var(--c-info);
+}
+
+.watchlist__row--error td {
+  color: var(--fg-faint);
+}
+
+.watchlist__row:focus-visible {
+  outline: 1px solid var(--c-info);
+  outline-offset: -1px;
+}
+
+.watchlist .empty {
+  color: var(--fg-faint);
+  font-style: italic;
+  text-align: center;
+  padding: 1rem;
+}
+
+/* --- action / tier styling -------------------------------------------- */
+
+.act {
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+
+.act--buy {
+  color: var(--c-buy);
+}
+
+.act--sell {
+  color: var(--c-sell);
+}
+
+.act--hold {
+  color: var(--c-hold);
+}
+
+.num.pos {
+  color: var(--c-buy);
+}
+
+.num.neg {
+  color: var(--c-sell);
+}
+
+.tier {
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.4rem;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+.tier--strong_buy {
+  background: rgba(63, 185, 80, 0.25);
+  color: var(--c-buy);
+}
+
+.tier--buy {
+  background: rgba(63, 185, 80, 0.12);
+  color: var(--c-buy);
+}
+
+.tier--hold {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--c-hold);
+}
+
+.tier--sell {
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--c-sell);
+}
+
+.tier--strong_sell {
+  background: rgba(248, 81, 73, 0.25);
+  color: var(--c-sell);
+}
+
+/* --- pulse panel ------------------------------------------------------- */
+
+.pulse__row {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.pulse__pill {
+  padding: 0.15rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+}
+
+.pulse__pill--bull {
+  color: var(--c-buy);
+  border-color: rgba(63, 185, 80, 0.4);
+}
+
+.pulse__pill--bear {
+  color: var(--c-sell);
+  border-color: rgba(248, 81, 73, 0.4);
+}
+
+.pulse__summary {
+  margin: 0.3rem 0;
   color: var(--fg);
+  font-size: 12px;
+}
+
+.pulse__metrics {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.15rem 0.5rem;
+  margin: 0.5rem 0 0;
+  font-size: 11px;
+}
+
+.pulse__metrics dt {
+  color: var(--fg-dim);
+}
+
+.pulse__metrics dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.pulse__evolution {
+  margin-top: 0.5rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+.pulse__regime {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+.pulse__regime--riskon {
+  color: var(--c-buy);
+}
+
+.pulse__regime--riskoff {
+  color: var(--c-sell);
+}
+
+.pulse__regime--mixed {
+  color: var(--c-hold);
+}
+
+.pulse__patterns {
+  list-style: none;
+  margin: 0.3rem 0 0;
+  padding: 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.pulse__patterns li::before {
+  content: "· ";
+  color: var(--fg-faint);
+}
+
+/* --- opportunities ----------------------------------------------------- */
+
+.opps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.opps__row {
+  display: grid;
+  grid-template-columns: auto auto auto 1fr;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid var(--border-soft);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.opps__row:last-child {
+  border-bottom: none;
+}
+
+.opps__row:hover {
+  background: var(--bg-elev-2);
+}
+
+.opps__row:focus-visible {
+  outline: 1px solid var(--c-info);
+  outline-offset: -1px;
+}
+
+.opps__rank {
+  color: var(--fg-faint);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+}
+
+.opps__sym {
+  font-weight: 600;
+}
+
+.opps__tenure {
+  font-size: 10px;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.opps__tenure--new {
+  background: rgba(88, 166, 255, 0.18);
+  color: var(--c-info);
+}
+
+.opps__tenure--carry {
+  background: rgba(139, 148, 158, 0.18);
+  color: var(--fg-dim);
+}
+
+.opps__detail {
+  color: var(--fg-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- alerts feed ------------------------------------------------------- */
+
+.alerts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.alerts__row {
+  display: grid;
+  grid-template-columns: auto auto auto auto 1fr;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.alerts__row--recent {
+  opacity: 0.6;
+}
+
+.alerts__row:hover {
+  background: var(--bg-elev-2);
+}
+
+.alerts__row:focus-visible {
+  outline: 1px solid var(--c-info);
+  outline-offset: -1px;
+}
+
+.alerts__time {
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.alerts__severity {
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+}
+
+.alerts__severity--info {
+  background: rgba(88, 166, 255, 0.18);
+  color: var(--c-info);
+}
+
+.alerts__severity--warn {
+  background: rgba(210, 153, 34, 0.18);
+  color: var(--c-warn);
+}
+
+.alerts__severity--crit {
+  background: rgba(248, 81, 73, 0.18);
+  color: var(--c-critical);
+}
+
+.alerts__sym {
+  font-weight: 600;
+}
+
+.alerts__rule {
+  color: var(--fg-faint);
+}
+
+.alerts__msg {
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- symbol detail ----------------------------------------------------- */
+
+.detail__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.3rem 1rem;
+  margin-bottom: 0.5rem;
+  font-size: 12px;
+}
+
+.detail__grid > div {
+  display: flex;
+  flex-direction: column;
+}
+
+.detail__label {
+  color: var(--fg-faint);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 0.1rem;
+}
+
+.detail__section {
+  margin-top: 0.6rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+.detail__reasoning {
+  margin: 0.2rem 0 0;
+  color: var(--fg);
+  line-height: 1.5;
+}
+
+.detail__chips {
+  list-style: none;
+  margin: 0.2rem 0 0;
+  padding: 0;
+  display: flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.chip {
+  font-size: 11px;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--fg-dim);
+  background: var(--bg-elev-2);
+}
+
+.detail__intraday {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  margin-top: 0.2rem;
+  font-size: 12px;
+}
+
+.detail__opp {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin-top: 0.2rem;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.detail__headlines {
+  list-style: none;
+  margin: 0.2rem 0 0;
+  padding: 0;
+  font-size: 11px;
+  color: var(--fg);
+}
+
+.detail__headlines li {
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.detail__headlines li:last-child {
+  border-bottom: none;
+}
+
+.detail__headlines li::before {
+  content: "· ";
+  color: var(--fg-faint);
+}
+
+.detail__error {
+  color: var(--c-critical);
+  font-size: 12px;
 }
