@@ -1,0 +1,12 @@
+# Force both Python and Node providers to install in the build image.
+#
+# Nixpacks auto-detects providers from manifest files. `pyproject.toml`
+# at the repo root triggers the Python provider; `package.json` lives
+# in `web/` and may not be auto-detected. Enumerating providers
+# explicitly is the deterministic fix.
+#
+# We rely on `railway.toml`'s `buildCommand` for the actual install +
+# build sequence (pip install + npm ci + vite build). Each provider's
+# default phases run before our buildCommand, supplying `pip` and
+# `npm` on PATH.
+providers = ["python", "node"]

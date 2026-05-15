@@ -1,0 +1,21 @@
+# Railway service config.
+#
+# Build:  installs Python deps (editable install, exposes `esther` on PATH)
+#         and builds the React bundle into web/dist/.
+# Deploy: starts FastAPI on $PORT (Railway sets this). With web/dist/
+#         present the API serves the bundle from the same origin.
+#
+# Healthcheck: /api/health is cheap and never touches the controller
+# pipeline — Railway can probe aggressively without distorting tick
+# counters.
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "pip install -e . && cd web && npm ci && npm run build"
+
+[deploy]
+startCommand = "esther serve --mock --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
