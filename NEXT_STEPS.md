@@ -2,7 +2,7 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (Phase 0 — `esther serve` CLI ships the API; only the stream endpoint is left for Phase 0).*
+*Last touched: 2026-05-14 (Phase 0 complete: SSE streaming endpoint shipped on top of the shared broker; React + Vite frontend in progress).*
 
 ---
 
@@ -246,9 +246,9 @@ dashboard or exposed via the CLI.
   store is wired.
 
 **Quality baseline**
-- 676 passing tests, 1 deselected (`slow`/`integration`)
+- 694 passing tests, 1 deselected (`slow`/`integration`)
 - `ruff check .` green across the repo
-- `mypy src` (`--strict`) green across all 53 source files
+- `mypy src` (`--strict`) green across all 54 source files
 - Documented exceptions live in `pyproject.toml`
 
 ---
@@ -263,14 +263,21 @@ is now in motion:
   + `GET /api/health` endpoints binding to a `BaseController` instance.
   Uses FastAPI's `jsonable_encoder` on the DashboardSnapshot tree —
   no parallel Pydantic models (yet). 6 tests via `TestClient`.
-- ✅ `esther serve [--host 127.0.0.1] [--port 8000] [--mock] ...`
-  CLI command that boots uvicorn against the factory. Reuses the
-  same `_build_controller` helper as `esther dashboard` so the two
-  commands can't drift on alerts / preflight / sentiment patching.
-  Warns when binding to a non-loopback host since the API has no auth.
-- ⏳ SSE / WebSocket stream endpoint that pushes one snapshot per
-  tick. Requires deciding how the controller's tick loop integrates
-  with the HTTP server's event loop.
+- ✅ `esther serve [--host 127.0.0.1] [--port 8000] [--mock]
+  [--refresh-seconds N] ...` CLI command that boots uvicorn against
+  the factory. Reuses the same `_build_controller` helper as
+  `esther dashboard` so the two commands can't drift on alerts /
+  preflight / sentiment patching. Warns when binding to a non-loopback
+  host since the API has no auth.
+- ✅ SSE streaming endpoint at `GET /api/stream`. Architecture:
+  one `SnapshotBroker` per process owns the tick loop, every
+  connected client subscribes to a size-1 newest-wins
+  `asyncio.Queue` that the broker writes to on each tick. Heartbeat
+  comments every ≤15s keep proxies from culling idle connections.
+  New subscribers immediately receive the cached latest snapshot —
+  reconnect-safe. Toggle off with `--refresh-seconds 0`. Tested
+  against real uvicorn in a background thread (the in-process
+  TestClient/ASGITransport buffer streaming responses indefinitely).
 
 **Phase 1 — Read-only web mirror (not started)**
 - React + TypeScript + Vite shell consuming `/api/snapshot`.

@@ -841,6 +841,14 @@ def dashboard(
     is_flag=True,
     help="Skip the preflight checks. Not recommended.",
 )
+@click.option(
+    "--refresh-seconds",
+    default=None,
+    type=float,
+    help="Cadence of the SSE stream's tick loop. Falls back to "
+    "Settings.dashboard_refresh_seconds (5.0). Pass 0 (or any "
+    "non-positive value) to disable /api/stream entirely.",
+)
 def serve(
     symbols: tuple[str, ...],
     host: str,
@@ -850,13 +858,17 @@ def serve(
     mock: bool,
     no_sentiment: bool,
     skip_preflight: bool,
+    refresh_seconds: float | None,
 ) -> None:
     """Launch the read-only HTTP/JSON API mirror of the dashboard.
 
     Boots uvicorn against the FastAPI factory in ``src.api``. The server
-    exposes ``GET /api/health`` and ``GET /api/snapshot`` — the same
-    snapshot the Textual dashboard renders, JSON-encoded for a future
-    web / mobile / external client.
+    exposes:
+
+    \b
+      GET /api/health    — liveness probe
+      GET /api/snapshot  — one-shot fetch (request → fresh snapshot)
+      GET /api/stream    — Server-Sent Events stream of every tick
 
     Decision-support data only — no order-submission endpoints, and the
     upstream Alpaca client is paper-feed locked. Bind defaults to
@@ -869,6 +881,13 @@ def serve(
     settings = get_settings()
     watchlist = list(symbols) if symbols else ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
 
+    effective_refresh = (
+        refresh_seconds if refresh_seconds is not None else settings.dashboard_refresh_seconds
+    )
+    # 0 / negative cadence disables the stream — useful when running a
+    # REST-only deployment that doesn't want the broker spinning at all.
+    stream_interval: float | None = effective_refresh if effective_refresh > 0 else None
+
     controller = _build_controller(
         watchlist=watchlist,
         mock=mock,
@@ -879,16 +898,23 @@ def serve(
         settings=settings,
         surface="API server",
     )
-    app = create_app(controller)
+    app = create_app(controller, stream_interval=stream_interval)
 
     if host not in {"127.0.0.1", "localhost", "::1"}:
         console.print(
             f"[yellow]warning: binding to {host} — API has no auth yet, "
             "exposing to a non-loopback address is risky.[/yellow]"
         )
+    stream_status = (
+        f"stream every {stream_interval:.1f}s" if stream_interval else "stream disabled"
+    )
     console.print(
-        f"[green]Esther API live at[/green] http://{host}:{port}/api/snapshot · "
-        f"[dim]watchlist: {', '.join(watchlist) or '(empty)'}[/dim]"
+        f"[green]Esther API live at[/green] http://{host}:{port} · "
+        f"[dim]{stream_status} · watchlist: {', '.join(watchlist) or '(empty)'}[/dim]"
+    )
+    console.print(
+        f"[dim]Endpoints: /api/health · /api/snapshot · /api/stream "
+        f"(http://{host}:{port}/api/stream)[/dim]"
     )
     console.print("[dim]Ctrl+C to stop.[/dim]")
     # log_level=warning keeps uvicorn's per-request access logs out of
