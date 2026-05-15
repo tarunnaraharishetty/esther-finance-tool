@@ -68,6 +68,33 @@ export function PulseCard({ pulse, evolution }: Props) {
             )}
           </div>
         )}
+
+        {/* STRONG signals — only renders when the 5-tier promoter
+            actually fires STRONG_BUY / STRONG_SELL. We do not promote
+            anything client-side; an empty list means no symbol cleared
+            the promoter's gates this tick, and the section is omitted
+            entirely (matches the TUI's omit-when-empty semantics and
+            keeps the panel quiet most of the time — the natural
+            anti-spam behavior). */}
+        {pulse.strongest_symbols.length > 0 && (
+          <div className="pulse__strong" data-testid="pulse-strong">
+            <div className="detail__label">strong signals</div>
+            <ul className="pulse__strong-list">
+              {pulse.strongest_symbols.map(([symbol, display]) => {
+                const direction = display.includes("BUY") ? "buy" : "sell";
+                return (
+                  <li
+                    key={symbol}
+                    className={`pulse__strong-chip pulse__strong-chip--${direction}`}
+                  >
+                    <span className="pulse__strong-tier">{display}</span>
+                    <span className="pulse__strong-sym">{symbol}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
       </div>
     </section>
   );

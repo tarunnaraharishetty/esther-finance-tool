@@ -477,6 +477,57 @@ body,
   color: var(--fg-faint);
 }
 
+/* --- STRONG signals — populates only when the promoter fires
+       STRONG_BUY / STRONG_SELL. Mirrors the TUI statusline's chip:
+       bold green on buy, bold red on sell. ---------------------------- */
+
+.pulse__strong {
+  margin-top: 0.5rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+.pulse__strong-list {
+  list-style: none;
+  margin: 0.3rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.pulse__strong-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.15rem 0.55rem;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+.pulse__strong-chip--buy {
+  background: rgba(63, 185, 80, 0.18);
+  color: var(--c-buy);
+  border: 1px solid rgba(63, 185, 80, 0.45);
+}
+
+.pulse__strong-chip--sell {
+  background: rgba(248, 81, 73, 0.18);
+  color: var(--c-sell);
+  border: 1px solid rgba(248, 81, 73, 0.45);
+}
+
+.pulse__strong-tier {
+  text-transform: uppercase;
+}
+
+.pulse__strong-sym {
+  color: var(--fg);
+  font-weight: 700;
+}
+
 /* --- opportunities ----------------------------------------------------- */
 
 .opps {

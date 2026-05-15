@@ -160,6 +160,105 @@ def test_snapshot_carries_pre_computed_ranked_opportunities() -> None:
     assert body["intraday_ranked_opportunities"] == []
 
 
+def test_strongest_symbols_flows_through_to_api_when_promoter_fires() -> None:
+    """Full controller -> API -> JSON path proof for STRONG tiers.
+
+    The mock controller never produces STRONG_BUY / STRONG_SELL in
+    realistic mock runs (the 5-tier promoter's gates are strict by
+    design). We stub a controller that emits two STRONG rows + one
+    BUY + one HOLD, hit ``/api/snapshot``, and assert the
+    ``pulse.strongest_symbols`` field carries through with the exact
+    ``[symbol, tier-display]`` pair shape the frontend expects.
+
+    Verifies the contract the PulseCard STRONG-chip rendering depends
+    on. Anti-spam invariant lives on the Python side: ``strongest_symbols``
+    is empty when no row qualifies; this test proves the *positive*
+    case round-trips correctly so the React panel knows when to surface
+    chips at all.
+    """
+    from datetime import UTC, datetime
+
+    from src.api import create_app
+    from src.dashboard.controller import BaseController
+    from src.dashboard.state import DashboardSnapshot, RecommendationRow
+    from src.intelligence.pulse import compute_pulse
+    from src.strategy.base import RecommendationTier, SignalAction
+    from src.strategy.recommendation import RecommendationEngine
+
+    now = datetime.now(UTC)
+
+    def _row(sym: str, action: SignalAction, conf: float, tier: RecommendationTier) -> RecommendationRow:
+        return RecommendationRow(
+            symbol=sym,
+            action=action,
+            confidence=conf,
+            combined_score=conf,
+            technical_score=conf,
+            sentiment_score=conf,
+            rsi=0.5,
+            macd=0.5,
+            bollinger=0.5,
+            last_price=100.0,
+            num_news_articles=3,
+            reasoning="",
+            timestamp=now,
+            tier=tier,
+            signal_quality="high",
+            stability="stable",
+        )
+
+    class _StubController(BaseController):
+        """Minimal BaseController that emits a fixed snapshot.
+
+        Avoids the mock controller's synthetic OHLCV pipeline so we
+        can force STRONG tiers deterministically. compute_pulse is
+        invoked the same way the real controllers do via
+        _record_pulse, so the strongest_symbols computation is the
+        production code path.
+        """
+
+        async def fetch_snapshot(self) -> DashboardSnapshot:
+            rows = [
+                _row("NVDA", SignalAction.BUY, 0.92, RecommendationTier.STRONG_BUY),
+                _row("AAPL", SignalAction.BUY, 0.55, RecommendationTier.BUY),
+                _row("TSLA", SignalAction.SELL, 0.88, RecommendationTier.STRONG_SELL),
+                _row("SPY", SignalAction.HOLD, 0.15, RecommendationTier.HOLD),
+            ]
+            snap = DashboardSnapshot(tick=1, rows=rows, timestamp=now)
+            snap.pulse = compute_pulse(snap)
+            return snap
+
+    controller = _StubController(watchlist=["NVDA", "AAPL", "TSLA", "SPY"], engine=RecommendationEngine())
+    app = create_app(controller)
+    with TestClient(app) as client:
+        body = client.get("/api/snapshot").json()
+
+    # 1. The field exists and is non-empty — promoter fired.
+    pulse = body["pulse"]
+    strong = pulse["strongest_symbols"]
+    assert len(strong) == 2, f"expected 2 STRONG rows, got {strong}"
+
+    # 2. Each entry is a [symbol, tier-display] pair (encoded as a list
+    #    because tuples become lists through jsonable_encoder). The
+    #    tightened TS type `Array<[string, string]>` consumes exactly
+    #    this shape — a misuse like indexing [2] would be a compile
+    #    error client-side.
+    for entry in strong:
+        assert isinstance(entry, list) and len(entry) == 2
+        assert isinstance(entry[0], str) and isinstance(entry[1], str)
+
+    # 3. The two STRONG symbols come through — NVDA + TSLA, with the
+    #    tier-display strings that the React component splits on
+    #    ("BUY" vs "SELL") to pick a chip color.
+    by_symbol = dict(strong)
+    assert by_symbol["NVDA"] == "STRONG BUY"
+    assert by_symbol["TSLA"] == "STRONG SELL"
+    # 4. The non-STRONG rows (AAPL BUY, SPY HOLD) are correctly filtered
+    #    out by _compute_strongest_symbols.
+    assert "AAPL" not in by_symbol
+    assert "SPY" not in by_symbol
+
+
 def test_snapshot_payload_is_json_roundtrippable() -> None:
     """The encoded payload must survive a JSON round-trip cleanly.
 
