@@ -60,7 +60,9 @@ export function PulseCard({ pulse, evolution }: Props) {
             {evolution.patterns.length > 0 && (
               <ul className="pulse__patterns">
                 {evolution.patterns.map((p) => (
-                  <li key={p}>{p}</li>
+                  <li key={p.name} title={p.detail}>
+                    {p.label}
+                  </li>
                 ))}
               </ul>
             )}

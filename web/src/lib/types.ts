@@ -85,9 +85,15 @@ export interface MarketPulse {
   [extra: string]: unknown;
 }
 
+export interface TrajectoryPattern {
+  name: string;
+  label: string; // human-readable, ready to render verbatim
+  detail: string; // short context phrase (e.g. "across last 6 ticks")
+}
+
 export interface PulseEvolution {
   regime: "risk-on" | "risk-off" | "mixed" | "indeterminate" | string;
-  patterns: string[];
+  patterns: TrajectoryPattern[];
   [extra: string]: unknown;
 }
 
