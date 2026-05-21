@@ -127,6 +127,17 @@ class BaseController(ABC):
     async def fetch_snapshot(self) -> DashboardSnapshot:
         """Produce one frame of dashboard state."""
 
+    async def fetch_bars(self, symbol: str) -> pd.DataFrame | None:
+        """Return a recent OHLCV DataFrame for ``symbol`` or ``None``.
+
+        Used by routes that need raw bars (e.g. the Financial Analyzer
+        in :mod:`src.api.analyzer`) rather than the
+        :class:`RecommendationRow` summary the snapshot already
+        carries. Default implementation returns ``None`` — concrete
+        controllers that have a bar pipeline (live, mock) override.
+        """
+        return None
+
     def add_symbol(self, symbol: str) -> bool:
         """Append ``symbol`` to the watchlist for the next tick onward.
 
@@ -490,6 +501,31 @@ class DashboardController(BaseController):
         snap.session_store_status = self._persist_if_enabled()
         return snap
 
+    async def fetch_bars(self, symbol: str) -> pd.DataFrame | None:
+        """Pull recent OHLCV from Alpaca + on-disk cache.
+
+        Independent of the snapshot pipeline — does not write to
+        signal history or alert state. Used by the analyzer route to
+        compute normalized technical sub-scores from raw bars.
+        Returns ``None`` on any exception or empty frame so the
+        endpoint can fall back to "no technicals" gracefully.
+        """
+        now = datetime.now(UTC)
+        bars_start = now - timedelta(days=self.lookback_days)
+        try:
+            bars = await self.market.get_bars(
+                [symbol], self.timeframe, bars_start, now
+            )
+            df = self.market.to_dataframe(bars)
+            if not df.empty:
+                for c in ("open", "high", "low", "close"):
+                    df[c] = df[c].astype(float)
+                df["volume"] = df["volume"].astype(int)
+            df = bar_cache.merge_with_cache(symbol, self.timeframe, df)
+            return df if not df.empty else None
+        except Exception:
+            return None
+
     async def _row_for(self, symbol: str, now: datetime) -> RecommendationRow:
         bars_start = now - timedelta(days=self.lookback_days)
         news_start = now - timedelta(hours=self.news_hours)
@@ -627,6 +663,39 @@ class MockDashboardController(BaseController):
             s: {"drift": rng.uniform(-0.005, 0.015), "noise": rng.uniform(0.008, 0.02)}
             for s in watchlist
         }
+
+    async def fetch_bars(self, symbol: str) -> pd.DataFrame | None:
+        """Synthesize a deterministic OHLCV window for ``symbol``.
+
+        Same generation logic as ``_mock_row`` but standalone — the
+        analyzer route can call this without bumping the tick counter
+        or recording into signal history. Returns ``None`` for symbols
+        not in ``_sym_profiles`` (the mock only knows its own
+        watchlist).
+        """
+        prof = self._sym_profiles.get(symbol.upper())
+        if prof is None:
+            return None
+        n = 80
+        rng = np.random.default_rng(
+            self._np_rng.integers(0, 2**31 - 1) + hash(symbol) % 1000
+        )
+        rets = rng.normal(loc=prof["drift"], scale=prof["noise"], size=n)
+        close = 100.0 * np.exp(np.cumsum(rets))
+        now = datetime.now(UTC)
+        idx = pd.bdate_range(end=now, periods=n)
+        if len(idx) < n:
+            close = close[-len(idx) :]
+        return pd.DataFrame(
+            {
+                "open": close,
+                "high": close * 1.003,
+                "low": close * 0.997,
+                "close": close,
+                "volume": np.full(len(close), 1_000_000, dtype=int),
+            },
+            index=idx,
+        )
 
     async def fetch_snapshot(self) -> DashboardSnapshot:
         self._tick += 1

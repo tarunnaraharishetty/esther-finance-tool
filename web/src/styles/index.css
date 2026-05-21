@@ -1,883 +1,189 @@
-/* Esther web — dense terminal-aesthetic styling.
- *
- * Principles:
- *   - Monospace by default; data is the focal point, not chrome.
- *   - Dark background, high-contrast text. Trading floors stay dim.
- *   - Tight padding (0.25rem-0.75rem). Whitespace is signal density,
- *     not luxury. We will need every pixel for the panel grid.
- *   - Semantic color tokens (--c-buy, --c-sell, --c-warn) keep the
- *     panel components colorblind-friendly via consistent mapping.
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dark fintech theme tokens. HSL channels only (shadcn convention). */
+@layer base {
+  :root {
+    --background: 222 28% 5%;
+    --foreground: 210 20% 95%;
+
+    --card: 222 24% 8%;
+    --card-foreground: 210 20% 95%;
+
+    --popover: 222 24% 8%;
+    --popover-foreground: 210 20% 95%;
+
+    --primary: 217 91% 62%;
+    --primary-foreground: 222 47% 9%;
+
+    --secondary: 217 19% 14%;
+    --secondary-foreground: 210 20% 95%;
+
+    --muted: 217 19% 12%;
+    --muted-foreground: 215 14% 62%;
+
+    --accent: 263 75% 65%;
+    --accent-foreground: 210 20% 98%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 20% 98%;
+
+    --border: 217 19% 16%;
+    --input: 217 19% 18%;
+    --ring: 217 91% 62%;
+
+    --bull: 152 70% 48%;
+    --bear: 0 75% 60%;
+    --warn: 38 92% 55%;
+
+    --radius: 0.75rem;
+  }
+
+  html,
+  body,
+  #root {
+    @apply h-full text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01", "ss03";
+    font-family:
+      "Inter",
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      Roboto,
+      sans-serif;
+  }
+
+  /* Ambient app background: deep base + warm radial highlight at the
+   * top + a near-invisible dot grid for texture. Stacks three layers
+   * via background-image. Reads as "expensive" without overpowering. */
+  body {
+    background-color: hsl(var(--background));
+    background-image:
+      radial-gradient(
+        ellipse 80% 50% at 50% -10%,
+        hsl(var(--primary) / 0.08) 0%,
+        transparent 50%
+      ),
+      radial-gradient(
+        ellipse 60% 40% at 100% 0%,
+        hsl(var(--accent) / 0.06) 0%,
+        transparent 50%
+      ),
+      radial-gradient(
+        circle at 1px 1px,
+        hsl(var(--foreground) / 0.035) 1px,
+        transparent 0
+      );
+    background-size:
+      100% 100%,
+      100% 100%,
+      28px 28px;
+    background-attachment: fixed, fixed, fixed;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 6px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.45);
+  }
+
+  /* Tabular numbers everywhere price/percent is rendered to keep
+   * columns rigid. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Surface system.
+ *   .surface         — base glass card
+ *   .surface-hover   — interactive variant with lift on hover
+ *   .surface-premium — hero card with inset highlight + soft glow
  */
-
-:root {
-  color-scheme: dark;
-
-  --bg: #0d1117;
-  --bg-elev: #161b22;
-  --bg-elev-2: #1f2630;
-  --border: #2a313c;
-  --border-soft: #1c222b;
-
-  --fg: #e6edf3;
-  --fg-dim: #8b949e;
-  --fg-faint: #565f6a;
-
-  --c-buy: #3fb950;
-  --c-sell: #f85149;
-  --c-hold: #d29922;
-  --c-info: #58a6ff;
-  --c-warn: #d29922;
-  --c-critical: #f85149;
-  --c-ok: #3fb950;
-
-  --font-mono: "SF Mono", "JetBrains Mono", "Cascadia Code", Consolas,
-    "Liberation Mono", Menlo, monospace;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#root {
-  margin: 0;
-  padding: 0;
-  height: 100%;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-.app {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-
-.app__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.5rem 1rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-elev);
-}
-
-.app__title {
-  display: flex;
-  align-items: baseline;
-  gap: 0.75rem;
-}
-
-.app__brand {
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-.app__subtitle {
-  color: var(--fg-faint);
-  font-size: 12px;
-}
-
-.app__main {
-  flex: 1;
-  overflow: auto;
-  padding: 1rem;
-}
-
-/* --- connection indicator --------------------------------------------- */
-
-.conn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.25rem 0.6rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 12px;
-  background: var(--bg-elev-2);
-}
-
-.conn__dot {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  background: var(--fg-faint);
-}
-
-.conn--open .conn__dot {
-  background: var(--c-ok);
-  box-shadow: 0 0 0 2px rgba(63, 185, 80, 0.15);
-}
-
-.conn--connecting .conn__dot {
-  background: var(--c-warn);
-  animation: pulse 1.2s ease-in-out infinite;
-}
-
-.conn--error .conn__dot {
-  background: var(--c-critical);
-}
-
-.conn--stale .conn__dot {
-  background: var(--c-warn);
-}
-
-.conn--stale .conn__label {
-  color: var(--c-warn);
-}
-
-.conn__meta {
-  color: var(--fg-dim);
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 0.4;
+@layer components {
+  .surface {
+    background:
+      linear-gradient(180deg, hsl(var(--card) / 0.85), hsl(var(--card) / 0.6));
+    @apply rounded-xl border border-border/50 backdrop-blur-md;
+    box-shadow:
+      inset 0 1px 0 hsl(var(--foreground) / 0.04),
+      0 1px 2px hsl(0 0% 0% / 0.3);
   }
-  50% {
-    opacity: 1;
+  .surface-hover {
+    @apply transition-all duration-200;
   }
-}
-
-/* --- placeholders ----------------------------------------------------- */
-
-.placeholder {
-  color: var(--fg-dim);
-  font-style: italic;
-}
-
-/* --- stale-data banner ------------------------------------------------- */
-
-.banner {
-  padding: 0.4rem 1rem;
-  font-size: 12px;
-  border-bottom: 1px solid var(--border);
-}
-
-.banner--stale {
-  background: rgba(210, 153, 34, 0.12);
-  color: var(--c-warn);
-  border-bottom-color: rgba(210, 153, 34, 0.3);
-}
-
-/* --- error boundary fallback ------------------------------------------ */
-
-.error-boundary {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 100vh;
-  padding: 2rem;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: var(--font-mono);
-}
-
-.error-boundary__inner {
-  max-width: 540px;
-  width: 100%;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 1.5rem;
-}
-
-.error-boundary__title {
-  margin: 0 0 0.5rem;
-  font-size: 18px;
-  color: var(--c-critical);
-}
-
-.error-boundary__detail {
-  margin: 0 0 1rem;
-  color: var(--fg);
-  font-size: 13px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.error-boundary__actions {
-  display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-}
-
-.error-boundary__actions button {
-  background: var(--bg-elev-2);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0.4rem 0.9rem;
-  font-family: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.error-boundary__actions button:hover {
-  background: var(--bg);
-}
-
-.error-boundary__primary {
-  background: var(--c-info) !important;
-  border-color: var(--c-info) !important;
-  color: var(--bg) !important;
-  font-weight: 600;
-}
-
-.error-boundary__hint {
-  margin: 0;
-  color: var(--fg-dim);
-  font-size: 11px;
-}
-
-.error-boundary__hint code {
-  background: var(--bg-elev-2);
-  padding: 0.05rem 0.3rem;
-  border-radius: 3px;
-}
-
-/* --- grid layout ------------------------------------------------------- */
-
-.grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
-  grid-template-rows: auto auto auto;
-  grid-template-areas:
-    "watchlist detail"
-    "watchlist pulse"
-    "alerts    opps";
-  gap: 0.5rem;
-  height: 100%;
-}
-
-.grid__watchlist {
-  grid-area: watchlist;
-  min-height: 0;
-  overflow: auto;
-}
-
-.grid__detail {
-  grid-area: detail;
-  min-height: 0;
-}
-
-.grid__pulse {
-  grid-area: pulse;
-  min-height: 0;
-}
-
-.grid__opps {
-  grid-area: opps;
-  min-height: 0;
-}
-
-.grid__alerts {
-  grid-area: alerts;
-  min-height: 0;
-}
-
-/* Single-column on narrow screens — keeps the app readable on a
- * laptop in coffee-shop mode. We don't optimize for mobile; the
- * dashboard's information density assumes a desktop. */
-@media (max-width: 900px) {
-  .grid {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "watchlist"
-      "detail"
-      "pulse"
-      "opps"
-      "alerts";
+  .surface-hover:hover {
+    @apply border-border/80;
+    box-shadow:
+      inset 0 1px 0 hsl(var(--foreground) / 0.06),
+      0 8px 24px -6px hsl(0 0% 0% / 0.4);
   }
-}
-
-/* --- panel shell ------------------------------------------------------- */
-
-.panel {
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  height: 100%;
-  min-height: 0;
-}
-
-.panel__title {
-  margin: 0;
-  padding: 0.4rem 0.75rem;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--fg-dim);
-  border-bottom: 1px solid var(--border-soft);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.panel__badge {
-  font-size: 10px;
-  background: var(--c-critical);
-  color: #fff;
-  padding: 0.05rem 0.4rem;
-  border-radius: 999px;
-  font-weight: 700;
-}
-
-.panel__body {
-  padding: 0.5rem 0.75rem;
-  flex: 1;
-  min-height: 0;
-}
-
-.panel__body--scroll {
-  overflow: auto;
-}
-
-.panel__body--empty {
-  color: var(--fg-faint);
-  font-style: italic;
-}
-
-/* --- watchlist --------------------------------------------------------- */
-
-.watchlist {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-
-.watchlist th {
-  text-align: left;
-  padding: 0.35rem 0.5rem;
-  background: var(--bg-elev);
-  position: sticky;
-  top: 0;
-  border-bottom: 1px solid var(--border);
-  color: var(--fg-dim);
-  font-weight: 500;
-  font-size: 11px;
-  letter-spacing: 0.05em;
-}
-
-.watchlist th.num {
-  text-align: right;
-}
-
-.watchlist td {
-  padding: 0.3rem 0.5rem;
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.watchlist td.num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.watchlist td.sym {
-  font-weight: 600;
-}
-
-.watchlist td.bar code {
-  color: var(--c-buy);
-  font-size: 11px;
-  letter-spacing: -0.1em;
-}
-
-.watchlist__row {
-  cursor: pointer;
-}
-
-.watchlist__row:hover {
-  background: var(--bg-elev-2);
-}
-
-.watchlist__row--active {
-  background: var(--bg-elev-2);
-  box-shadow: inset 2px 0 0 var(--c-info);
-}
-
-.watchlist__row--error td {
-  color: var(--fg-faint);
-}
-
-.watchlist__row:focus-visible {
-  outline: 1px solid var(--c-info);
-  outline-offset: -1px;
-}
-
-.watchlist .empty {
-  color: var(--fg-faint);
-  font-style: italic;
-  text-align: center;
-  padding: 1rem;
-}
-
-/* --- action / tier styling -------------------------------------------- */
-
-.act {
-  font-weight: 600;
-  font-size: 11px;
-  letter-spacing: 0.05em;
-}
-
-.act--buy {
-  color: var(--c-buy);
-}
-
-.act--sell {
-  color: var(--c-sell);
-}
-
-.act--hold {
-  color: var(--c-hold);
-}
-
-.num.pos {
-  color: var(--c-buy);
-}
-
-.num.neg {
-  color: var(--c-sell);
-}
-
-.tier {
-  margin-left: 0.5rem;
-  padding: 0.1rem 0.4rem;
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  border-radius: 3px;
-  text-transform: uppercase;
-}
-
-.tier--strong_buy {
-  background: rgba(63, 185, 80, 0.25);
-  color: var(--c-buy);
-}
-
-.tier--buy {
-  background: rgba(63, 185, 80, 0.12);
-  color: var(--c-buy);
-}
-
-.tier--hold {
-  background: rgba(210, 153, 34, 0.15);
-  color: var(--c-hold);
-}
-
-.tier--sell {
-  background: rgba(248, 81, 73, 0.12);
-  color: var(--c-sell);
-}
-
-.tier--strong_sell {
-  background: rgba(248, 81, 73, 0.25);
-  color: var(--c-sell);
-}
-
-/* --- pulse panel ------------------------------------------------------- */
-
-.pulse__row {
-  display: flex;
-  gap: 0.4rem;
-  margin-bottom: 0.5rem;
-  flex-wrap: wrap;
-}
-
-.pulse__pill {
-  padding: 0.15rem 0.55rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--fg-dim);
-}
-
-.pulse__pill--bull {
-  color: var(--c-buy);
-  border-color: rgba(63, 185, 80, 0.4);
-}
-
-.pulse__pill--bear {
-  color: var(--c-sell);
-  border-color: rgba(248, 81, 73, 0.4);
-}
-
-.pulse__summary {
-  margin: 0.3rem 0;
-  color: var(--fg);
-  font-size: 12px;
-}
-
-.pulse__metrics {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0.15rem 0.5rem;
-  margin: 0.5rem 0 0;
-  font-size: 11px;
-}
-
-.pulse__metrics dt {
-  color: var(--fg-dim);
-}
-
-.pulse__metrics dd {
-  margin: 0;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.pulse__evolution {
-  margin-top: 0.5rem;
-  padding-top: 0.4rem;
-  border-top: 1px solid var(--border-soft);
-}
-
-.pulse__regime {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-weight: 600;
-}
-
-.pulse__regime--riskon {
-  color: var(--c-buy);
-}
-
-.pulse__regime--riskoff {
-  color: var(--c-sell);
-}
-
-.pulse__regime--mixed {
-  color: var(--c-hold);
-}
-
-.pulse__patterns {
-  list-style: none;
-  margin: 0.3rem 0 0;
-  padding: 0;
-  font-size: 11px;
-  color: var(--fg-dim);
-}
-
-.pulse__patterns li::before {
-  content: "· ";
-  color: var(--fg-faint);
-}
-
-/* --- STRONG signals — populates only when the promoter fires
-       STRONG_BUY / STRONG_SELL. Mirrors the TUI statusline's chip:
-       bold green on buy, bold red on sell. ---------------------------- */
-
-.pulse__strong {
-  margin-top: 0.5rem;
-  padding-top: 0.4rem;
-  border-top: 1px solid var(--border-soft);
-}
-
-.pulse__strong-list {
-  list-style: none;
-  margin: 0.3rem 0 0;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-}
-
-.pulse__strong-chip {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.4rem;
-  padding: 0.15rem 0.55rem;
-  font-size: 11px;
-  letter-spacing: 0.05em;
-  border-radius: 3px;
-  font-weight: 600;
-}
-
-.pulse__strong-chip--buy {
-  background: rgba(63, 185, 80, 0.18);
-  color: var(--c-buy);
-  border: 1px solid rgba(63, 185, 80, 0.45);
-}
-
-.pulse__strong-chip--sell {
-  background: rgba(248, 81, 73, 0.18);
-  color: var(--c-sell);
-  border: 1px solid rgba(248, 81, 73, 0.45);
-}
-
-.pulse__strong-tier {
-  text-transform: uppercase;
-}
-
-.pulse__strong-sym {
-  color: var(--fg);
-  font-weight: 700;
-}
-
-/* --- opportunities ----------------------------------------------------- */
-
-.opps {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.opps__row {
-  display: grid;
-  grid-template-columns: auto auto auto auto auto 1fr;
-  gap: 0.5rem;
-  align-items: center;
-  padding: 0.3rem 0.4rem;
-  border-bottom: 1px solid var(--border-soft);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.opps__row:last-child {
-  border-bottom: none;
-}
-
-.opps__row:hover {
-  background: var(--bg-elev-2);
-}
-
-.opps__row:focus-visible {
-  outline: 1px solid var(--c-info);
-  outline-offset: -1px;
-}
-
-.opps__rank {
-  color: var(--fg-faint);
-  font-size: 10px;
-  letter-spacing: 0.05em;
-}
-
-.opps__sym {
-  font-weight: 600;
-}
-
-.opps__tenure {
-  font-size: 10px;
-  padding: 0.05rem 0.35rem;
-  border-radius: 3px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.opps__tenure--new {
-  background: rgba(88, 166, 255, 0.18);
-  color: var(--c-info);
-}
-
-.opps__tenure--carry {
-  background: rgba(139, 148, 158, 0.18);
-  color: var(--fg-dim);
-}
-
-.opps__detail {
-  color: var(--fg-dim);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.opps__score {
-  color: var(--fg);
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.opps__rationale {
-  color: var(--fg-dim);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* --- alerts feed ------------------------------------------------------- */
-
-.alerts {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.alerts__row {
-  display: grid;
-  grid-template-columns: auto auto auto auto 1fr;
-  gap: 0.5rem;
-  align-items: baseline;
-  padding: 0.3rem 0.4rem;
-  border-bottom: 1px solid var(--border-soft);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.alerts__row--recent {
-  opacity: 0.6;
-}
-
-.alerts__row:hover {
-  background: var(--bg-elev-2);
-}
-
-.alerts__row:focus-visible {
-  outline: 1px solid var(--c-info);
-  outline-offset: -1px;
-}
-
-.alerts__time {
-  color: var(--fg-faint);
-  font-variant-numeric: tabular-nums;
-}
-
-.alerts__severity {
-  font-weight: 700;
-  font-size: 10px;
-  letter-spacing: 0.05em;
-  padding: 0.05rem 0.35rem;
-  border-radius: 3px;
-}
-
-.alerts__severity--info {
-  background: rgba(88, 166, 255, 0.18);
-  color: var(--c-info);
-}
-
-.alerts__severity--warn {
-  background: rgba(210, 153, 34, 0.18);
-  color: var(--c-warn);
-}
-
-.alerts__severity--crit {
-  background: rgba(248, 81, 73, 0.18);
-  color: var(--c-critical);
-}
-
-.alerts__sym {
-  font-weight: 600;
-}
-
-.alerts__rule {
-  color: var(--fg-faint);
-}
-
-.alerts__msg {
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* --- symbol detail ----------------------------------------------------- */
-
-.detail__grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.3rem 1rem;
-  margin-bottom: 0.5rem;
-  font-size: 12px;
-}
-
-.detail__grid > div {
-  display: flex;
-  flex-direction: column;
-}
-
-.detail__label {
-  color: var(--fg-faint);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  margin-bottom: 0.1rem;
-}
-
-.detail__section {
-  margin-top: 0.6rem;
-  padding-top: 0.4rem;
-  border-top: 1px solid var(--border-soft);
-}
-
-.detail__reasoning {
-  margin: 0.2rem 0 0;
-  color: var(--fg);
-  line-height: 1.5;
-}
-
-.detail__chips {
-  list-style: none;
-  margin: 0.2rem 0 0;
-  padding: 0;
-  display: flex;
-  gap: 0.3rem;
-  flex-wrap: wrap;
-}
-
-.chip {
-  font-size: 11px;
-  padding: 0.1rem 0.45rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--fg-dim);
-  background: var(--bg-elev-2);
-}
-
-.detail__intraday {
-  display: flex;
-  gap: 0.6rem;
-  align-items: baseline;
-  margin-top: 0.2rem;
-  font-size: 12px;
-}
-
-.detail__opp {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  margin-top: 0.2rem;
-  font-size: 11px;
-  color: var(--fg-dim);
-}
-
-.detail__headlines {
-  list-style: none;
-  margin: 0.2rem 0 0;
-  padding: 0;
-  font-size: 11px;
-  color: var(--fg);
-}
-
-.detail__headlines li {
-  padding: 0.2rem 0;
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.detail__headlines li:last-child {
-  border-bottom: none;
-}
-
-.detail__headlines li::before {
-  content: "· ";
-  color: var(--fg-faint);
-}
-
-.detail__error {
-  color: var(--c-critical);
-  font-size: 12px;
+  .surface-premium {
+    background:
+      radial-gradient(120% 80% at 0% 0%, hsl(var(--primary) / 0.12) 0%, transparent 55%),
+      radial-gradient(120% 80% at 100% 0%, hsl(var(--accent) / 0.12) 0%, transparent 55%),
+      linear-gradient(180deg, hsl(var(--card) / 0.95), hsl(var(--card) / 0.7));
+    @apply rounded-2xl border border-border/60 backdrop-blur-xl;
+    box-shadow:
+      inset 0 1px 0 hsl(var(--foreground) / 0.08),
+      0 24px 48px -16px hsl(0 0% 0% / 0.5);
+  }
+
+  /* Skeletons — two flavors. */
+  .skeleton {
+    @apply animate-pulse rounded-md bg-muted/60;
+  }
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      hsl(var(--muted) / 0.5) 0%,
+      hsl(var(--muted-foreground) / 0.18) 50%,
+      hsl(var(--muted) / 0.5) 100%
+    );
+    background-size: 200% 100%;
+    @apply animate-shimmer rounded-md;
+  }
+
+  /* Headline gradient — used for the hero AI Briefing headline. */
+  .text-gradient-primary {
+    background: linear-gradient(
+      120deg,
+      hsl(var(--foreground)) 0%,
+      hsl(var(--primary)) 50%,
+      hsl(var(--accent)) 100%
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+
+  /* Section anchor — small gradient bar used as the accent at the
+   * start of editorial-style section headings. */
+  .section-rail {
+    @apply h-5 w-[3px] shrink-0 rounded-full;
+    background-image: linear-gradient(
+      180deg,
+      hsl(var(--primary)) 0%,
+      hsl(var(--accent)) 100%
+    );
+    box-shadow: 0 0 12px hsl(var(--primary) / 0.5);
+  }
+
+  /* Focus ring that respects the dark glass aesthetic. */
+  .focus-ring {
+    @apply outline-none ring-offset-2 ring-offset-background;
+  }
+  .focus-ring:focus-visible {
+    @apply ring-2 ring-ring;
+  }
 }

@@ -75,6 +75,10 @@ data/*.sqlite
 data/*.sqlite3
 data/ohlcv/
 data/news/
+data/research_cache/
+data/fundamentals_cache/
+data/analyzer_cache/
+data/session_state.json
 
 # Notebooks
 .ipynb_checkpoints/

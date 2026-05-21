@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import path from "node:path";
 
 // Vite dev-server config.
 //
@@ -10,14 +11,29 @@ import react from "@vitejs/plugin-react";
 // proxy is just for ergonomics.
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: { "@": path.resolve(__dirname, "./src") },
+  },
+  build: {
+    // Recharts and cmdk are heavy enough to deserve their own
+    // long-lived caches. React is split out so updates to app code
+    // don't bust the framework chunk.
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ["react", "react-dom"],
+          recharts: ["recharts"],
+          cmdk: ["cmdk"],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: {
       "/api": {
         target: "http://127.0.0.1:8000",
         changeOrigin: true,
-        // EventSource keeps the connection open; Vite's proxy needs
-        // ws=false (default) and no automatic close, which it does.
       },
     },
   },

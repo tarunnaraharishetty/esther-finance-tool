@@ -51,7 +51,11 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import FileResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
+from src.api.analyzer import register_analyzer_routes
 from src.api.broker import SnapshotBroker
+from src.api.fundamentals import register_fundamentals_routes
+from src.api.research import register_research_routes
+from src.config import get_settings
 
 if TYPE_CHECKING:
     from src.dashboard.controller import BaseController
@@ -70,6 +74,9 @@ def create_app(
     stream_interval: float | None = None,
     cors_origins: list[str] | None = None,
     frontend_dir: Path | None = None,
+    fundamentals_service: Any = None,
+    fundamentals_cache_dir: Path | None = None,
+    analyzer_cache_dir: Path | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a controller.
 
@@ -236,6 +243,43 @@ def create_app(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    # Research-thesis routes (cached, structured per-symbol research
+    # reports). Cache dir lives under the project's data/ tree so it
+    # rotates with the rest of the runtime state and stays out of the
+    # source tree.
+    settings = get_settings()
+    research_cache = settings.project_root / "data" / "research_cache"
+    register_research_routes(app, controller, cache_dir=research_cache)
+
+    # Fundamentals routes (Phase 2). Independent of the controller —
+    # the fundamentals chain only needs settings + the orchestrator.
+    # Tests inject ``fundamentals_service`` to avoid network; production
+    # passes ``None`` and lets the route module build one lazily.
+    fundamentals_cache = (
+        fundamentals_cache_dir
+        if fundamentals_cache_dir is not None
+        else settings.project_root / "data" / "fundamentals_cache"
+    )
+    register_fundamentals_routes(
+        app, cache_dir=fundamentals_cache, service=fundamentals_service
+    )
+
+    # Analyzer routes (Phase 6) — assemble technicals + valuation +
+    # grounded explanation into one cached endpoint. ``analyzer_cache_dir``
+    # is overridable for tests so per-call state doesn't leak across
+    # test cases via the on-disk cache.
+    analyzer_cache = (
+        analyzer_cache_dir
+        if analyzer_cache_dir is not None
+        else settings.project_root / "data" / "analyzer_cache"
+    )
+    register_analyzer_routes(
+        app,
+        controller,
+        cache_dir=analyzer_cache,
+        fundamentals_service=fundamentals_service,
+    )
 
     # CORS for the read-only API. In production the bundled frontend
     # is served from the same origin as the API (see frontend_dir

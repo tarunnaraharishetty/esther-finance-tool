@@ -69,6 +69,48 @@ class Settings(BaseSettings):
     news_api_key: SecretStr | None = None
     news_provider: NewsProvider = NewsProvider.ALPACA
 
+    # ---- Fundamentals providers ----
+    # Per-provider API keys. ``None`` means the provider is unconfigured
+    # and the orchestrator silently skips it (logs as ``unavailable``,
+    # walks to the next link in the chain). All four are optional — the
+    # SEC EDGAR fallback works with just a User-Agent and Yahoo needs
+    # nothing, so the chain remains usable when none are set.
+    fmp_api_key: SecretStr | None = None
+    finnhub_api_key: SecretStr | None = None
+    alphavantage_api_key: SecretStr | None = None
+    # SEC EDGAR mandates a contact User-Agent on every request (their
+    # ToS: "Sample Company Name AdminContact@<sample>.com"). Empty
+    # disables the EDGAR provider rather than sending a generic UA.
+    sec_edgar_user_agent: str = ""
+    # Ordered chain. The orchestrator walks providers in this order and
+    # returns the first healthy one. Keep keyed providers ahead of
+    # scraped fallbacks; SEC EDGAR sits between paid APIs and Yahoo
+    # because it's authoritative but slower and missing ratios.
+    fundamentals_provider_order: list[str] = [
+        "fmp",
+        "finnhub",
+        "alpha_vantage",
+        "sec_edgar",
+        "yahoo",
+    ]
+    # How long a normalized record is considered fresh in the analyzer
+    # cache. 12h is a reasonable default — fundamentals don't move
+    # intraday and most providers update within a day of earnings.
+    fundamentals_cache_ttl_hours: float = 12.0
+
+    # ---- Analyzer / valuation ----
+    # Sector-median multiples (P/E, EV/EBITDA, P/S, PEG) used by the
+    # multiple-based valuation models. Shipped seed lives at
+    # ``config/sector_medians.toml``; override with the
+    # ``SECTOR_MEDIANS_PATH`` env var to point at a custom file (e.g.
+    # backfilled from market data).
+    sector_medians_path: Path = PROJECT_ROOT / "config" / "sector_medians.toml"
+    # DCF defaults. Models can override per-call, but most paths use
+    # the same five-year projection + perpetual terminal we use here.
+    dcf_default_discount_rate: float = 0.10  # 10% WACC proxy
+    dcf_default_terminal_growth: float = 0.025  # 2.5% perpetual growth
+    dcf_projection_years: int = 5
+
     # ---- Database ----
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'data' / 'esther.db'}"
 
@@ -177,6 +219,35 @@ class Settings(BaseSettings):
             if stripped.startswith("["):
                 return v  # let pydantic parse the JSON list
             return [piece.strip() for piece in stripped.split(",") if piece.strip()]
+        return v
+
+    @field_validator("fundamentals_provider_order", mode="before")
+    @classmethod
+    def _split_provider_order(cls, v: object) -> object:
+        """Accept ``FUNDAMENTALS_PROVIDER_ORDER=fmp,finnhub`` or JSON list."""
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                return v
+            return [piece.strip() for piece in stripped.split(",") if piece.strip()]
+        return v
+
+    @field_validator("fundamentals_provider_order")
+    @classmethod
+    def _validate_provider_order(cls, v: list[str]) -> list[str]:
+        """Reject unknown provider names so typos fail fast at startup."""
+        from src.intelligence.fundamentals.models import ProviderName
+
+        valid_names = {name.value for name in ProviderName}
+        unknown = [name for name in v if name not in valid_names]
+        if unknown:
+            joined = ", ".join(sorted(valid_names))
+            raise ValueError(
+                f"fundamentals_provider_order contains unknown name(s) {unknown}. "
+                f"Valid names: {joined}"
+            )
         return v
 
     @field_validator("dashboard_columns")

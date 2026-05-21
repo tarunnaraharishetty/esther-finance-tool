@@ -1,0 +1,84 @@
+# Sector-median valuation multiples used by the analyzer's multiple-
+# based models (P/E, EV/EBITDA, P/S, PEG). Numbers are approximate
+# long-term medians for US equities and exist to seed the analyzer
+# until we backfill from real market data — they are NOT authoritative.
+#
+# Sector keys follow the GICS Level-1 taxonomy. The lookup is case-
+# insensitive and tolerates the variants providers return ("Information
+# Technology" vs "Technology"). When a sector is unknown or absent the
+# analyzer falls back to the [_default] block below.
+#
+# Edit freely — the analyzer reloads on settings change without code
+# changes. Round to one decimal so the file diffs are readable.
+
+[_default]
+pe = 20.0
+ev_ebitda = 13.0
+ps = 2.5
+peg = 2.0
+
+[energy]
+pe = 12.0
+ev_ebitda = 6.0
+ps = 1.0
+peg = 1.0
+
+[materials]
+pe = 17.0
+ev_ebitda = 9.0
+ps = 1.5
+peg = 1.4
+
+[industrials]
+pe = 20.0
+ev_ebitda = 12.0
+ps = 1.8
+peg = 1.7
+
+["consumer discretionary"]
+pe = 22.0
+ev_ebitda = 13.0
+ps = 1.5
+peg = 1.8
+
+["consumer staples"]
+pe = 22.0
+ev_ebitda = 14.0
+ps = 1.6
+peg = 2.5
+
+["health care"]
+pe = 25.0
+ev_ebitda = 16.0
+ps = 3.0
+peg = 1.8
+
+[financials]
+pe = 14.0
+ev_ebitda = 10.0
+ps = 3.5
+peg = 1.4
+
+["information technology"]
+pe = 30.0
+ev_ebitda = 20.0
+ps = 6.0
+peg = 2.0
+
+["communication services"]
+pe = 22.0
+ev_ebitda = 12.0
+ps = 3.0
+peg = 1.8
+
+[utilities]
+pe = 20.0
+ev_ebitda = 11.0
+ps = 2.5
+peg = 3.0
+
+["real estate"]
+pe = 30.0
+ev_ebitda = 18.0
+ps = 6.0
+peg = 2.5

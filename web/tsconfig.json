@@ -17,7 +17,11 @@
     "noFallthroughCasesInSwitch": true,
     "noImplicitOverride": true,
     "useDefineForClassFields": true,
-    "types": ["vitest/globals", "@testing-library/jest-dom"]
+    "types": ["vitest/globals", "@testing-library/jest-dom"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
   },
   "include": ["src"],
   "references": [{ "path": "./tsconfig.node.json" }]
