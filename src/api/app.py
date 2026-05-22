@@ -58,6 +58,7 @@ from src.api.fundamentals import register_fundamentals_routes
 from src.api.health import register_health_routes
 from src.api.history import register_history_routes
 from src.api.research import register_research_routes
+from src.api.sector import register_sector_routes
 from src.config import get_settings
 from src.data.accuracy_store import AccuracyStore
 from src.data.health_store import HealthStore
@@ -100,6 +101,7 @@ def create_app(
     calibration_maturation_enabled: bool | None = None,
     research_cache_dir: Path | None = None,
     compare_narrative_cache_dir: Path | None = None,
+    sector_cache_dir: Path | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a controller.
 
@@ -408,6 +410,15 @@ def create_app(
         else settings.project_root / "data" / "compare_narrative_cache"
     )
     register_compare_routes(app, narrative_cache_dir=compare_narrative_cache)
+
+    # Sector ranking endpoint — also reads the analyzer assembler off
+    # app.state, so it must be registered after the analyzer routes.
+    sector_cache = (
+        sector_cache_dir
+        if sector_cache_dir is not None
+        else settings.project_root / "data" / "sector_cache"
+    )
+    register_sector_routes(app, controller, cache_dir=sector_cache)
 
     # Per-symbol historical outcomes drill-down. Only registered when
     # the calibration store exists — when calibration is disabled,

@@ -53,6 +53,26 @@ _ALIASES: dict[str, str] = {
 }
 
 
+def normalize_sector_key(sector: str | None) -> str | None:
+    """Return the canonical lowercase sector key, or ``None`` when unknown.
+
+    Used by callers that need to group symbols by sector (e.g. the
+    sector ranker). The same alias table powers ``lookup()`` so a
+    symbol that lands on multiples for "Information Technology" also
+    lands on the same cohort key here.
+
+    Returns ``None`` when the input is empty/None; that signals to
+    grouping code that the symbol has no usable cohort assignment
+    and should be excluded from sector cohorts.
+    """
+    if not sector:
+        return None
+    key = sector.strip().lower()
+    if not key:
+        return None
+    return _ALIASES.get(key, key)
+
+
 def lookup(sector: str | None) -> SectorMultiples:
     """Return the sector-median multiples for ``sector``.
 
@@ -118,4 +138,4 @@ def _clear_cache() -> None:
     _load_table_cached.cache_clear()
 
 
-__all__ = ["SectorMultiples", "lookup"]
+__all__ = ["SectorMultiples", "lookup", "normalize_sector_key"]

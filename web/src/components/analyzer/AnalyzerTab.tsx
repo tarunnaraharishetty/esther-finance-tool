@@ -11,6 +11,7 @@ import { OverboughtSpectrum } from "./OverboughtSpectrum";
 import { RiskWarnings } from "./RiskWarnings";
 import { ScenarioRange } from "./ScenarioRange";
 import { ScoreHeader } from "./ScoreHeader";
+import { SectorRankPanel } from "./SectorRankPanel";
 
 interface Props {
   symbol: string | null;
@@ -93,6 +94,8 @@ export function AnalyzerTab({ symbol }: Props) {
       <OverboughtSpectrum technicals={report.technicals} />
 
       <CalibrationStrip calibrations={report.calibrations} />
+
+      <SectorRankPanel symbol={report.symbol} />
 
       <HistoricalOutcomesPanel symbol={report.symbol} />
 
