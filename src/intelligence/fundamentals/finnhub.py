@@ -78,12 +78,18 @@ class FinnhubProvider:
                 client=self._client,
             )
 
-        profile_raw, metric_raw, target_raw = await asyncio.gather(
-            _get("/stock/profile2"),
-            _get("/stock/metric", metric="all"),
-            _get("/stock/price-target"),
-            return_exceptions=True,
+        # See FmpProvider.fetch for the gather-typing pattern.
+        gathered: list[Any] = list(
+            await asyncio.gather(
+                _get("/stock/profile2"),
+                _get("/stock/metric", metric="all"),
+                _get("/stock/price-target"),
+                return_exceptions=True,
+            )
         )
+        profile_raw: Any = gathered[0]
+        metric_raw: Any = gathered[1]
+        target_raw: Any = gathered[2]
 
         if isinstance(profile_raw, ProviderNotFound):
             raise profile_raw

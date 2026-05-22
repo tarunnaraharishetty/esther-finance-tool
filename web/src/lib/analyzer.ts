@@ -89,6 +89,103 @@ export interface FundamentalsProfile {
   cik: string | null;
 }
 
+// ---- calibration (historical hit-rate lookup) ----
+
+/**
+ * One calibrated probability reading per ``(score, outcome)`` pairing
+ * the analyzer publishes. Mirrors
+ * ``src.intelligence.analyzer.calibration.CalibrationReading`` plus the
+ * flattened bucket fields produced by the wire serializer.
+ *
+ * ``bucket_published`` is the single source of truth for whether the
+ * UI should render a probability:
+ *   * ``true``  → ``hit_rate`` + Wilson CI are populated; show the
+ *                 calibrated probability with the observation count.
+ *   * ``false`` → ``bucket_*`` and ``hit_rate`` are ``null``; show
+ *                 "calibration pending" alongside the raw score value.
+ *
+ * Never compute a probability from absence of data. Never publish
+ * ``hit_rate`` when ``bucket_published`` is false.
+ */
+export interface CalibrationReading {
+  score_name: string;
+  score_value: number;
+  outcome_name: string;
+  horizon_days: number;
+  bucket_published: boolean;
+  bucket_lo: number | null;
+  bucket_hi: number | null;
+  n_observations: number | null;
+  n_hits: number | null;
+  hit_rate: number | null;
+  confidence_low: number | null;
+  confidence_high: number | null;
+  last_updated: string | null; // ISO-8601 with timezone
+}
+
+// ---- scenarios (probabilistic price-range model) ----
+
+/**
+ * Closed-form lognormal scenario model from
+ * ``src.intelligence.analyzer.scenarios.ScenarioModel``. Always
+ * ``null`` when bars or last_price are missing — the analyzer card
+ * should render "scenarios unavailable" without complaint.
+ *
+ * Framing rule: probabilities here describe *current dispersion*, not
+ * a forecast. The component label must be "model-implied probability",
+ * never "chance of" or "likelihood that" — the latter framings imply
+ * a directional view we don't have (μ = 0 by design).
+ */
+export interface ScenarioModel {
+  horizon_days: number;
+  current_price: number;
+  annualized_vol: number;
+  vol_lookback_days: number;
+  vol_method: string;
+  prob_below_bear: number | null;
+  prob_above_bull: number | null;
+  quantile_20: number;
+  quantile_50: number;
+  quantile_80: number;
+  notes: string[];
+}
+
+// ---- freshness envelope ----
+
+/**
+ * Freshness tier for a data record. Mirrors
+ * ``src.data.envelope.Freshness``. The UI keys staleness badges off
+ * this enum:
+ *  * fresh   → fully trustworthy
+ *  * aging   → usable, render a soft "aging" badge
+ *  * stale   → render with a warning; downstream alerts must skip
+ *  * expired → strong warning or hide entirely
+ */
+export type Freshness = "fresh" | "aging" | "stale" | "expired";
+
+/**
+ * Freshness envelope attached to fundamentals on the analyzer report.
+ * Always ``null`` when fundamentals are unavailable (chain exhaustion
+ * or no providers configured).
+ *
+ * ``divergence_count`` is the number of high-trust fields where the
+ * primary provider disagreed with the reconciliation secondary by
+ * more than the configured threshold. Non-zero values should drive a
+ * visible "providers disagree" indicator. ``reconciliation_warning_count``
+ * carries notes about *why* a field wasn't compared (typically
+ * fiscal-date mismatch); informational, not a data-quality flag.
+ */
+export interface FundamentalsFreshness {
+  as_of: string; // ISO-8601 with timezone
+  fetched_at: string; // ISO-8601 with timezone
+  freshness: Freshness;
+  data_age_days: number;
+  source_chain: string[]; // provider names in the order they were tried
+  provider_confidence: number; // [0, 1]
+  divergence_count: number;
+  reconciliation_warning_count: number;
+}
+
 // ---- explanation ----
 
 export interface AnalyzerExplanation {
@@ -114,6 +211,9 @@ export interface AnalyzerReport {
   technicals: TechnicalScores | null;
   valuation: ValuationEnsemble | null;
   fundamentals_profile: FundamentalsProfile | null;
+  fundamentals_freshness: FundamentalsFreshness | null;
+  scenarios: ScenarioModel | null;
+  calibrations: CalibrationReading[];
   explanation: AnalyzerExplanation;
   warnings: string[];
   cache: "hit" | "miss";

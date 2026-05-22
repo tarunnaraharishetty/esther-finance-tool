@@ -1,6 +1,7 @@
 import { AlertTriangle, Brain, Clock, Cpu, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { RatingDial } from "./RatingDial";
+import { ValidationBadge } from "./ValidationBadge";
 import {
   ratingLabel,
   ratingTone,
@@ -76,6 +77,7 @@ export function ResearchHeader({ thesis, onRefresh, refreshing }: Props) {
               <Cpu className="h-3 w-3" />
               cache · {thesis.cache}
             </span>
+            <ValidationBadge validation={thesis.validation} />
             <Button
               variant="outline"
               size="sm"

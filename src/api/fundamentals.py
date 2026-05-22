@@ -44,6 +44,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.encoders import jsonable_encoder
 
 from src.config import get_settings
+from src.data.health_store import HealthStore
+from src.data.retry_queue import RetryQueue
 from src.intelligence.fundamentals import (
     FundamentalsResult,
     FundamentalsService,
@@ -60,6 +62,8 @@ def register_fundamentals_routes(
     *,
     cache_dir: Path,
     service: FundamentalsService | None = None,
+    health_store: HealthStore | None = None,
+    retry_queue: RetryQueue | None = None,
 ) -> None:
     """Attach fundamentals routes to ``app``.
 
@@ -77,6 +81,11 @@ def register_fundamentals_routes(
             ``None`` we lazily construct one from ``get_settings()`` on
             first call so importing this module doesn't require any
             API keys.
+        health_store: Optional :class:`HealthStore` for the lazy
+            service build. Ignored when ``service`` is injected (test
+            stubs don't write to it). Production passes the same
+            store wired into the ``/api/health/providers`` route so
+            every fetch contributes to the rolling SLO view.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     settings = get_settings()
@@ -87,9 +96,15 @@ def register_fundamentals_routes(
     service_holder: list[FundamentalsService | None] = [service]
 
     def _service() -> FundamentalsService:
-        if service_holder[0] is None:
-            service_holder[0] = FundamentalsService.from_settings(settings)
-        return service_holder[0]
+        cached = service_holder[0]
+        if cached is None:
+            cached = FundamentalsService.from_settings(
+                settings,
+                health_store=health_store,
+                retry_queue=retry_queue,
+            )
+            service_holder[0] = cached
+        return cached
 
     @app.get("/api/fundamentals/{symbol}")
     async def fundamentals(
@@ -111,9 +126,11 @@ def register_fundamentals_routes(
             mtime = cache_file.stat().st_mtime
             age = time.time() - mtime
             if age < ttl_seconds:
-                payload = json.loads(cache_file.read_text(encoding="utf-8"))
-                payload["cache"] = "hit"
-                payload["cache_age_seconds"] = int(age)
+                cached_payload: dict[str, Any] = json.loads(
+                    cache_file.read_text(encoding="utf-8")
+                )
+                cached_payload["cache"] = "hit"
+                cached_payload["cache_age_seconds"] = int(age)
                 # Cache hit means we did not walk the chain this call;
                 # the historical health log is part of the persisted
                 # blob already. We surface it under ``health`` for
@@ -123,7 +140,7 @@ def register_fundamentals_routes(
                     symbol=sym,
                     age_seconds=int(age),
                 )
-                return payload
+                return cached_payload
 
         log.info("fundamentals.fetch.start", symbol=sym, fresh=fresh)
         try:
@@ -236,12 +253,21 @@ def _serialize_result(result: FundamentalsResult) -> dict[str, Any]:
     We don't return the raw provider payload — it's huge and meant
     for the persistence layer (Phase 5 DB schema), not the frontend.
     The wire shape carries the normalized record plus the chain
-    health log so clients can render provider-attribution UI.
+    health log so clients can render provider-attribution UI, plus
+    the freshness envelope so the UI can render staleness badges and
+    the analyzer can refuse to score on expired data.
     """
     fundamentals = result.fundamentals
+    envelope = result.envelope
+    age_days = envelope.data_age.total_seconds() / 86400.0
     payload: dict[str, Any] = {
         "symbol": fundamentals.symbol,
-        "fetched_at": fundamentals.fetched_at.isoformat(),
+        "fetched_at": envelope.fetched_at.isoformat(),
+        "as_of": envelope.as_of.isoformat(),
+        "freshness": envelope.freshness,
+        "data_age_days": round(age_days, 2),
+        "source_chain": list(envelope.source_chain),
+        "provider_confidence": round(envelope.provider_confidence, 3),
         "primary_provider": fundamentals.primary_provider.value,
         "contributing_providers": [
             p.value for p in fundamentals.contributing_providers
@@ -264,6 +290,10 @@ def _serialize_result(result: FundamentalsResult) -> dict[str, Any]:
         ),
         "warnings": list(fundamentals.warnings),
         "health": jsonable_encoder([asdict(h) for h in result.health]),
+        "divergences": jsonable_encoder([asdict(d) for d in result.divergences]),
+        "reconciliation_warnings": jsonable_encoder(
+            [asdict(w) for w in result.reconciliation_warnings]
+        ),
     }
     return payload
 

@@ -29,7 +29,6 @@ from src.intelligence.analyzer.technical import (
     score_technicals,
 )
 
-
 # ---------- sub-score unit tests ----------
 
 

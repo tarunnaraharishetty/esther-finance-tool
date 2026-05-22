@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from src.api import create_app
 from src.dashboard.controller import MockDashboardController
+from src.data.envelope import DataEnvelope
 from src.intelligence.fundamentals import (
     CompanyProfile,
     FundamentalsResult,
@@ -64,6 +65,8 @@ def _make_result(
     *,
     primary: ProviderName = ProviderName.FMP,
     fetched_at: datetime | None = None,
+    freshness: str = "fresh",
+    provider_confidence: float = 1.0,
 ) -> FundamentalsResult:
     now = fetched_at or datetime(2026, 5, 21, 12, 0, 0, tzinfo=UTC)
     fundamentals = NormalizedFundamentals(
@@ -100,7 +103,15 @@ def _make_result(
             error_message=None,
         ),
     )
-    return FundamentalsResult(fundamentals=fundamentals, raw=raw, health=health)
+    envelope: DataEnvelope[NormalizedFundamentals] = DataEnvelope(
+        data=fundamentals,
+        as_of=datetime(2024, 12, 31, tzinfo=UTC),
+        fetched_at=now,
+        source_chain=(primary.value,),
+        freshness=freshness,  # type: ignore[arg-type]
+        provider_confidence=provider_confidence,
+    )
+    return FundamentalsResult(envelope=envelope, raw=raw, health=health)
 
 
 def _build_client(
@@ -135,6 +146,26 @@ def test_fundamentals_endpoint_returns_normalized_shape(tmp_path: Path) -> None:
     assert body["cache_age_seconds"] == 0
     # Health log surfaces the chain trace from this fetch.
     assert isinstance(body["health"], list) and body["health"][0]["status"] == "ok"
+
+
+def test_fundamentals_endpoint_surfaces_freshness_envelope(tmp_path: Path) -> None:
+    """The wire payload exposes every envelope field consumers need."""
+    client, stub = _build_client(tmp_path)
+    stub.queue(
+        "AAPL",
+        _make_result("AAPL", freshness="aging", provider_confidence=0.85),
+    )
+
+    body = client.get("/api/fundamentals/AAPL").json()
+
+    assert body["freshness"] == "aging"
+    assert body["provider_confidence"] == pytest.approx(0.85)
+    assert body["source_chain"] == ["fmp"]
+    # as_of / fetched_at are ISO-8601 strings; data_age_days is a float.
+    assert body["as_of"].startswith("2024-12-31")
+    assert body["fetched_at"].startswith("2026-05-21")
+    assert isinstance(body["data_age_days"], (int, float))
+    assert body["data_age_days"] > 0
 
 
 def test_fundamentals_endpoint_caches_between_calls(tmp_path: Path) -> None:

@@ -1,11 +1,14 @@
 import { AlertOctagon, RefreshCw } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
+import { HistoricalOutcomesPanel } from "@/components/history/HistoricalOutcomesPanel";
 import { useAnalyzerReport } from "@/lib/analyzer";
 import { AiExplanation } from "./AiExplanation";
 import { BullBearCases } from "./BullBearCases";
+import { CalibrationStrip } from "./CalibrationStrip";
 import { FairValueRange } from "./FairValueRange";
 import { OverboughtSpectrum } from "./OverboughtSpectrum";
 import { RiskWarnings } from "./RiskWarnings";
+import { ScenarioRange } from "./ScenarioRange";
 import { ScoreHeader } from "./ScoreHeader";
 
 interface Props {
@@ -82,12 +85,22 @@ export function AnalyzerTab({ symbol }: Props) {
         technical={report.technical_score}
         fundamental={report.fundamental_score}
         valuation={report.valuation_score}
+        freshness={report.fundamentals_freshness}
       />
 
       <OverboughtSpectrum technicals={report.technicals} />
 
+      <CalibrationStrip calibrations={report.calibrations} />
+
+      <HistoricalOutcomesPanel symbol={report.symbol} />
+
       <FairValueRange
         valuation={report.valuation}
+        lastPrice={report.last_price}
+      />
+
+      <ScenarioRange
+        scenarios={report.scenarios}
         lastPrice={report.last_price}
       />
 

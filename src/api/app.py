@@ -54,8 +54,22 @@ from starlette.staticfiles import StaticFiles
 from src.api.analyzer import register_analyzer_routes
 from src.api.broker import SnapshotBroker
 from src.api.fundamentals import register_fundamentals_routes
+from src.api.health import register_health_routes
+from src.api.history import register_history_routes
 from src.api.research import register_research_routes
 from src.config import get_settings
+from src.data.health_store import HealthStore
+from src.data.retry_queue import BackoffPolicy, RetryQueue
+from src.data.retry_worker import (
+    PermanentRetryFailure,
+    RetryWorker,
+    TransientRetryFailure,
+)
+from src.intelligence.calibration import CalibrationStore
+from src.intelligence.calibration_worker import (
+    CalibrationMaturationWorker,
+    bars_cache_price_lookup,
+)
 
 if TYPE_CHECKING:
     from src.dashboard.controller import BaseController
@@ -77,6 +91,12 @@ def create_app(
     fundamentals_service: Any = None,
     fundamentals_cache_dir: Path | None = None,
     analyzer_cache_dir: Path | None = None,
+    health_store: HealthStore | None = None,
+    retry_queue: RetryQueue | None = None,
+    retry_worker_enabled: bool | None = None,
+    calibration_store: CalibrationStore | None = None,
+    calibration_maturation_enabled: bool | None = None,
+    research_cache_dir: Path | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a controller.
 
@@ -110,24 +130,57 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
-        """Start the snapshot broker on app startup, stop on shutdown.
+        """Start workers on startup; stop on shutdown.
 
-        Only spins up if a positive ``stream_interval`` was passed.
-        The broker is attached to ``app.state.broker`` so the SSE
-        handler can find it (route closures can't easily share state
-        any other way in FastAPI).
+        Three workers, all opt-in:
+
+        - The snapshot broker spins up when ``stream_interval`` is
+          positive (drives the SSE endpoint).
+        - The retry worker spins up when a retry queue exists AND
+          ``retry_queue_worker_enabled`` is True. Drains transient
+          fundamentals failures on its own cadence.
+        - The calibration maturation worker spins up when the
+          calibration store exists AND
+          ``calibration_maturation_enabled`` is True. Settles matured
+          observations against the bars cache.
+
+        Every worker is attached to ``app.state`` so route closures
+        can find them; every worker is cancelled on shutdown.
         """
         broker: SnapshotBroker | None = None
         if stream_interval is not None:
             broker = SnapshotBroker(controller, interval=stream_interval)
             await broker.start()
         app_.state.broker = broker
+
+        # ``starlette.datastructures.State`` stores attributes in
+        # ``_state``, not ``__dict__`` — the lifespan reads via
+        # ``getattr`` so attributes set on ``app.state`` from outside
+        # the lifespan (where the workers are constructed) round-trip
+        # correctly. Direct ``__dict__.get`` returns None and silently
+        # disables the worker.
+        worker: RetryWorker | None = getattr(app_.state, "retry_worker", None)
+        if worker is not None:
+            await worker.start()
+
+        cal_worker: CalibrationMaturationWorker | None = getattr(
+            app_.state, "calibration_worker", None
+        )
+        if cal_worker is not None:
+            await cal_worker.start()
+
         try:
             yield
         finally:
             if broker is not None:
                 await broker.stop()
             app_.state.broker = None
+            if worker is not None:
+                await worker.stop()
+                app_.state.retry_worker = None
+            if cal_worker is not None:
+                await cal_worker.stop()
+                app_.state.calibration_worker = None
 
     app = FastAPI(
         title="Esther API",
@@ -249,8 +302,52 @@ def create_app(
     # rotates with the rest of the runtime state and stays out of the
     # source tree.
     settings = get_settings()
-    research_cache = settings.project_root / "data" / "research_cache"
+    research_cache = (
+        research_cache_dir
+        if research_cache_dir is not None
+        else settings.project_root / "data" / "research_cache"
+    )
     register_research_routes(app, controller, cache_dir=research_cache)
+
+    # Health observability — only wire the route when a HealthStore is
+    # available. When `health_store` is None we look up the settings
+    # default; passing `health_store_path=None` in settings disables
+    # the store entirely (and the route 503s on access).
+    effective_health_store: HealthStore | None = health_store
+    if effective_health_store is None and settings.health_store_path is not None:
+        effective_health_store = HealthStore(settings.health_store_path)
+
+    # Retry queue: same opt-out shape. ``retry_queue_path=None`` in
+    # settings disables persistence; otherwise we wire one up.
+    effective_retry_queue: RetryQueue | None = retry_queue
+    if effective_retry_queue is None and settings.retry_queue_path is not None:
+        effective_retry_queue = RetryQueue(
+            settings.retry_queue_path,
+            backoff=BackoffPolicy(
+                initial_seconds=settings.retry_queue_initial_backoff_seconds,
+                max_seconds=settings.retry_queue_max_backoff_seconds,
+            ),
+            max_attempts=settings.retry_queue_max_attempts,
+        )
+
+    # Calibration store: same opt-out shape. Lazy init means
+    # constructing the store doesn't touch disk until the analyzer
+    # actually queries it.
+    effective_calibration_store: CalibrationStore | None = calibration_store
+    if (
+        effective_calibration_store is None
+        and settings.calibration_store_path is not None
+    ):
+        effective_calibration_store = CalibrationStore(
+            settings.calibration_store_path
+        )
+
+    if effective_health_store is not None:
+        register_health_routes(
+            app,
+            store=effective_health_store,
+            retry_queue=effective_retry_queue,
+        )
 
     # Fundamentals routes (Phase 2). Independent of the controller —
     # the fundamentals chain only needs settings + the orchestrator.
@@ -262,7 +359,11 @@ def create_app(
         else settings.project_root / "data" / "fundamentals_cache"
     )
     register_fundamentals_routes(
-        app, cache_dir=fundamentals_cache, service=fundamentals_service
+        app,
+        cache_dir=fundamentals_cache,
+        service=fundamentals_service,
+        health_store=effective_health_store,
+        retry_queue=effective_retry_queue,
     )
 
     # Analyzer routes (Phase 6) — assemble technicals + valuation +
@@ -279,7 +380,90 @@ def create_app(
         controller,
         cache_dir=analyzer_cache,
         fundamentals_service=fundamentals_service,
+        health_store=effective_health_store,
+        retry_queue=effective_retry_queue,
+        calibration_store=effective_calibration_store,
     )
+
+    # Per-symbol historical outcomes drill-down. Only registered when
+    # the calibration store exists — when calibration is disabled,
+    # the endpoint silently 404s (no data to surface).
+    if effective_calibration_store is not None:
+        register_history_routes(app, store=effective_calibration_store)
+
+    # Optional retry worker. Wired into ``app.state`` so the lifespan
+    # handler picks it up; stays None when disabled. We don't import
+    # FundamentalsService at module top to keep this file's import
+    # graph minimal — late import here is cheap (one-shot at app
+    # construction).
+    worker_on = (
+        retry_worker_enabled
+        if retry_worker_enabled is not None
+        else settings.retry_queue_worker_enabled
+    )
+    if worker_on and effective_retry_queue is not None:
+        from src.intelligence.fundamentals import (
+            FundamentalsService,
+            ProviderChainExhausted,
+        )
+
+        async def _retry_fundamentals(symbol: str) -> None:
+            """Worker retry hook for a single symbol.
+
+            Translates the fundamentals chain outcome into the
+            retry-worker exception protocol: success returns
+            normally; transient-only exhaustion raises
+            :class:`TransientRetryFailure`; any other failure raises
+            :class:`PermanentRetryFailure`.
+            """
+            svc: FundamentalsService
+            if fundamentals_service is not None:
+                svc = fundamentals_service  # injected (tests)
+            else:
+                svc = FundamentalsService.from_settings(
+                    settings,
+                    health_store=effective_health_store,
+                    retry_queue=effective_retry_queue,
+                )
+            try:
+                await svc.fetch(symbol)
+            except ProviderChainExhausted as exc:
+                observed = {
+                    h.status for h in exc.health if h.status not in ("skipped", "ok")
+                }
+                transient = {"rate_limited", "transient"}
+                if observed and observed.issubset(transient):
+                    raise TransientRetryFailure(tuple(exc.errors)) from None
+                raise PermanentRetryFailure(tuple(exc.errors)) from None
+
+        worker = RetryWorker(
+            effective_retry_queue,
+            _retry_fundamentals,
+            interval_seconds=settings.retry_queue_worker_interval_seconds,
+        )
+        app.state.retry_worker = worker
+    else:
+        app.state.retry_worker = None
+
+    # Calibration maturation worker — same lifespan pattern. Settles
+    # matured observations against the bars cache (no Alpaca fallback
+    # at this stage — production deployments rely on the snapshot loop
+    # to keep the cache fresh for active watchlist symbols). Off by
+    # default; ``Settings.calibration_maturation_enabled`` flips it on.
+    cal_worker_on = (
+        calibration_maturation_enabled
+        if calibration_maturation_enabled is not None
+        else settings.calibration_maturation_enabled
+    )
+    if cal_worker_on and effective_calibration_store is not None:
+        cal_worker = CalibrationMaturationWorker(
+            effective_calibration_store,
+            bars_cache_price_lookup,
+            interval_seconds=settings.calibration_maturation_interval_seconds,
+        )
+        app.state.calibration_worker = cal_worker
+    else:
+        app.state.calibration_worker = None
 
     # CORS for the read-only API. In production the bundled frontend
     # is served from the same origin as the API (see frontend_dir

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -172,3 +173,199 @@ def test_merge_empty_live_returns_cache(cache_root: Path) -> None:
         cached.reset_index(drop=True),
     )
     assert (merged.index == cached.index).all()
+
+
+# ---------------------------------------------------------------------------
+# TTL (mtime-driven) on the simple reads
+# ---------------------------------------------------------------------------
+
+
+def _age_file(path: Path, delta: timedelta) -> None:
+    """Mutate a file's mtime backwards by ``delta``.
+
+    Used to simulate a long-stale cache without having to actually
+    wait. Touching atime as well keeps platforms that surface both
+    consistent.
+    """
+    new_mtime = (datetime.now(UTC) - delta).timestamp()
+    os.utime(path, (new_mtime, new_mtime))
+
+
+def test_read_bars_max_age_returns_none_when_file_too_old(cache_root: Path) -> None:
+    path = cache.write_bars("AAPL", TimeFrame.DAY_1, _df(30))
+    _age_file(path, timedelta(hours=2))
+
+    assert cache.read_bars("AAPL", TimeFrame.DAY_1, max_age=timedelta(hours=1)) is None
+    # Sanity: without max_age, the cache still reads.
+    assert cache.read_bars("AAPL", TimeFrame.DAY_1) is not None
+
+
+def test_read_bars_max_age_returns_data_when_fresh(cache_root: Path) -> None:
+    cache.write_bars("AAPL", TimeFrame.DAY_1, _df(30))
+    # File was just written; well within a 1h budget.
+    loaded = cache.read_bars(
+        "AAPL", TimeFrame.DAY_1, max_age=timedelta(hours=1)
+    )
+    assert loaded is not None
+    assert len(loaded) == 30
+
+
+def test_read_news_max_age_returns_empty_when_file_too_old(cache_root: Path) -> None:
+    when = datetime(2026, 5, 1, tzinfo=UTC)
+    path = cache.write_news("AAPL", [_article("n1", when)])
+    _age_file(path, timedelta(hours=12))
+
+    assert cache.read_news("AAPL", max_age=timedelta(hours=6)) == []
+    # Without max_age, the cache still reads.
+    assert len(cache.read_news("AAPL")) == 1
+
+
+def test_merge_with_cache_skips_expired_cache(cache_root: Path) -> None:
+    """A stale CSV must NOT contaminate a fresh live-data merge.
+
+    Pre-P1.3 this was the silent failure mode: a multi-day-old warmup
+    cache would get prepended to fresh bars, with the indicator engine
+    happily computing on what was effectively two disjoint windows.
+    """
+    cached = _df(60, start=datetime(2026, 1, 1, tzinfo=UTC))
+    cache_path = cache.write_bars("AAPL", TimeFrame.DAY_1, cached)
+    _age_file(cache_path, timedelta(days=10))
+
+    live = _df(10, start=datetime(2026, 4, 1, tzinfo=UTC))
+    merged = cache.merge_with_cache(
+        "AAPL", TimeFrame.DAY_1, live, max_age=timedelta(hours=24)
+    )
+    # Cache was too old → live unchanged.
+    pd.testing.assert_frame_equal(merged, live, check_names=False)
+
+
+def test_merge_with_cache_uses_cache_when_within_max_age(cache_root: Path) -> None:
+    cached = _df(60, start=datetime(2026, 1, 1, tzinfo=UTC))
+    cache.write_bars("AAPL", TimeFrame.DAY_1, cached)
+    # No artificial age — file is fresh.
+    live = _df(10, start=datetime(2026, 4, 1, tzinfo=UTC))
+    merged = cache.merge_with_cache(
+        "AAPL", TimeFrame.DAY_1, live, max_age=timedelta(hours=24)
+    )
+    assert len(merged) == 70
+
+
+# ---------------------------------------------------------------------------
+# Envelope reads (in-band as_of)
+# ---------------------------------------------------------------------------
+
+
+def test_read_bars_envelope_uses_last_bar_timestamp_as_as_of(cache_root: Path) -> None:
+    start = datetime(2026, 5, 1, tzinfo=UTC)
+    df = _df(10, start=start)
+    cache.write_bars("AAPL", TimeFrame.DAY_1, df)
+
+    # Pin "now" to one day after the last bar so freshness is
+    # deterministic. With the bars.daily policy (25h fresh window)
+    # this should be ``fresh``.
+    last_ts = df.index.max().to_pydatetime()
+    env = cache.read_bars_envelope("AAPL", TimeFrame.DAY_1, now=last_ts + timedelta(hours=1))
+    assert env is not None
+    assert env.as_of == last_ts
+    assert env.freshness == "fresh"
+    assert env.source_chain == ("cache",)
+    assert env.provider_confidence == 1.0
+
+
+def test_read_bars_envelope_freshness_falls_through_tiers(cache_root: Path) -> None:
+    """Walk a single fixture across fresh → aging → stale → expired."""
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    df = _df(5, start=start)
+    cache.write_bars("AAPL", TimeFrame.DAY_1, df)
+    last_ts = df.index.max().to_pydatetime()
+
+    # bars.daily policy: fresh ≤25h, aging ≤3d, stale ≤7d, then expired.
+    fresh = cache.read_bars_envelope(
+        "AAPL", TimeFrame.DAY_1, now=last_ts + timedelta(hours=1)
+    )
+    aging = cache.read_bars_envelope(
+        "AAPL", TimeFrame.DAY_1, now=last_ts + timedelta(days=2)
+    )
+    stale = cache.read_bars_envelope(
+        "AAPL", TimeFrame.DAY_1, now=last_ts + timedelta(days=5)
+    )
+    expired = cache.read_bars_envelope(
+        "AAPL", TimeFrame.DAY_1, now=last_ts + timedelta(days=10)
+    )
+    assert fresh is not None and fresh.freshness == "fresh"
+    assert aging is not None and aging.freshness == "aging"
+    assert stale is not None and stale.freshness == "stale"
+    assert expired is not None and expired.freshness == "expired"
+
+
+def test_read_bars_envelope_intraday_policy_for_subdaily_timeframes(
+    cache_root: Path,
+) -> None:
+    """A 5-minute timeframe should grade against bars.intraday by default."""
+    start = datetime(2026, 5, 1, 9, 30, tzinfo=UTC)
+    idx = pd.date_range(start=start, periods=10, freq="5min", tz="UTC")
+    df = pd.DataFrame(
+        {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "volume": 1},
+        index=idx,
+    )
+    cache.write_bars("AAPL", TimeFrame.MIN_5, df)
+    last_ts = df.index.max().to_pydatetime()
+    # bars.intraday: fresh ≤90s. 30 seconds out should be fresh.
+    env = cache.read_bars_envelope(
+        "AAPL", TimeFrame.MIN_5, now=last_ts + timedelta(seconds=30)
+    )
+    assert env is not None and env.freshness == "fresh"
+    # 6 minutes out → aging window (≤5m fresh / ≤30m expired? actually
+    # ≤90s fresh, ≤5m aging, ≤30m stale, >30m expired).
+    env = cache.read_bars_envelope(
+        "AAPL", TimeFrame.MIN_5, now=last_ts + timedelta(minutes=6)
+    )
+    assert env is not None and env.freshness == "stale"
+
+
+def test_read_bars_envelope_returns_none_when_file_missing(cache_root: Path) -> None:
+    assert cache.read_bars_envelope("ZZZZ", TimeFrame.DAY_1) is None
+
+
+def test_read_news_envelope_uses_latest_published_at(cache_root: Path) -> None:
+    base = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    articles = [
+        _article("n1", base),
+        _article("n2", base + timedelta(hours=2)),
+        _article("n3", base + timedelta(hours=1)),
+    ]
+    cache.write_news("AAPL", articles)
+    env = cache.read_news_envelope("AAPL", now=base + timedelta(hours=3))
+    assert env is not None
+    # Latest article wins.
+    assert env.as_of == base + timedelta(hours=2)
+    assert env.freshness == "fresh"  # 1h < 6h news fresh window
+
+
+def test_read_news_envelope_falls_back_to_mtime_when_no_articles(
+    cache_root: Path,
+) -> None:
+    path = cache.write_news("AAPL", [])
+    env = cache.read_news_envelope("AAPL")
+    assert env is not None
+    # as_of should match the file mtime within a small tolerance.
+    mtime = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+    assert abs((env.as_of - mtime).total_seconds()) < 1.0
+
+
+def test_read_news_envelope_returns_none_when_file_missing(cache_root: Path) -> None:
+    assert cache.read_news_envelope("ZZZZ") is None
+
+
+def test_read_news_envelope_freshness_against_news_policy(cache_root: Path) -> None:
+    base = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    cache.write_news("AAPL", [_article("n1", base)])
+    # news policy: fresh ≤6h, aging ≤24h, stale ≤3d, expired beyond.
+    fresh = cache.read_news_envelope("AAPL", now=base + timedelta(hours=2))
+    aging = cache.read_news_envelope("AAPL", now=base + timedelta(hours=12))
+    stale = cache.read_news_envelope("AAPL", now=base + timedelta(days=2))
+    expired = cache.read_news_envelope("AAPL", now=base + timedelta(days=5))
+    assert fresh is not None and fresh.freshness == "fresh"
+    assert aging is not None and aging.freshness == "aging"
+    assert stale is not None and stale.freshness == "stale"
+    assert expired is not None and expired.freshness == "expired"

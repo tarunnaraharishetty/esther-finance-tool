@@ -2,385 +2,287 @@
 
 Pick-up notes for the next session. Read this before writing any code.
 
-*Last touched: 2026-05-14 (Phase 0 complete: SSE streaming endpoint shipped on top of the shared broker; React + Vite frontend in progress).*
+*Last touched: 2026-05-21 (Priority #1 data-quality foundation fully landed).*
 
 ---
 
 ## What Esther is
 
-**An AI market intelligence workstation, a trader productivity system,
-and a research assistant.** It helps a discretionary trader understand
-what's happening across their watchlist faster and with more grounded
-context than they could assemble by hand.
+**An AI market intelligence platform** for discretionary traders. It
+helps a discretionary trader understand what's happening across their
+watchlist faster and with more grounded context than they could
+assemble by hand. The decision is always theirs.
 
 It is **not** an autonomous trading AI, a hedge-fund engine, or a
 prediction machine. There is no order submission anywhere in the
-codebase, the data layer points at `paper-api.alpaca.markets`, and
-every LLM-driven feature ships with anti-hallucination grounding rules
-that forbid forecasts and require headlines to be quoted verbatim.
+codebase. The data layer points at `paper-api.alpaca.markets`. Every
+LLM-driven feature ships with anti-hallucination grounding rules that
+forbid forecasts and require headlines to be quoted verbatim.
 Anything that nudges back toward those framings is wrong.
 
 ---
 
 ## Current architecture status
 
-Stable. The intelligence layer has settled into a coherent set of
-modules with one clear responsibility each, and the dashboard renders
-all of them through a small set of named widgets.
+Stable. Each layer has a coherent responsibility and a stable contract
+to the layer above:
 
 ```
 src/
-├── main.py            # CLI: status / doctor / initdb / backfill /
-│                      # recommend / summarize / recap / dashboard
-├── config/            # Pydantic Settings (Alpaca + Anthropic + sentiment)
-├── data/              # Alpaca client, market data, news (deduped),
-│                      # ORM, repositories, filesystem cache
-├── sentiment/         # FinBERT scorer
-├── indicators/        # RSI / MACD / Bollinger
-├── strategy/          # Signal + RecommendationEngine + 5-tier promoter
-├── risk/              # Sharpe + max-drawdown
-├── dashboard/         # Textual app + controller + snapshot state +
-│                      # WatchlistHeader / DetailPanel / StatusLine /
-│                      # AddSymbolModal
-├── intelligence/      # explain · summary · llm_summary · alerts ·
-│                      # alert_prioritizer · watchlist · history · tier ·
-│                      # rankings · recap · grounding · pulse ·
-│                      # pulse_history · pulse_evolution · opportunities ·
-│                      # signal_profile · opportunity_history ·
-│                      # opportunity_brief · opportunity_drilldown
-├── persistence/       # SessionStore (JSON snapshot for cross-restart
-│                      # state: signal_history, opp_history,
-│                      # pulse_history, alert_state, tick counter)
-├── strategy/          # base · recommendation · multi_timeframe
-│                      # (IntradayRead + is_divergent for the
-│                      # secondary intraday alignment chip)
-└── utils/             # logging, rate limiter, preflight
+├── main.py             # CLI: status / doctor / initdb / backfill /
+│                       # recommend / summarize / recap / dashboard / serve
+├── api/                # FastAPI + SSE + JSON routes
+│   ├── app.py          # create_app, lifespan, SSE
+│   ├── analyzer.py     # /api/analyzer/{symbol}
+│   ├── broker.py       # SnapshotBroker for SSE
+│   ├── fundamentals.py # /api/fundamentals/{symbol} + /health + status
+│   ├── health.py       # /api/health/providers + /api/health/queue
+│   └── research.py     # /api/research/{symbol}
+├── config/             # Pydantic Settings (single env reader)
+├── data/               # Alpaca client, market data, news (deduped),
+│                       # cache (mtime-TTL + envelope variants),
+│                       # envelope.py + freshness.py (DataEnvelope / policies),
+│                       # health_store.py (SQLite SLO log),
+│                       # retry_queue.py + retry_worker.py
+├── dashboard/          # Textual app + controller + snapshot state
+├── indicators/         # RSI, MACD, Bollinger, ATR, VolumeZScore
+├── intelligence/       # explain · summary · llm_summary · alerts ·
+│                       # alert_prioritizer · watchlist · history · tier ·
+│                       # rankings · recap · grounding · pulse · pulse_history ·
+│                       # pulse_evolution · opportunities · signal_profile ·
+│                       # opportunity_history · opportunity_brief ·
+│                       # opportunity_drilldown · llm_research ·
+│                       # research_thesis · timeframe_compare · intraday_alerts ·
+│                       # analyzer/ (technical + valuation + explanation +
+│                       # sector_medians + LLM explanation) ·
+│                       # fundamentals/ (FMP / Finnhub / AlphaVantage /
+│                       # SEC EDGAR / Yahoo + base / http / models /
+│                       # reconciliation / service)
+├── persistence/        # SessionStore (JSON snapshot for cross-restart state)
+├── risk/               # Sharpe + max-drawdown
+├── sentiment/          # FinBERT analyzer + news_quality
+├── strategy/           # signal_aggregator + RecommendationEngine + multi_timeframe
+└── utils/              # logging, rate limiter, preflight
+web/                    # React + TypeScript + Vite frontend
+├── src/lib/            # API clients, types, helpers
+└── src/pages/          # Dashboard / Analyzer / AI / Charts / Movers /
+                        # News / Research / Watchlist
 ```
 
-**Layering invariant:** `intelligence` depends on `strategy` + `data`;
-it never imports from `dashboard` or `main`. The `Summarizer` protocol
-lets the dashboard / CLI consume either `TemplateSummarizer` (offline,
-deterministic) or `LLMSummarizer` (Claude-backed) without caring which.
-`LLMRecapGenerator` and `LLMOpportunityBriefer` follow the same shape.
+**Layering invariants:**
+- `intelligence/` depends on `strategy/` + `data/`; never imports from
+  `dashboard/`, `main`, or `api/`.
+- `data/` has no `intelligence/` imports (cycle-free; cross-cutting
+  models like `ProviderHealth` are imported by `data/health_store.py`
+  from `intelligence/fundamentals/models.py`, with the inverse via
+  `TYPE_CHECKING` to avoid a cycle).
+- The `Summarizer` / `ThesisGenerator` protocols let the dashboard /
+  CLI consume either deterministic or LLM-backed implementations
+  without caring which.
 
 ---
 
 ## Completed systems
 
-Everything below is shipped, tested, and either rendered in the
-dashboard or exposed via the CLI.
+### Data + sentiment
+- Alpaca paper-feed client with rate limiting + retry.
+- Bars + news ingestion with **freshness-aware filesystem cache**:
+  - `read_bars` / `read_news` with mtime-based TTL (for warmup paths).
+  - `read_bars_envelope` / `read_news_envelope` with in-band as_of and
+    `DataEnvelope` wrapping (for analyzer/UI consumers).
+  - `merge_with_cache` refuses to merge an expired cache prefix.
+- News dedup at the source — defensive against SDK pagination quirks.
+- FinBERT sentiment scoring per article with quality weighting
+  (recency × source reputation).
 
-**Data + sentiment**
-- Alpaca paper-feed client with rate limiting + retry
-- Bars + news ingestion with filesystem cache (warm-start via `esther backfill`)
-- News dedup at the source — defensive against SDK pagination quirks
-- FinBERT sentiment scoring per article
-- **News quality weighting** — per-article weight = recency_decay ×
-  source_reputation feeds `weighted_sentiment_mean()` when
-  aggregating per-symbol sentiment. Half-life + floor configurable
-  via Settings; curated source-tier map (Reuters/AP/Bloomberg = 1.0,
-  WSJ/FT/CNBC = 0.8, Benzinga/Motley Fool = 0.6, blogs = 0.4,
-  unknown = 0.3). Every downstream feature (alerts, pulse, ranking,
-  opportunities, briefs) inherits the improvement via
-  `row.sentiment_score`.
+### Fundamentals data quality (Priority #1 — fully shipped)
 
-**Persistence**
-- `SessionStore` — atomic JSON snapshot of intelligence-layer
-  trackers (signal history, OPP membership, pulse history, alert
-  state, tick counter). Written at the end of every tick; loaded at
-  controller startup. Corruption-resilient (missing / invalid /
-  schema-mismatched files cold-start cleanly). Opt-in via
-  `SessionStore` injection into the controller; tests stay
-  ephemeral by omitting it. Default path
-  `data/session_state.json`, env-overridable.
-- **Brief caches** (row + OPP) also persist in the same snapshot.
-  Saved text survives restarts so the next `s` / `b` keypress
-  surfaces the cached brief without re-billing the LLM. Schema
-  unchanged — new pydantic dict fields default to empty so older
-  snapshots load fine. Symbol removal prunes the controller mirror
-  too, so re-adding a wiped symbol doesn't resurrect its brief.
+- **Provider chain** with typed error taxonomy
+  (`ProviderUnavailable`/`RateLimited`/`NotFound`/`Transient`).
+- **DataEnvelope[T]** generic wrapper (P1.1):
+  - `as_of`, `fetched_at`, `source_chain`, `freshness`,
+    `provider_confidence`. Lives at `src/data/envelope.py`.
+  - `FreshnessPolicy` table for fundamentals.quarterly/.annual,
+    bars.intraday/.daily, news, analyst_targets at `src/data/freshness.py`.
+- **Persistent provider health** (P1.2):
+  - `HealthStore` (SQLite, WAL, lazy-init) at `src/data/health_store.py`.
+  - Best-effort sink writes on every `FundamentalsService.fetch()`
+    (success or chain-exhausted).
+  - `GET /api/health/providers?window=<int>(s|m|h|d)` rolling SLO
+    summary + 20 most recent failure rows.
+- **Cache TTL** on bars/news (P1.3) — see above.
+- **Cross-provider reconciliation** (P1.4):
+  - When primary chain position > 0, second provider is called for the
+    same symbol and high-trust fields compared
+    (revenue / net_income / eps_diluted / total_debt).
+  - Sign-flip rule fires regardless of threshold; fiscal-date mismatch
+    surfaces as a warning, not a divergence.
+  - Divergences penalize `provider_confidence` multiplicatively
+    (`0.85^N`, floored at `0.5x`).
+- **Durable retry queue** (P1.5):
+  - JSON-on-disk queue at `src/data/retry_queue.py` (atomic writes,
+    corrupt-resilient, schema-versioned).
+  - Service auto-enqueues on *transient-only* chain exhaustion; mixed
+    failures don't queue.
+  - Opt-in async `RetryWorker` (off by default; set
+    `retry_queue_worker_enabled=true` to enable).
+  - `GET /api/health/queue` returns pending + permanently-failed counts
+    and full entry list.
 
-**Pulse evolution**
-- `PulseEvolution` data (regime + trajectory patterns) attached to
-  every `DashboardSnapshot`. Regime is one of `risk-on` / `risk-off`
-  / `mixed` / `indeterminate`, derived from net bull/bear tilt
-  across the last 6 ticks. Patterns fire from numeric gates: half-
-  window mean comparisons for breadth firming/fading, max-ratio for
-  alert spikes, sum-ratio for reversal clusters.
-- `WatchlistHeader` surfaces `REGIME` and `PATTERNS` lines when the
-  synthesis is meaningful (quiet on `indeterminate` / empty).
-- `RecapContext` carries the regime + patterns into the recap LLM
-  prompt as deterministic facts; existing anti-hallucination rules
-  already cover observational language so no new few-shot needed.
+### Analyzer + valuation
 
-**Multi-timeframe**
-- **Phase 1: per-row intraday read** alongside the daily pipeline.
-  Opt-in via `Settings.intraday_enabled` (default off; doubles
-  Alpaca bar fetches when on). `RecommendationEngine.recommend_
-  intraday()` runs the indicator scoring path on the secondary
-  bar dataframe. `IntradayRead` attaches to each
-  `RecommendationRow`. `DetailPanel` + `WatchlistHeader` surface
-  alignment chips + divergence counts.
-- **Phase 2a: schema v2 + view toggle.** `SessionStore` schema
-  bumped to v2 with v1 migration (v1 snapshots load with empty
-  intraday state, persist as v2). `BaseController.intraday_signal_
-  history` records from `row.intraday` each tick; surfaces on
-  `DashboardSnapshot.intraday_signal_history`. View toggle `t`
-  flips the table's ACTION / CONF / BAR / TECH cells between
-  daily and intraday; `WatchlistHeader` shows a VIEW chip while
-  intraday is active.
-- **Phase 2b: intraday OPP ranker + tracker.** Schema v3 (additive
-  — intraday OPP membership fields). `rank_opportunities_intraday`
-  scores opportunities off `row.intraday` + intraday signal
-  history; tier maps from `intraday.action`. Parallel
-  `BaseController.intraday_opp_tracker` records top-N membership.
-  `WatchlistHeader`'s OPP block flips to `OPP-I` label + intraday
-  ranking in intraday view; daily view unchanged.
-- **Phase 2c: intraday pulse + Intelligence blocks + alerts.**
-  - `compute_pulse_intraday` + parallel `intraday_pulse_tracker`;
-    full PULSE / HIST / REGIME / PATTERNS lines toggle to the
-    intraday triad in intraday view (`-I` label suffix).
-  - `src/intelligence/timeframe_compare.py` — per-symbol
-    `TimeframeStance` (aligned_bullish / aligned_bearish /
-    conflict / intraday_only / daily_only / neutral) with
-    observational phrases ("strengthening intraday momentum",
-    "intraday reversal against daily trend"). Header ALIGN line
-    surfaces aggregate counts.
-  - `DetailPanel` adds compact **Daily Intelligence** +
-    **Intraday Intelligence** blocks per row (action tier,
-    confidence, tenure, trend, reversal state, opp rank, top
-    drivers).
-  - `src/intelligence/intraday_alerts.py` — 5 deterministic
-    rules: reversal acceleration, momentum collapse, timeframe
-    disagreement (transition edge only), intraday OPP entry,
-    rapid confidence decay. Cooldowns wired in
-    `_DEFAULT_COOLDOWNS`. **Auto-registered** in `main.py`'s
-    `dashboard` command when `settings.intraday_enabled` is on —
-    works whether or not the trader has a custom `alerts.yaml`.
-- **Phase 2c workflow polish (active-view UX)**
-  - `o` (cycle OPP) and `b` (OPP brief) target the active view's
-    ranker — daily view operates on daily OPPs, intraday view
-    operates on intraday OPPs. No cross-view leakage.
-  - New `_intraday_opp_brief_cache` keeps daily and intraday
-    briefs distinct. Persisted via additive
-    `SessionSnapshot.intraday_opp_brief_cache`.
-  - `StatusLine` surfaces a compact intraday chip — `INTRA HOT`
-    / `INTRA REV` / `TF CONFLICT` / `DAILY+INTRA ALIGN` /
-    `INTRA ON` — derived strictly from observable state.
-  - `DetailPanel` flips block order in intraday view (Intraday
-    Intelligence first, Daily second) and sources the
-    Opportunity-Intelligence drilldown from the intraday ranker.
-  - `TimeframeStance.alignment_label` field with eight
-    trader-facing strings (`aligned bullish`, `momentum conflict`,
-    `intraday reversal`, `short-term pullback`, `strengthening
-    continuation`, etc.) — deterministic mapping from
-    ``(category, phrases)``.
+- Normalized technical scoring (`src/intelligence/analyzer/technical.py`):
+  7 sub-scores in [0,100], combiners for overbought / oversold /
+  pullback risk / rebound potential, coverage × agreement confidence.
+- Multi-method valuation ensemble (`src/intelligence/analyzer/valuation.py`):
+  DCF, P/E, EV/EBITDA, P/S, PEG, historical band, analyst targets.
+  Per-method confidence; bear/base/bull at 25/50/75 percentile; weighted
+  AI fair value; overall confidence in [0,100].
+- Grounded explanation builder with citation validator
+  (`src/intelligence/analyzer/explanation.py`).
+- `/api/analyzer/{symbol}` ties it all together, including a
+  `fundamentals_freshness` block with divergence + warning counts.
 
-**Strategy**
-- RSI / MACD / Bollinger indicators
-- Signal aggregator + `RecommendationEngine`
-- 5-tier promoter (`STRONG_BUY` / `BUY` / `HOLD` / `SELL` / `STRONG_SELL`)
-  with signal-quality grade and stability tier
+### Strategy + dashboard + AI summaries
 
-**Intelligence layer**
-- Per-row explanation builder (`explain.py`)
-- Per-symbol Claude brief (`LLMSummarizer`) — `s` key in dashboard,
-  `esther summarize` CLI
-- Watchlist-wide Claude recap (`LLMRecapGenerator`) — `esther recap` CLI
-- Per-OPP Claude brief (`LLMOpportunityBriefer`) — `b` key in dashboard
-- All three LLM modules pad past Opus 4.7's 4K-token cache minimum
-  with worked few-shot examples
-- Anti-hallucination grounding rules centralized in `grounding.py`
-- Signal history (`history.py`) — per-symbol episode tracking
-- Watchlist diff + top-movers + action breakdown (`watchlist.py`)
-- Six ranked sections (momentum / sentiment / confidence / reversals
-  / unusual / volatile)
+- RSI / MACD / Bollinger / ATR / Volume indicators.
+- 5-tier promoter (`STRONG_BUY`..`STRONG_SELL`) with signal-quality
+  grade and stability tier.
+- Per-symbol Claude brief (`s` key in dashboard, `esther summarize` CLI).
+- Watchlist-wide Claude recap (`esther recap` CLI).
+- Per-OPP Claude brief (`b` key in dashboard).
+- Research thesis surface (`/api/research/{symbol}`): structured
+  bull/bear/catalysts/valuation/technical sections; template or LLM mode.
+- Anti-hallucination grounding rules in `src/intelligence/grounding.py`
+  (regression-asserted verbatim in prompt construction).
+- Six ranked sections (momentum / sentiment / confidence / reversals /
+  unusual / volatile), opportunity detection + history, alerts +
+  prioritizer with cooldowns.
+
+### Multi-timeframe + pulse
+
+- Per-row intraday read with view toggle (`t`) flipping ACTION/CONF/
+  BAR/TECH cells between daily and intraday.
+- `TimeframeStance` (aligned_bullish / aligned_bearish / conflict /
+  intraday_only / daily_only / neutral) with trader-facing labels.
 - Market pulse: sentiment / conviction / activity + breadth + intensity
-  + STRONG-symbol callouts (`pulse.py`)
-- Pulse history with rolling-window sparklines (`pulse_history.py`)
-- Opportunity detection (`opportunities.py`) — kind-based +
-  composite-ranked with 7 drivers
-- Three-axis signal profile chip (stability · trend · persistence)
-- Opportunity history badges (NEW / Nx) — top-N membership tracking
-- Alert engine with 4 per-row rules + 1 snapshot rule (opportunity_entry)
-- Alert prioritizer with cooldowns + composites + per-tick cap
-- 4 OPP-related composite alerts shipped in the example YAML
+  + STRONG-symbol callouts; rolling-window history with sparklines;
+  regime + trajectory patterns.
 
-**Dashboard**
-- Textual TUI with adaptive refresh (5s base, 1.5s burst on flips/alerts)
-- Render-skip cache on `WatchlistHeader` and `DetailPanel`
-- Always-visible `StatusLine` at the bottom
-- `EventBuffer` collapses consecutive duplicate log lines
-- Per-symbol alerts surfaced inside `DetailPanel` for the cursor row
-- **Expanded opportunity drilldown** in `DetailPanel`: when the
-  cursor row is in top-N OPPs, surface rank, composite, NEW/Nx
-  tenure, quality-label chips (high conviction / building momentum
-  / reversal candidate / sentiment-driven / unstable·choppy),
-  seven driver bars sorted strongest-first with observational
-  descriptors, source rationale phrases verbatim, **plus richer
-  composite state phrases** (momentum strengthening across recent
-  ticks · positive/negative sentiment breadth · stable BUY/SELL
-  persistence) derived strictly from driver + profile + row state.
-  Non-OPP rows render unchanged.
-- Keyboard shortcuts: `q` quit · `r` refresh · `p` pause · `s` brief
-  · `o` cycle OPP · `b` OPP brief · `a` add symbol · `x` remove symbol
-  · `t` daily/intraday view · `c` toggle columns · `?` help overlay
-- **Refinements:** empty-watchlist hint on header + DetailPanel
-  (mentions `a` and `?`); `dashboard_refresh_seconds` and
-  `dashboard_burst_seconds` are Settings fields, env-overridable
-  and surfaced via the `--refresh-seconds` / `--burst-seconds` CLI
-  flags. **Column tunables** via `Settings.dashboard_columns` (env-
-  overridable JSON list; field validator rejects unknown names).
-  **In-app column-toggle modal** (`c`) lets the trader edit
-  visibility live via a SelectionList + Save button — Space
-  toggles a row, Tab focuses Save, Escape cancels, empty
-  selection is rejected silently.
-  **Command palette** (Ctrl+P) lists every keybinding action by
-  name; provider reuses the live `action_*` methods so it can't
-  drift from the keys.
-- **SessionStore status footer** in `StatusLine` — surfaces
-  persistence health as a colored chip
-  (`STORE ok · 19:42:11 · 184 KB` / `STORE stale · last write 2m
-  ago` / `STORE degraded · write failed`). Three deterministic
-  health states from observable timestamps. Empty chip when no
-  store is wired.
+### Quality baseline
 
-**Quality baseline**
-- 694 passing tests, 1 deselected (`slow`/`integration`)
-- `ruff check .` green across the repo
-- `mypy src` (`--strict`) green across all 54 source files
-- Documented exceptions live in `pyproject.toml`
+- **988 passing tests**, 1 deselected (`slow`/`integration`).
+- `ruff check .` green across the repo.
+- `mypy src --strict` green across **80 source files**.
+- Documented exceptions (single ASYNC109 noqa on the shared HTTP
+  helper) live at the use site.
 
 ---
 
-## Remaining high-priority roadmap
+## Remaining roadmap
 
-The core dashboard product is complete. The frontend/web phase
-is now in motion:
+The data-quality foundation is complete. Remaining work is sequenced
+priority-by-priority.
 
-**Phase 0 — Foundations (in progress)**
-- ✅ FastAPI app factory at `src/api/app.py`, REST `GET /api/snapshot`
-  + `GET /api/health` endpoints binding to a `BaseController` instance.
-  Uses FastAPI's `jsonable_encoder` on the DashboardSnapshot tree —
-  no parallel Pydantic models (yet). 6 tests via `TestClient`.
-- ✅ `esther serve [--host 127.0.0.1] [--port 8000] [--mock]
-  [--refresh-seconds N] ...` CLI command that boots uvicorn against
-  the factory. Reuses the same `_build_controller` helper as
-  `esther dashboard` so the two commands can't drift on alerts /
-  preflight / sentiment patching. Warns when binding to a non-loopback
-  host since the API has no auth.
-- ✅ SSE streaming endpoint at `GET /api/stream`. Architecture:
-  one `SnapshotBroker` per process owns the tick loop, every
-  connected client subscribes to a size-1 newest-wins
-  `asyncio.Queue` that the broker writes to on each tick. Heartbeat
-  comments every ≤15s keep proxies from culling idle connections.
-  New subscribers immediately receive the cached latest snapshot —
-  reconnect-safe. Toggle off with `--refresh-seconds 0`. Tested
-  against real uvicorn in a background thread (the in-process
-  TestClient/ASGITransport buffer streaming responses indefinitely).
+### Priority #2 — Probabilistic analyzer (not started)
 
-**Phase 1 — Read-only web mirror (not started)**
-- React + TypeScript + Vite shell consuming `/api/snapshot`.
-- Component-per-widget (WatchlistTable, DetailPanel, PulseCard,
-  AlertsFeed). Map 1-to-1 to the TUI for now.
+Goal: estimate ranges and probabilities, not predictions.
 
-See `PRODUCTION_READINESS.md` for the in/out cut for v0.
+- **`ScenarioModel`** layered on top of `ValuationEnsemble`: closed-form
+  lognormal price distribution from realized vol → tail probabilities
+  for "price below bear case in N days" and "price above bull case in
+  N days". Deterministic, no Monte Carlo.
+- **`SignalHistoryCalibrator`** offline build from `history.py`: maps
+  `(score_bucket, action) → (n, hit_rate)` so pullback_risk = 73 maps
+  to "64% of similar setups closed lower over 5d (412 observations)".
+- UI surfacing: replace 25/50/75 percentile framing with calibrated
+  probability + observation count. Refuse to publish a probability
+  with < N observations.
+- Calibration-drift check; auto-pause publishing when drift exceeds
+  threshold.
 
----
+### Priority #3 — Grounded research validator (not started)
 
-## Technical debt
+Goal: institutional-grade AI research with per-claim source attribution.
 
-Real items, not manufactured ones. None block the product; clean them
-when the surrounding code is touched.
+- Move `LLMThesisGenerator` to tool_use structured output with a
+  `ResearchRequest` → `ThesisDraft` schema where each claim carries
+  `source_category` and `source_excerpt`.
+- `ClaimValidator` drops any claim whose excerpt doesn't substring-
+  match an input fact. Drops are counted and surfaced on the response.
+- UI shows "AI declined to make 3 unsupported claims" as a trust
+  signal, not as a defect.
 
-- **SDK-boundary `# type: ignore` comments** in `market_data.py` and
-  `news_ingestion.py`. They're legitimate (alpaca-py's `feed=` kwarg
-  is typed too narrowly, BarSet's `.data` is loose, the
-  `with_async_retry` decorator confuses override-checking, Textual's
-  `run_worker` is typed `Callable[..., Never]`). Could be wrapped in
-  a thin typed adapter layer if it grows.
-- **`requirements.txt` and `pyproject.toml` are both maintained.**
-  They're now in sync but drift is possible. Consider deleting
-  `requirements.txt` in favor of `pip install -e .` only.
-- **`detect_opportunities` (kind-based)** is exported but shadowed by
-  `rank_opportunities` (composite). Decide whether to keep both as a
-  dual-view or remove the kind-based one.
-- **Brief cache keyed on `(symbol, action)`** — invalidates on action
-  flip but not on, say, a sentiment swing that doesn't change action.
-  Acceptable today; might want finer invalidation if briefs become
-  more expensive.
-- **`DashboardSnapshot` is a mutable `@dataclass`** — controller
-  fills `pulse`, `pulse_history`, `opp_history`, `alerts`,
-  `recent_alerts` after construction. Works, but a frozen variant
-  with `replace()` would make snapshot identity safer to reason about.
-- **The bare `tuple[object, ...]` signature type** for the render-skip
-  cache keys is loose; a `NamedTuple` per signature kind would be
-  more explicit + give autocomplete.
-- **Two `compute_pulse(snap)` fallbacks remain** in
-  `WatchlistHeader.render()` and `StatusLine.render()` for the
-  case where `snap.pulse is None` (unit-test fixtures). The fallback
-  is deliberate; a follow-up could either require all snapshots to
-  carry pre-computed pulse OR factor the recompute into one helper.
+### Priority #4 — Trader workflow features (partial)
+
+What exists today: watchlists, opportunity scanner, alerts, "why is
+this moving?" via `explain.py`, signal history storage, sector-median
+lookups. What's missing:
+
+- **Historical signal outcomes view** (depends on P2 calibration table).
+- **Compare two stocks** side-by-side: analyzer / valuation / technical
+  / sentiment. Cheap to build (frontend composition).
+- **Sector-relative ranking** ("AAPL is #3/24 in Tech on overbought_score").
+- **Causal "why is this moving?"** — extend `explain.py` to rank the
+  contributing factors and surface the top 1–2.
+
+Deferred deliberately: **backtesting-lite**. Correct backtesting is a
+6-month project; a shallow version actively erodes trust.
+
+### Priority #5 — Product quality (in flight)
+
+Loading states and freshness badges on the web frontend are the
+highest-leverage next moves now that the freshness envelope is wired
+end-to-end. Then accessibility, mobile readability, performance.
 
 ---
 
 ## Recommended next implementation order
 
-Sequenced for maximum compounding return.
-
-The MT2 roadmap is now fully shipped (phases 2a, 2b, 2c). What
-remains is opportunistic polish + small follow-ups around the
-edges. None are critical-path.
-
-**Open MT2 follow-ups:** none — the workflow polish is fully
-shipped. The trader can flip views with `t` and every interaction
-(`o`, `b`, OPP drilldown, StatusLine chip, DetailPanel ordering,
-alignment label) routes through the active timeframe.
-
-**Polish backlog:** empty. Both items from the prior session
-(column-toggle modal · backfill --dry-run) shipped on
-2026-05-14.
+1. **Priority #2.1 — `ScenarioModel`** (closed-form tail probabilities).
+   ~1 day. Depends on nothing; pure addition on top of `ValuationEnsemble`.
+2. **Priority #2.2 — `SignalHistoryCalibrator`** offline build.
+   ~1.5 days. Reads `history.py` output; writes calibration table to
+   SessionStore.
+3. **Priority #2.3 — UI surfacing**: probability framing + observation
+   counts on analyzer cards. ~0.5 day.
+4. **Priority #5 freshness UI** (in parallel with P2 if desired): badge
+   component consuming `fundamentals_freshness` + recent failures from
+   `/api/health/providers`. ~0.5 day.
+5. **Priority #3.1 — `ResearchRequest`/`ThesisDraft` schema** + tool_use
+   migration. ~2 days.
+6. **Priority #3.2 — `ClaimValidator`** + drop counters. ~1 day.
+7. **Priority #4 features** ordered by leverage: historical outcomes →
+   compare two stocks → sector-relative → causal "why is it moving?".
 
 ---
 
 ## Resume here next session
 
+```bash
+git pull
+.venv/Scripts/python.exe -m pytest --no-cov -q     # confirm 988 passing
+.venv/Scripts/python.exe -m mypy src               # confirm strict-clean
+.venv/Scripts/python.exe -m ruff check .           # confirm green
+cd web && npm run typecheck                        # confirm tsc green
 ```
-git pull                                  # confirm sync
-.venv/Scripts/python.exe -m pytest --no-cov -q   # confirm 666 passing
-```
 
-The build is complete. Every roadmap and polish item that was
-named has been shipped. The remaining technical-debt list is
-honest but none of it blocks the product.
-
-If you sit down again, the only worthwhile work is:
-
-1. **Live-fly the dashboard** with real Alpaca paper credentials
-   for an hour or two and let it surface real-world UX rough
-   edges. Nothing else surfaces those reliably.
-2. **Cherry-pick one tech-debt item** if it bites — most likely
-   the `requirements.txt` deletion (now redundant with
-   `pip install -e .`) or the `detect_opportunities` vs.
-   `rank_opportunities` decision.
-3. **New surface area** belongs in a separate session and a
-   separate planning doc — see the final-stabilization summary
-   for candidates (web front-end, broker integration if scope
-   pivots, alternate data sources).
+If the build is clean, pick up at Priority #2.1 (`ScenarioModel`). The
+design doc is the natural place to start — write the seven sections
+(goal, non-goals, data model, files, risks, tests, acceptance) before
+touching code, then implement incrementally. See the
+"feedback_workflow" memory for the cadence.
 
 ---
 
-## Repo state at handoff
+## Repo state at handoff (2026-05-21)
 
-- **Branch:** `main` clean, pushed to `origin/main` after the
-  final stabilization commit.
-- **Tests:** 666 passing, 1 deselected (`slow`/`integration` mark).
+- **Branch:** `main`.
+- **Tests:** 988 passing, 1 deselected (`slow`/`integration`).
   Run with `pytest`.
-- **Lint/type:** `ruff check .` green; `mypy src --strict` green
-  across all 51 source files.
-- **Dependencies installed in `.venv/`** (Python 3.14): all of
-  `pyproject.toml`'s base set, plus `anthropic`, `pyyaml`, `textual`,
-  `ruff`, `mypy`, `pytest`. `alembic` and `backtrader` removed.
+- **Lint/type:** `ruff check .` green; `mypy src --strict` green across
+  all 80 source files; `npm run typecheck` green.
+- **Dependencies installed in `.venv/`** (Python 3.14).
 - **`.env` is not present.** `.env.example` documents the schema;
-  `esther doctor --init-env` scaffolds the file. Real keys live only
-  on disk, gitignored.
+  `esther doctor --init-env` scaffolds the file. Real keys live only on
+  disk, gitignored.

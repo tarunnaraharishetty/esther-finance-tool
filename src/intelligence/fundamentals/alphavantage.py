@@ -88,13 +88,20 @@ class AlphaVantageProvider:
             _raise_for_quota(self.name, data)
             return data
 
-        overview_raw, income_raw, balance_raw, cashflow_raw = await asyncio.gather(
-            _get("OVERVIEW"),
-            _get("INCOME_STATEMENT"),
-            _get("BALANCE_SHEET"),
-            _get("CASH_FLOW"),
-            return_exceptions=True,
+        # See FmpProvider.fetch for the gather-typing pattern.
+        gathered: list[Any] = list(
+            await asyncio.gather(
+                _get("OVERVIEW"),
+                _get("INCOME_STATEMENT"),
+                _get("BALANCE_SHEET"),
+                _get("CASH_FLOW"),
+                return_exceptions=True,
+            )
         )
+        overview_raw: Any = gathered[0]
+        income_raw: Any = gathered[1]
+        balance_raw: Any = gathered[2]
+        cashflow_raw: Any = gathered[3]
 
         if isinstance(overview_raw, ProviderNotFound):
             raise overview_raw

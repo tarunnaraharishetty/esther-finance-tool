@@ -33,7 +33,6 @@ from src.intelligence.fundamentals.models import (
     ReportPeriod,
 )
 
-
 # ---- fixtures ----
 
 

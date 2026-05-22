@@ -37,7 +37,6 @@ from src.intelligence.analyzer.technical import TechnicalScores
 from src.intelligence.analyzer.valuation import ValuationEnsemble
 from src.intelligence.fundamentals import NormalizedFundamentals
 
-
 # Citation vocabulary. Frozen — changes here must travel into the LLM
 # prompt template and the frontend chip rendering at the same time.
 CITATION_TAGS: frozenset[str] = frozenset(
@@ -228,7 +227,7 @@ def build_grounded_explanation(inputs: AnalyzerInputs) -> AnalyzerExplanation:
         # Nothing was provided — emit a single grounded "no data" line.
         # We still need to cite a tag, so we cite whatever's available;
         # if literally nothing is available, the explanation is empty.
-        claims = ()
+        claims = []
     claims_tuple = tuple(claims)
     risks_tuple = tuple(risks)
     citations = validate_citations(claims_tuple, inputs) if claims_tuple else {}
@@ -307,13 +306,20 @@ def _valuation_claims(ensemble: ValuationEnsemble) -> list[str]:
         return []
     out: list[str] = []
     if ensemble.weighted_ai_fair_value is not None:
+        # When weighted_ai_fair_value is populated, the percentile-based
+        # bear/base/bull triplet is too (they're produced from the same
+        # estimates list in build_valuation). Assert it locally so mypy
+        # narrows the Optional[float] fields cleanly.
+        assert ensemble.bear_case is not None
+        assert ensemble.base_case is not None
+        assert ensemble.bull_case is not None
         out.append(
             f"Weighted multi-method fair value lands at "
             f"${ensemble.weighted_ai_fair_value:.2f}, "
             f"with a bear / base / bull span of "
-            f"${ensemble.bear_case:.2f} / "  # type: ignore[arg-type]
-            f"${ensemble.base_case:.2f} / "  # type: ignore[arg-type]
-            f"${ensemble.bull_case:.2f} [valuation]."  # type: ignore[arg-type]
+            f"${ensemble.bear_case:.2f} / "
+            f"${ensemble.base_case:.2f} / "
+            f"${ensemble.bull_case:.2f} [valuation]."
         )
     out.append(
         f"{len(ensemble.estimates)} of 7 valuation methods produced an "
@@ -453,9 +459,9 @@ def _build_summary(inputs: AnalyzerInputs) -> str:
 
 
 __all__ = [
+    "CITATION_TAGS",
     "AnalyzerExplanation",
     "AnalyzerInputs",
-    "CITATION_TAGS",
     "CitationValidationError",
     "build_grounded_explanation",
     "extract_citations",

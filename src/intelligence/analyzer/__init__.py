@@ -11,6 +11,13 @@ Later phases will add valuation, AI-explanation, and DB-persistence
 modules in this package.
 """
 
+from src.intelligence.analyzer.calibration import (
+    PAIRINGS as CALIBRATION_PAIRINGS,
+)
+from src.intelligence.analyzer.calibration import (
+    CalibrationReading,
+    lookup_readings,
+)
 from src.intelligence.analyzer.explanation import (
     CITATION_TAGS,
     AnalyzerExplanation,
@@ -19,6 +26,10 @@ from src.intelligence.analyzer.explanation import (
     build_grounded_explanation,
     extract_citations,
     validate_citations,
+)
+from src.intelligence.analyzer.scenarios import (
+    ScenarioModel,
+    build_scenarios,
 )
 from src.intelligence.analyzer.technical import (
     TechnicalScores,
@@ -32,17 +43,22 @@ from src.intelligence.analyzer.valuation import (
 )
 
 __all__ = [
+    "CALIBRATION_PAIRINGS",
+    "CITATION_TAGS",
     "AnalyzerExplanation",
     "AnalyzerInputs",
-    "CITATION_TAGS",
+    "CalibrationReading",
     "CitationValidationError",
+    "ScenarioModel",
     "TechnicalScores",
     "TechnicalSubscores",
     "ValuationEnsemble",
     "ValuationEstimate",
     "build_grounded_explanation",
+    "build_scenarios",
     "build_valuation",
     "extract_citations",
+    "lookup_readings",
     "score_technicals",
     "validate_citations",
 ]

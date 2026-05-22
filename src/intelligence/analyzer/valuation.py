@@ -422,10 +422,9 @@ def build_valuation(
     bear = float(np.percentile(values, 25))
     base = float(np.percentile(values, 50))
     bull = float(np.percentile(values, 75))
-    if weights.sum() > 0:
-        weighted = float(np.average(values, weights=weights))
-    else:
-        weighted = base
+    weighted = (
+        float(np.average(values, weights=weights)) if weights.sum() > 0 else base
+    )
 
     # Overall confidence: coverage (how many models fired / 7) × average
     # per-model confidence × an agreement factor (1 - normalized stdev).
@@ -491,7 +490,10 @@ def _fcf_cagr(fundamentals: NormalizedFundamentals) -> float | None:
         [c for c in fundamentals.cash_flows if c.free_cash_flow and c.free_cash_flow > 0],
         key=lambda c: c.fiscal_date,
     )
-    return _cagr([c.free_cash_flow for c in cashflows])  # type: ignore[arg-type]
+    # The filter above already enforced ``free_cash_flow is not None`` so
+    # cast away the Optional for the list comprehension's element type.
+    series: list[float] = [float(c.free_cash_flow) for c in cashflows if c.free_cash_flow is not None]
+    return _cagr(series)
 
 
 def _eps_cagr(fundamentals: NormalizedFundamentals) -> float | None:
@@ -528,7 +530,7 @@ def _cagr(series: list[float]) -> float | None:
     if first <= 0 or last <= 0:
         return None
     years = len(series) - 1
-    return (last / first) ** (1.0 / years) - 1.0
+    return float((last / first) ** (1.0 / years) - 1.0)
 
 
 def _multiple_confidence(

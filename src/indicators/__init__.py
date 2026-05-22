@@ -7,4 +7,4 @@ from src.indicators.macd import MACD
 from src.indicators.rsi import RSI
 from src.indicators.volume import VolumeZScore
 
-__all__ = ["ATR", "BollingerBands", "Indicator", "MACD", "RSI", "VolumeZScore"]
+__all__ = ["ATR", "MACD", "RSI", "BollingerBands", "Indicator", "VolumeZScore"]

@@ -26,7 +26,6 @@ from src.intelligence.analyzer.explanation import (
     AnalyzerInputs,
 )
 
-
 PROMPT_VERSION = "analyzer-explain-v1"
 
 

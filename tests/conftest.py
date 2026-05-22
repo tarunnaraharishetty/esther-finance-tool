@@ -26,6 +26,12 @@ def _safe_test_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     # tests that assert "no key configured" stay deterministic. Tests that
     # need a key should setenv explicitly.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    # Disable the calibration store by default — tests that need it
+    # construct a tmp_path-rooted CalibrationStore explicitly and pass
+    # it to create_app. Otherwise the analyzer endpoint would write to
+    # data/calibration.db under the project root from any test that
+    # constructs an app.
+    monkeypatch.setenv("CALIBRATION_STORE_PATH", "")
     # Bust the lru_cache on Settings between tests
     from src.config import settings as settings_mod
 

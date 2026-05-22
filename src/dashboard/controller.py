@@ -32,6 +32,8 @@ from src.data.models import NewsArticle, TimeFrame
 from src.data.news_ingestion import NewsSource, get_news_source
 from src.intelligence.alert_prioritizer import AlertPrioritizer, AlertState
 from src.intelligence.alerts import AlertEngine
+from src.intelligence.analyzer.technical import score_technicals
+from src.intelligence.calibration_worker import CalibrationRecorder
 from src.intelligence.history import SignalHistory, SignalHistorySummary
 from src.intelligence.opportunities import (
     rank_opportunities,
@@ -84,6 +86,7 @@ class BaseController(ABC):
         opp_tracker: OpportunityMembershipTracker | None = None,
         pulse_tracker: PulseHistoryTracker | None = None,
         session_store: SessionStore | None = None,
+        calibration_recorder: CalibrationRecorder | None = None,
     ) -> None:
         self.watchlist = list(watchlist)
         self.engine = engine
@@ -92,6 +95,10 @@ class BaseController(ABC):
         self.alert_prioritizer = alert_prioritizer or AlertPrioritizer()
         self.alert_state = alert_state or AlertState()
         self.signal_history = signal_history or SignalHistory()
+        # Calibration recorder is wired by the CLI / esther serve when
+        # the calibration system is enabled. ``None`` means "don't
+        # record observations" — the snapshot loop runs unchanged.
+        self.calibration_recorder = calibration_recorder
         # Parallel intraday signal history — recorded only when the
         # intraday feature is enabled, persisted alongside the daily
         # one in the same SessionStore snapshot. Phase 2a of MT2.
@@ -172,6 +179,47 @@ class BaseController(ABC):
             return False
         self.watchlist.remove(sym)
         return True
+
+    def _maybe_record_calibration(
+        self,
+        symbol: str,
+        df: pd.DataFrame,
+        last_price: float,
+        now: datetime,
+    ) -> None:
+        """Hand a fresh score read to the calibration recorder.
+
+        Best-effort: nothing in the calibration path is allowed to
+        break the snapshot tick. The trader's primary surface is the
+        live dashboard; observability accumulating in SQLite is a
+        background concern. We catch every exception, surface it on
+        the event buffer (so an operator can see "calibration write
+        failing repeatedly"), and continue.
+
+        No-op when ``self.calibration_recorder`` is None — concrete
+        controllers always call this even if calibration isn't wired,
+        so the hook stays in a single place.
+        """
+        if self.calibration_recorder is None:
+            return
+        try:
+            scores = score_technicals(df)
+        except Exception as exc:
+            self.events.warn(
+                f"calibration: score_technicals failed for {symbol}: {exc}"
+            )
+            return
+        try:
+            self.calibration_recorder.record_scores(
+                symbol=symbol,
+                technicals=scores,
+                observed_at=now,
+                starting_price=last_price,
+            )
+        except Exception as exc:
+            self.events.warn(
+                f"calibration: record_scores failed for {symbol}: {exc}"
+            )
 
     def _record_pulse(self, snap: DashboardSnapshot) -> None:
         """Compute the pulse once + record it into the rolling-window
@@ -447,6 +495,7 @@ class DashboardController(BaseController):
         alert_prioritizer: AlertPrioritizer | None = None,
         alert_state: AlertState | None = None,
         session_store: SessionStore | None = None,
+        calibration_recorder: CalibrationRecorder | None = None,
     ) -> None:
         super().__init__(
             watchlist=watchlist,
@@ -456,6 +505,7 @@ class DashboardController(BaseController):
             alert_prioritizer=alert_prioritizer,
             alert_state=alert_state,
             session_store=session_store,
+            calibration_recorder=calibration_recorder,
         )
         self.settings = settings or get_settings()
         if not self.settings.is_paper_trading:
@@ -554,9 +604,16 @@ class DashboardController(BaseController):
                 a.headline for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
             )
             intraday_read = await self._fetch_intraday_read(symbol, now)
+            last_price = float(df["close"].iloc[-1])
+            # Feed the calibration recorder before returning the row.
+            # Doing it here keeps the recorder paired with the *exact*
+            # bars + price that produced the rendered scores, so a
+            # later analyzer-endpoint hit that recomputes scores stays
+            # comparable to the recorded observation.
+            self._maybe_record_calibration(symbol, df, last_price, now)
             return _row_from_recommendation(
                 rec,
-                last_price=float(df["close"].iloc[-1]),
+                last_price=last_price,
                 headlines=top_headlines,
                 intraday=intraday_read,
             )
@@ -642,6 +699,7 @@ class MockDashboardController(BaseController):
         alert_prioritizer: AlertPrioritizer | None = None,
         alert_state: AlertState | None = None,
         session_store: SessionStore | None = None,
+        calibration_recorder: CalibrationRecorder | None = None,
     ) -> None:
         watchlist = watchlist or ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
         rng = random.Random(seed)
@@ -655,6 +713,7 @@ class MockDashboardController(BaseController):
             alert_prioritizer=alert_prioritizer,
             alert_state=alert_state,
             session_store=session_store,
+            calibration_recorder=calibration_recorder,
         )
         self._rng = rng
         self._np_rng = np.random.default_rng(seed)
@@ -773,9 +832,11 @@ class MockDashboardController(BaseController):
         top_headlines = tuple(
             a.headline for a in sorted(news, key=lambda a: a.published_at, reverse=True)[:5]
         )
+        last_price = float(df["close"].iloc[-1])
+        self._maybe_record_calibration(symbol, df, last_price, now)
         return _row_from_recommendation(
             rec,
-            last_price=float(df["close"].iloc[-1]),
+            last_price=last_price,
             headlines=top_headlines,
         )
 

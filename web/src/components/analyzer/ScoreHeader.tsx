@@ -1,5 +1,6 @@
-import { fmtScore } from "@/lib/analyzer";
+import { fmtScore, type FundamentalsFreshness } from "@/lib/analyzer";
 import { cn } from "@/lib/utils";
+import { FreshnessBadge } from "./FreshnessBadge";
 
 interface Props {
   symbol: string;
@@ -8,6 +9,7 @@ interface Props {
   technical: number | null;
   fundamental: number | null;
   valuation: number | null;
+  freshness: FundamentalsFreshness | null;
 }
 
 /**
@@ -23,6 +25,7 @@ export function ScoreHeader({
   technical,
   fundamental,
   valuation,
+  freshness,
 }: Props) {
   return (
     <section className="surface-premium p-5">
@@ -50,6 +53,11 @@ export function ScoreHeader({
           <ScoreRing label="Valuation" score={valuation} />
         </div>
       </div>
+      {freshness !== null && (
+        <div className="mt-4 border-t border-border/40 pt-3">
+          <FreshnessBadge freshness={freshness} />
+        </div>
+      )}
     </section>
   );
 }

@@ -877,6 +877,8 @@ def serve(
     import uvicorn
 
     from src.api import create_app
+    from src.intelligence.calibration import CalibrationStore
+    from src.intelligence.calibration_worker import CalibrationRecorder
 
     settings = get_settings()
     watchlist = list(symbols) if symbols else ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
@@ -888,6 +890,22 @@ def serve(
     # REST-only deployment that doesn't want the broker spinning at all.
     stream_interval: float | None = effective_refresh if effective_refresh > 0 else None
 
+    # Calibration wiring: a single store backs both the snapshot-loop
+    # recorder (writes per-tick observations) and the analyzer endpoint
+    # (reads materialized hit-rate buckets). Both must point at the same
+    # file or the wire contract publishes the wrong probabilities. When
+    # ``calibration_store_path`` is None (operator opt-out via
+    # ``CALIBRATION_STORE_PATH=``), both stay None and the snapshot loop
+    # runs without ingestion.
+    calibration_store: CalibrationStore | None = None
+    calibration_recorder: CalibrationRecorder | None = None
+    if settings.calibration_store_path is not None:
+        calibration_store = CalibrationStore(settings.calibration_store_path)
+        calibration_recorder = CalibrationRecorder(
+            store=calibration_store,
+            horizon_days=settings.calibration_horizon_days,
+        )
+
     controller = _build_controller(
         watchlist=watchlist,
         mock=mock,
@@ -897,6 +915,7 @@ def serve(
         news_hours=news_hours,
         settings=settings,
         surface="API server",
+        calibration_recorder=calibration_recorder,
     )
     # Same-origin frontend serving: when `web/dist/` exists (built via
     # `npm run build`), FastAPI serves the React bundle alongside the
@@ -908,6 +927,7 @@ def serve(
         stream_interval=stream_interval,
         cors_origins=settings.cors_origins,
         frontend_dir=frontend_dir,
+        calibration_store=calibration_store,
     )
     serving_frontend = frontend_dir.exists()
 
@@ -920,9 +940,24 @@ def serve(
         f"stream every {stream_interval:.1f}s" if stream_interval else "stream disabled"
     )
     frontend_status = "+frontend" if serving_frontend else "api-only (run `cd web && npm run dev`)"
+    # One-line operator-visible signal: is the calibration system
+    # actually accumulating observations on this deployment, and is
+    # the maturation worker draining outcomes? Bug report triage
+    # gets noticeably faster when the answer's printed at startup
+    # instead of inferred from `ls data/`.
+    if calibration_store is None:
+        calibration_status = "calibration off"
+    elif settings.calibration_maturation_enabled:
+        calibration_status = (
+            f"calibration on ({settings.calibration_store_path}) + worker"
+        )
+    else:
+        calibration_status = (
+            f"calibration on ({settings.calibration_store_path}) ingest-only"
+        )
     console.print(
         f"[green]Esther API live at[/green] http://{host}:{port} · "
-        f"[dim]{stream_status} · {frontend_status} · "
+        f"[dim]{stream_status} · {frontend_status} · {calibration_status} · "
         f"watchlist: {', '.join(watchlist) or '(empty)'}[/dim]"
     )
     if serving_frontend:
@@ -942,6 +977,225 @@ def serve(
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
+# -----------------------------------------------------------------------------
+# Calibration admin
+# -----------------------------------------------------------------------------
+
+
+@cli.group()
+def calibrate() -> None:
+    """Manage the signal-history calibration store.
+
+    Subcommands:
+
+      \b
+      build    materialize hit-rate buckets from settled observations
+      status   print observation + bucket counts for operator review
+      cleanup  drop permanently-failed observations older than --older-than
+
+    The calibration store accumulates observations from the snapshot
+    loop and settles them via the maturation worker. ``build`` is the
+    operator-triggered step that turns the raw observation history
+    into the materialized buckets the analyzer endpoint reads. Run on
+    a cron after the maturation worker has had a chance to settle
+    recent horizons.
+    """
+
+
+def _require_calibration_store(settings: Settings) -> object:
+    """Return a ``CalibrationStore`` or exit 2 if calibration is disabled.
+
+    The CLI subcommands all need a store; this helper centralizes the
+    "disabled in settings" message + exit code so every subcommand
+    fails identically when ``CALIBRATION_STORE_PATH=``.
+    """
+    from src.intelligence.calibration import CalibrationStore
+
+    if settings.calibration_store_path is None:
+        console.print(
+            "[red]Calibration store disabled in settings "
+            "(CALIBRATION_STORE_PATH=).[/red]"
+        )
+        raise click.exceptions.Exit(2)
+    return CalibrationStore(settings.calibration_store_path)
+
+
+def _pairings_by_outcome() -> dict[str, list[str]]:
+    """Group the analyzer's score↔outcome pairings by outcome.
+
+    ``build`` walks the result so a single CLI invocation materializes
+    every outcome the analyzer publishes against.
+    """
+    from src.intelligence.analyzer.calibration import PAIRINGS
+
+    out: dict[str, list[str]] = {}
+    for score_name, outcome_name in PAIRINGS:
+        out.setdefault(outcome_name, []).append(score_name)
+    return out
+
+
+@calibrate.command("build")
+@click.option(
+    "--horizon",
+    "horizon_days",
+    type=int,
+    default=None,
+    help="Outcome horizon in days. Defaults to "
+    "Settings.calibration_horizon_days (5).",
+)
+@click.option(
+    "--bucket-width",
+    type=float,
+    default=None,
+    help="Score-bucket width in [0,100]. Defaults to "
+    "Settings.calibration_bucket_width (10.0).",
+)
+def calibrate_build(horizon_days: int | None, bucket_width: float | None) -> None:
+    """Materialize hit-rate buckets from settled observations.
+
+    Rebuilds atomically: every (score, horizon, outcome) triple is
+    DELETE'd and re-INSERT'd inside one transaction, so concurrent
+    readers never see a half-built table.
+
+    Idempotent — running ``build`` twice in a row produces the same
+    result as running it once.
+    """
+    settings = get_settings()
+    store = _require_calibration_store(settings)
+    effective_horizon = (
+        horizon_days if horizon_days is not None else settings.calibration_horizon_days
+    )
+    effective_width = (
+        bucket_width if bucket_width is not None else settings.calibration_bucket_width
+    )
+
+    all_obs = store.all_observations()  # type: ignore[attr-defined]
+    settled = [o for o in all_obs if o.outcome_value is not None]
+    unsettled = [o for o in all_obs if o.outcome_value is None]
+    console.print(
+        f"Loaded {len(all_obs)} observation(s) "
+        f"({len(settled)} settled · {len(unsettled)} pending maturation)."
+    )
+
+    if not settled:
+        console.print(
+            "[yellow]No settled observations to bucket yet.[/yellow] "
+            "Let the maturation worker run for at least one horizon "
+            "window, then re-run."
+        )
+        return
+
+    console.print("Building tables...")
+    for outcome_name, score_names in sorted(_pairings_by_outcome().items()):
+        table = store.build_table(  # type: ignore[attr-defined]
+            score_names=score_names,
+            horizon_days=effective_horizon,
+            outcome_name=outcome_name,
+            bucket_width=effective_width,
+        )
+        console.print(
+            f"  [green]{outcome_name}[/green]: "
+            f"{len(table.buckets)} bucket(s) across {len(score_names)} score(s)"
+        )
+    console.print(
+        f"Done. Calibration table written to [bold]{settings.calibration_store_path}[/bold]."
+    )
+
+
+@calibrate.command("status")
+def calibrate_status() -> None:
+    """Print observation + bucket counts for operator review."""
+    settings = get_settings()
+    store = _require_calibration_store(settings)
+
+    console.print(
+        f"Calibration store: [bold]{settings.calibration_store_path}[/bold]"
+    )
+    obs = store.all_observations()  # type: ignore[attr-defined]
+    settled = [o for o in obs if o.outcome_value is not None]
+    unsettled = [o for o in obs if o.outcome_value is None]
+    console.print(
+        f"Observations: {len(obs)} total · "
+        f"{len(settled)} settled · {len(unsettled)} pending maturation"
+    )
+    if obs:
+        last_obs = max(obs, key=lambda o: o.observed_at)
+        console.print(f"Last observation: {last_obs.observed_at.isoformat()}")
+    if settled:
+        # ``Observation`` carries observed_at, not a settled_at column —
+        # the latest settled is the latest observation we've graded.
+        last_settled = max(settled, key=lambda o: o.observed_at)
+        console.print(
+            f"Last settled observation: {last_settled.observed_at.isoformat()}"
+        )
+
+    table = store.load_table()  # type: ignore[attr-defined]
+    from src.intelligence.analyzer.calibration import PAIRINGS
+
+    console.print(
+        f"\nMaterialized buckets (horizon={settings.calibration_horizon_days}d):"
+    )
+    for score_name, outcome_name in PAIRINGS:
+        matching = [
+            b
+            for b in table.buckets
+            if b.score_name == score_name
+            and b.outcome_name == outcome_name
+            and b.horizon_days == settings.calibration_horizon_days
+        ]
+        if not matching:
+            console.print(
+                f"  [dim]{score_name} → {outcome_name}: "
+                "0 buckets (table not built yet)[/dim]"
+            )
+            continue
+        total_obs = sum(b.n_observations for b in matching)
+        best = max(matching, key=lambda b: b.n_observations)
+        console.print(
+            f"  [bold]{score_name}[/bold] → {outcome_name} · "
+            f"{len(matching)} bucket(s) · {total_obs} obs · "
+            f"best n={best.n_observations} hit={best.hit_rate:.2f}"
+        )
+
+
+@calibrate.command("cleanup")
+@click.option(
+    "--older-than",
+    "older_than_days",
+    type=int,
+    default=30,
+    show_default=True,
+    help="Drop permanently-failed observations older than this many days.",
+)
+def calibrate_cleanup(older_than_days: int) -> None:
+    """Drop unsettled observations older than ``--older-than`` days.
+
+    When a symbol rotates off the watchlist mid-horizon, its
+    observations get stuck unsettleable — the maturation worker can't
+    grade them because no fresh bar will arrive. After a sufficient
+    quiet period (typically weeks past the configured horizon), it's
+    safe to drop them.
+
+    **Settled observations are never removed by cleanup.** They are
+    the calibration data; their value compounds over time. This
+    command targets only the "horizon expired without ever grading"
+    long tail.
+    """
+    from datetime import timedelta
+
+    if older_than_days < 0:
+        console.print("[red]--older-than must be non-negative.[/red]")
+        raise click.exceptions.Exit(2)
+
+    settings = get_settings()
+    store = _require_calibration_store(settings)
+    removed = store.cleanup(older_than=timedelta(days=older_than_days))  # type: ignore[attr-defined]
+    console.print(
+        f"Removed {removed} permanently-failed observation(s) "
+        f"older than {older_than_days} day(s)."
+    )
+
+
 def _build_controller(
     *,
     watchlist: list[str],
@@ -952,6 +1206,7 @@ def _build_controller(
     news_hours: int,
     settings: Settings,
     surface: str,
+    calibration_recorder: object | None = None,
 ) -> BaseController:
     """Construct the snapshot-producing controller for ``dashboard`` /
     ``serve``.
@@ -1035,6 +1290,7 @@ def _build_controller(
             use_sentiment=not no_sentiment,
             alert_engine=alert_engine,
             alert_prioritizer=alert_prioritizer,
+            calibration_recorder=calibration_recorder,  # type: ignore[arg-type]
         )
 
     if not skip_preflight:
@@ -1080,6 +1336,7 @@ def _build_controller(
         news_hours=news_hours,
         alert_engine=alert_engine,
         alert_prioritizer=alert_prioritizer,
+        calibration_recorder=calibration_recorder,  # type: ignore[arg-type]
     )
 
 

@@ -98,6 +98,60 @@ class Settings(BaseSettings):
     # intraday and most providers update within a day of earnings.
     fundamentals_cache_ttl_hours: float = 12.0
 
+    # ---- Retry queue ----
+    # Durable JSON-on-disk queue for transient fundamentals fetch
+    # failures (rate limits, 5xx). A worker drains it on its own
+    # cadence so a 30-second blip doesn't strand a symbol until the
+    # next user-initiated retry. Set ``RETRY_QUEUE_PATH=`` (empty) to
+    # disable persistence entirely — the route 404s and the service
+    # skips enqueue. ``retry_queue_worker_enabled`` is off by default
+    # so the local dev TUI and tests don't make background API calls.
+    retry_queue_path: Path | None = PROJECT_ROOT / "data" / "retry_queue.json"
+    retry_queue_max_attempts: int = 5
+    retry_queue_initial_backoff_seconds: float = 30.0
+    retry_queue_max_backoff_seconds: float = 1800.0
+    retry_queue_worker_interval_seconds: float = 60.0
+    retry_queue_worker_enabled: bool = False
+
+    # ---- Calibration ----
+    # SignalHistoryCalibrator persists score observations + the
+    # materialized hit-rate table to this SQLite file. Set
+    # ``CALIBRATION_STORE_PATH=`` (empty) to disable persistence.
+    # ``calibration_horizon_days`` is the default forward horizon for
+    # outcomes; ``calibration_min_observations`` is the floor below
+    # which the UI must not publish a calibrated probability.
+    calibration_store_path: Path | None = PROJECT_ROOT / "data" / "calibration.db"
+    calibration_horizon_days: int = 5
+    calibration_bucket_width: float = 10.0
+    calibration_min_observations: int = 30
+    # CalibrationMaturationWorker is opt-in; off by default so a local
+    # dev session doesn't accumulate background SQLite writes the
+    # developer didn't ask for. Production deployments enable.
+    calibration_maturation_enabled: bool = False
+    calibration_maturation_interval_seconds: float = 3600.0
+
+    # ---- Reconciliation ----
+    # When the primary provider in the chain isn't the preferred one
+    # (i.e., we fell through to a fallback), make a single follow-up
+    # call to a different configured provider and compare high-trust
+    # valuation fields (revenue, net_income, eps_diluted, total_debt).
+    # Disagreements above ``reconciliation_divergence_threshold`` are
+    # surfaced as FieldDivergence rows so the UI can render "providers
+    # disagree" and the analyzer can down-weight.
+    # Disable in environments where the extra call is too expensive
+    # (free-tier API quotas).
+    reconciliation_enabled: bool = True
+    reconciliation_divergence_threshold: float = 0.05
+
+    # ---- Health observability ----
+    # SQLite store of per-provider ProviderHealth rows. Sink writes from
+    # FundamentalsService (and later the bars / news paths) land here so
+    # the platform can compute rolling SLOs ("FMP success rate last 24h")
+    # without re-running every call. Set to ``None`` (env: ``HEALTH_STORE_PATH=``)
+    # to disable persistence — useful when running stateless or in tests
+    # that don't exercise the /api/health/providers endpoint.
+    health_store_path: Path | None = PROJECT_ROOT / "data" / "health.db"
+
     # ---- Analyzer / valuation ----
     # Sector-median multiples (P/E, EV/EBITDA, P/S, PEG) used by the
     # multiple-based valuation models. Shipped seed lives at
@@ -219,6 +273,36 @@ class Settings(BaseSettings):
             if stripped.startswith("["):
                 return v  # let pydantic parse the JSON list
             return [piece.strip() for piece in stripped.split(",") if piece.strip()]
+        return v
+
+    @field_validator("health_store_path", mode="before")
+    @classmethod
+    def _empty_health_path_is_none(cls, v: object) -> object:
+        """Treat ``HEALTH_STORE_PATH=`` (empty string) as disabled.
+
+        Lets deploy hosts opt out of provider-health persistence by
+        unsetting the variable (Railway/Render treat unset and empty
+        identically). Otherwise pydantic-settings parses empty as
+        ``Path("")`` which would silently land DB files in the CWD.
+        """
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @field_validator("retry_queue_path", mode="before")
+    @classmethod
+    def _empty_retry_queue_path_is_none(cls, v: object) -> object:
+        """Same opt-out convention as the health store path."""
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @field_validator("calibration_store_path", mode="before")
+    @classmethod
+    def _empty_calibration_path_is_none(cls, v: object) -> object:
+        """Same opt-out convention as the health store path."""
+        if isinstance(v, str) and not v.strip():
+            return None
         return v
 
     @field_validator("fundamentals_provider_order", mode="before")

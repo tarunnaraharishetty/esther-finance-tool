@@ -49,6 +49,31 @@ export interface MetricEntry {
   tone: "bull" | "bear" | "warn" | null;
 }
 
+/**
+ * One claim the post-hoc validator dropped from the rendered thesis.
+ *
+ * ``section`` identifies the field path on the thesis ("technical_analysis.body",
+ * "bull_thesis[0].detail", "metrics[2].value"); ``sentence`` is the
+ * dropped text verbatim; ``unsupported_tokens`` lists the numeric
+ * tokens that didn't anchor in the input bundle.
+ */
+export interface DroppedClaim {
+  section: string;
+  sentence: string;
+  unsupported_tokens: string[];
+}
+
+/**
+ * Validator output attached to every research response. ``drop_count``
+ * is the load-bearing field — the badge keys off it. A non-zero
+ * count is a *positive* trust signal: "AI declined to make N
+ * unsupported claims". The UI must never hide or soften it.
+ */
+export interface ValidationReport {
+  drop_count: number;
+  dropped_claims: DroppedClaim[];
+}
+
 export interface ResearchThesis {
   symbol: string;
   generated_at: string; // ISO-8601
@@ -74,6 +99,8 @@ export interface ResearchThesis {
   cache_age_seconds: number;
   mode: "llm" | "template";
   warning?: string;
+  // Always present (empty array when nothing dropped).
+  validation: ValidationReport;
 }
 
 interface UseResearchThesis {

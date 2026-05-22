@@ -31,7 +31,7 @@ async def get_json(
     params: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
     client: httpx.AsyncClient | None = None,
-    timeout: httpx.Timeout = _DEFAULT_TIMEOUT,
+    timeout: httpx.Timeout = _DEFAULT_TIMEOUT,  # noqa: ASYNC109 — forwarded to httpx, not a sleep deadline
 ) -> Any:
     """Issue a GET, return parsed JSON, raise typed ProviderErrors.
 
@@ -85,9 +85,7 @@ def _is_effectively_empty(payload: Any) -> bool:
     """
     if payload is None:
         return True
-    if isinstance(payload, (list, dict)) and len(payload) == 0:
-        return True
-    return False
+    return isinstance(payload, (list, dict)) and len(payload) == 0
 
 
 __all__ = ["get_json"]

@@ -92,22 +92,28 @@ class FmpProvider:
         ratios_task = _get(f"/key-metrics-ttm/{sym}", limit=1)
         targets_task = self._fetch_targets(sym, api_key)
 
-        (
-            profile_raw,
-            income_raw,
-            balance_raw,
-            cashflow_raw,
-            ratios_raw,
-            targets_raw,
-        ) = await asyncio.gather(
-            profile_task,
-            income_task,
-            balance_task,
-            cashflow_task,
-            ratios_task,
-            targets_task,
-            return_exceptions=True,
+        # ``asyncio.gather(..., return_exceptions=True)`` returns a list
+        # of ``Any | BaseException``. Annotate the gathered slot so the
+        # downstream isinstance branches narrow cleanly rather than
+        # tripping mypy's "Cannot determine type" check on the tuple
+        # unpack.
+        gathered: list[Any] = list(
+            await asyncio.gather(
+                profile_task,
+                income_task,
+                balance_task,
+                cashflow_task,
+                ratios_task,
+                targets_task,
+                return_exceptions=True,
+            )
         )
+        profile_raw: Any = gathered[0]
+        income_raw: Any = gathered[1]
+        balance_raw: Any = gathered[2]
+        cashflow_raw: Any = gathered[3]
+        ratios_raw: Any = gathered[4]
+        targets_raw: Any = gathered[5]
 
         # The profile endpoint is the only one we treat as mandatory —
         # if FMP doesn't know the company at all, fall through to the

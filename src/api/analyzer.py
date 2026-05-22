@@ -30,19 +30,26 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.encoders import jsonable_encoder
 
 from src.config import get_settings
+from src.data.health_store import HealthStore
+from src.data.retry_queue import RetryQueue
 from src.intelligence.analyzer import (
     AnalyzerExplanation,
     AnalyzerInputs,
+    CalibrationReading,
+    ScenarioModel,
     build_grounded_explanation,
+    build_scenarios,
     build_valuation,
+    lookup_readings,
     score_technicals,
 )
 from src.intelligence.analyzer.technical import TechnicalScores
 from src.intelligence.analyzer.valuation import ValuationEnsemble
+from src.intelligence.calibration import CalibrationStore
 from src.intelligence.fundamentals import (
     FundamentalsService,
     NormalizedFundamentals,
@@ -62,6 +69,9 @@ def register_analyzer_routes(
     *,
     cache_dir: Path,
     fundamentals_service: FundamentalsService | None = None,
+    health_store: HealthStore | None = None,
+    retry_queue: RetryQueue | None = None,
+    calibration_store: CalibrationStore | None = None,
 ) -> None:
     """Attach analyzer routes to ``app``.
 
@@ -82,9 +92,15 @@ def register_analyzer_routes(
     service_holder: list[FundamentalsService | None] = [fundamentals_service]
 
     def _service() -> FundamentalsService:
-        if service_holder[0] is None:
-            service_holder[0] = FundamentalsService.from_settings(settings)
-        return service_holder[0]
+        cached = service_holder[0]
+        if cached is None:
+            cached = FundamentalsService.from_settings(
+                settings,
+                health_store=health_store,
+                retry_queue=retry_queue,
+            )
+            service_holder[0] = cached
+        return cached
 
     @app.get("/api/analyzer/{symbol}")
     async def analyzer(symbol: str, fresh: bool = False) -> dict[str, Any]:
@@ -101,10 +117,12 @@ def register_analyzer_routes(
         if not fresh and cache_file.exists():
             age = time.time() - cache_file.stat().st_mtime
             if age < ttl_seconds:
-                payload = json.loads(cache_file.read_text(encoding="utf-8"))
-                payload["cache"] = "hit"
-                payload["cache_age_seconds"] = int(age)
-                return payload
+                cached_payload: dict[str, Any] = json.loads(
+                    cache_file.read_text(encoding="utf-8")
+                )
+                cached_payload["cache"] = "hit"
+                cached_payload["cache_age_seconds"] = int(age)
+                return cached_payload
 
         log.info("analyzer.assemble.start", symbol=sym, fresh=fresh)
 
@@ -122,14 +140,33 @@ def register_analyzer_routes(
         else:
             technicals = score_technicals(bars_df)
 
-        fundamentals, fundamentals_warnings = await _pull_fundamentals(
-            _service(), sym
+        fundamentals, fundamentals_freshness, fundamentals_warnings = (
+            await _pull_fundamentals(_service(), sym)
         )
         warnings.extend(fundamentals_warnings)
 
         valuation: ValuationEnsemble | None = None
         if fundamentals is not None:
             valuation = build_valuation(fundamentals)
+
+        # Probabilistic scenario layer. Requires bars and a positive
+        # last price; degrades to None when either is missing so the
+        # analyzer card can render "scenarios unavailable" cleanly.
+        scenarios: ScenarioModel | None = None
+        if bars_df is not None and not bars_df.empty and last_price is not None:
+            scenarios = build_scenarios(
+                current_price=last_price,
+                ohlcv=bars_df,
+                valuation=valuation,
+            )
+
+        # Calibration readings: one entry per (score, outcome)
+        # pairing the analyzer publishes. The lookup gates on
+        # min_observations so day-1 users see "calibration pending"
+        # instead of fabricated probabilities.
+        calibrations = _lookup_calibration_readings(
+            technicals, calibration_store, settings
+        )
 
         volume_z, volume_spike = _volume_signals(technicals)
 
@@ -154,6 +191,9 @@ def register_analyzer_routes(
             technicals=technicals,
             valuation=valuation,
             fundamentals=fundamentals,
+            fundamentals_freshness=fundamentals_freshness,
+            scenarios=scenarios,
+            calibrations=calibrations,
             explanation=explanation,
             warnings=warnings,
         )
@@ -220,15 +260,35 @@ async def _pull_row_context(
 
 async def _pull_fundamentals(
     service: FundamentalsService, symbol: str
-) -> tuple[NormalizedFundamentals | None, list[str]]:
-    """Try the provider chain; degrade to None + a warning on failure."""
+) -> tuple[NormalizedFundamentals | None, dict[str, Any] | None, list[str]]:
+    """Try the provider chain; degrade to ``(None, None, [warnings])`` on failure.
+
+    Returns ``(fundamentals, freshness_block, warnings)``. The freshness
+    block is the envelope's wire shape — a dict the analyzer report
+    embeds so the UI can show staleness badges next to the
+    fundamentals card.
+    """
     try:
         result = await service.fetch(symbol)
     except ProviderChainExhausted as exc:
-        return None, [
+        return None, None, [
             f"Fundamentals chain exhausted: {', '.join(exc.errors) or 'no providers'}."
         ]
-    return result.fundamentals, []
+    envelope = result.envelope
+    freshness_block: dict[str, Any] = {
+        "as_of": envelope.as_of.isoformat(),
+        "fetched_at": envelope.fetched_at.isoformat(),
+        "freshness": envelope.freshness,
+        "data_age_days": round(envelope.data_age.total_seconds() / 86400.0, 2),
+        "source_chain": list(envelope.source_chain),
+        "provider_confidence": round(envelope.provider_confidence, 3),
+        # Surface the cross-provider divergence count directly so the
+        # analyzer card can render a "providers disagree" chip without
+        # cross-referencing the fundamentals endpoint.
+        "divergence_count": len(result.divergences),
+        "reconciliation_warning_count": len(result.reconciliation_warnings),
+    }
+    return result.fundamentals, freshness_block, []
 
 
 def _volume_signals(
@@ -240,6 +300,62 @@ def _volume_signals(
     return technicals.raw_volume_z, technicals.subscores.volume_spike_score
 
 
+def _lookup_calibration_readings(
+    technicals: TechnicalScores | None,
+    store: CalibrationStore | None,
+    settings: Any,
+) -> tuple[CalibrationReading, ...]:
+    """Load the calibration table and produce readings for this symbol.
+
+    Reads the materialized bucket cache on every analyzer call. The
+    table is small (one row per bucket × score × horizon × outcome)
+    so the per-request cost is negligible. Returns an empty tuple
+    when the store is not wired or the table is empty / unbuilt —
+    the wire shape carries an empty array, never absent.
+    """
+    if store is None or technicals is None:
+        return ()
+    try:
+        table = store.load_table()
+    except Exception as exc:  # defensive — never break the analyzer
+        log.warning("calibration.load.failed", error=str(exc))
+        return ()
+    return lookup_readings(
+        technicals,
+        table,
+        horizon_days=settings.calibration_horizon_days,
+        min_observations=settings.calibration_min_observations,
+    )
+
+
+def _calibration_reading_to_wire(reading: CalibrationReading) -> dict[str, Any]:
+    """Serialize one :class:`CalibrationReading` to its JSON shape.
+
+    Bucket fields are ``None`` when ``bucket_published`` is False so
+    the UI never has to disambiguate "we have data but didn't publish"
+    from "we have data but kept it private" — only the published
+    case carries the numeric block.
+    """
+    bucket = reading.bucket
+    return {
+        "score_name": reading.score_name,
+        "score_value": reading.score_value,
+        "outcome_name": reading.outcome_name,
+        "horizon_days": reading.horizon_days,
+        "bucket_published": reading.bucket_published,
+        "bucket_lo": bucket.bucket_lo if bucket is not None else None,
+        "bucket_hi": bucket.bucket_hi if bucket is not None else None,
+        "n_observations": bucket.n_observations if bucket is not None else None,
+        "n_hits": bucket.n_hits if bucket is not None else None,
+        "hit_rate": bucket.hit_rate if bucket is not None else None,
+        "confidence_low": bucket.confidence_low if bucket is not None else None,
+        "confidence_high": bucket.confidence_high if bucket is not None else None,
+        "last_updated": (
+            bucket.last_updated.isoformat() if bucket is not None else None
+        ),
+    }
+
+
 def _serialize_report(
     *,
     symbol: str,
@@ -247,6 +363,9 @@ def _serialize_report(
     technicals: TechnicalScores | None,
     valuation: ValuationEnsemble | None,
     fundamentals: NormalizedFundamentals | None,
+    fundamentals_freshness: dict[str, Any] | None,
+    scenarios: ScenarioModel | None,
+    calibrations: tuple[CalibrationReading, ...],
     explanation: AnalyzerExplanation,
     warnings: list[str],
 ) -> dict[str, Any]:
@@ -283,6 +402,13 @@ def _serialize_report(
             if fundamentals is not None
             else None
         ),
+        "fundamentals_freshness": fundamentals_freshness,
+        "scenarios": (
+            jsonable_encoder(scenarios.to_dict()) if scenarios is not None else None
+        ),
+        "calibrations": [
+            _calibration_reading_to_wire(r) for r in calibrations
+        ],
         "explanation": jsonable_encoder(explanation.to_dict()),
         "warnings": warnings,
     }

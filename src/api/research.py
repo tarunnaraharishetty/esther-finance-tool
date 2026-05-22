@@ -37,14 +37,23 @@ from fastapi.encoders import jsonable_encoder
 
 from src.intelligence.research_thesis import (
     ResearchInput,
-    ResearchThesis,
     TemplateThesisGenerator,
+)
+from src.intelligence.research_validator import (
+    validate_thesis,
+    validation_to_wire,
 )
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from src.dashboard.controller import BaseController
     from src.dashboard.state import RecommendationRow
+    from src.intelligence.llm_research import LLMThesisGenerator
+
+    # Both backends expose the same shape: ``generate(ResearchInput) ->
+    # ResearchThesis`` and ``model_id: str``. A Union is simpler than a
+    # Protocol here — only this module needs to type them interchangeably.
+    _ThesisGenerator = LLMThesisGenerator | TemplateThesisGenerator
 
 
 log = get_logger(__name__)
@@ -58,12 +67,12 @@ _CACHE_TTL_SECONDS = 4 * 3600
 
 # Lazy singleton for the LLM generator. Built on first use so importing
 # this module doesn't try to hit the Anthropic SDK / read settings.
-_llm_generator_cache: object | None = None
+_llm_generator_cache: _ThesisGenerator | None = None
 _llm_init_attempted: bool = False
 _llm_init_error: str | None = None
 
 
-def _get_llm_generator() -> object | None:
+def _get_llm_generator() -> _ThesisGenerator | None:
     """Return the configured ``LLMThesisGenerator`` or ``None``.
 
     Caches both the success and the failure path — if the key is not
@@ -80,7 +89,7 @@ def _get_llm_generator() -> object | None:
         _llm_generator_cache = LLMThesisGenerator()
         log.info(
             "research.llm.enabled",
-            model=_llm_generator_cache.model,  # type: ignore[attr-defined]
+            model=_llm_generator_cache.model_id,
         )
     except RuntimeError as e:
         # Most common: ANTHROPIC_API_KEY not configured. Record the
@@ -157,13 +166,15 @@ def register_research_routes(
                     age_seconds=int(time.time() - mtime),
                     mode=mode_used,
                 )
-                payload = json.loads(cache_file.read_text(encoding="utf-8"))
-                payload["cache"] = "hit"
-                payload["cache_age_seconds"] = int(time.time() - mtime)
-                payload["mode"] = mode_used
+                cached_body: dict[str, Any] = json.loads(
+                    cache_file.read_text(encoding="utf-8")
+                )
+                cached_body["cache"] = "hit"
+                cached_body["cache_age_seconds"] = int(time.time() - mtime)
+                cached_body["mode"] = mode_used
                 if warning:
-                    payload["warning"] = warning
-                return payload
+                    cached_body["warning"] = warning
+                return cached_body
 
         log.info(
             "research.generate.start", symbol=sym, fresh=fresh, mode=mode_used
@@ -202,10 +213,16 @@ def register_research_routes(
             cache_file = cache_dir / sym / f"{cache_key}.json"
             thesis = generator.generate(payload)
 
-        encoded: dict[str, Any] = jsonable_encoder(asdict(thesis))
+        # Validator runs on every thesis (both LLM and template). The
+        # template's numeric output always traces to the input row, so
+        # in normal operation drops are zero; a non-zero drop count on
+        # the template path is a regression signal worth surfacing.
+        validated, report = validate_thesis(thesis, payload)
+        encoded: dict[str, Any] = jsonable_encoder(asdict(validated))
         encoded["cache"] = "miss"
         encoded["cache_age_seconds"] = 0
         encoded["mode"] = mode_used
+        encoded["validation"] = jsonable_encoder(validation_to_wire(report))
         if warning:
             encoded["warning"] = warning
 
@@ -253,7 +270,7 @@ def register_research_routes(
         if gen is not None:
             return {
                 "mode": "llm",
-                "model": gen.model_id,  # type: ignore[attr-defined]
+                "model": gen.model_id,
             }
         return {
             "mode": "template",
@@ -264,7 +281,7 @@ def register_research_routes(
 
 def _select_generator(
     mode: str,
-) -> tuple[object, str, str | None]:
+) -> tuple[_ThesisGenerator, str, str | None]:
     """Pick the generator instance to use this request.
 
     Returns ``(generator, resolved_mode, warning_or_None)``. The
@@ -306,9 +323,7 @@ def _cache_key_for(row: RecommendationRow, mode: str) -> str:
     if mode == "llm":
         llm = _get_llm_generator()
         model_version = (
-            llm.model_id  # type: ignore[attr-defined]
-            if llm is not None
-            else TemplateThesisGenerator.model_id
+            llm.model_id if llm is not None else TemplateThesisGenerator.model_id
         )
     else:
         model_version = TemplateThesisGenerator.model_id
