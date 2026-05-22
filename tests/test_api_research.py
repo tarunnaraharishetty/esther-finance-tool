@@ -54,6 +54,14 @@ def test_research_response_carries_validation_field(
 
     body = res.json()
     assert "validation" in body, "validation field missing from research response"
+    # Trust score rides on the same response. Frontend keys off
+    # ``thesis.trust_score.grade`` for the badge; an absent field
+    # would surface as a white-screen render crash in strict mode.
+    assert "trust_score" in body, "trust_score field missing from research response"
+    trust = body["trust_score"]
+    assert set(trust.keys()) == {"score", "grade", "components"}
+    assert trust["grade"] in {"A+", "A", "B", "C", "D", "F"}
+    assert 0.0 <= trust["score"] <= 100.0
     validation = body["validation"]
     # Shape: drop_count + dropped_claims array.
     assert set(validation.keys()) == {"drop_count", "dropped_claims"}

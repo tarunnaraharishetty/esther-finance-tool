@@ -2,6 +2,7 @@ import { AlertTriangle, Brain, Clock, Cpu, RefreshCw, Sparkles } from "lucide-re
 import { Button } from "@/components/ui/button";
 import { RatingDial } from "./RatingDial";
 import { ValidationBadge } from "./ValidationBadge";
+import { TrustScoreBadge } from "@/components/trust/TrustScoreBadge";
 import {
   ratingLabel,
   ratingTone,
@@ -78,6 +79,7 @@ export function ResearchHeader({ thesis, onRefresh, refreshing }: Props) {
               cache · {thesis.cache}
             </span>
             <ValidationBadge validation={thesis.validation} />
+            <TrustScoreBadge trust={thesis.trust_score} variant="inline" />
             <Button
               variant="outline"
               size="sm"

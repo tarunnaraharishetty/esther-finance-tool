@@ -9,6 +9,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { TrustScore } from "@/lib/trust";
+
 export type Rating =
   | "strong_buy"
   | "buy"
@@ -101,6 +103,8 @@ export interface ResearchThesis {
   warning?: string;
   // Always present (empty array when nothing dropped).
   validation: ValidationReport;
+  // Composite report trust grade. Mirrors `src/intelligence/trust_score.py`.
+  trust_score: TrustScore;
 }
 
 interface UseResearchThesis {

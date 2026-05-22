@@ -10,16 +10,19 @@ their system prompts. That text lives here so:
   rules appear in the assembled prompt verbatim — they just source
   from one canonical string.
 
-Two flavors are exposed:
+Three flavors are exposed:
 
 * :data:`GROUNDING_RULES_PER_SYMBOL` — used by ``llm_summary.py``;
   scoped to a single symbol's analysis.
 * :data:`GROUNDING_RULES_WATCHLIST` — used by ``recap.py``; adds the
   recap-specific "do not reference symbols outside the watchlist" clause.
+* :data:`GROUNDING_RULES_COMPARISON` — used by
+  ``comparison_narrative.py``; adds the two-symbol-scope clause.
 
-Both clauses share a common prefix; the watchlist version appends the
-extra clause. If you change either, run the regression guard tests in
-``tests/test_llm_summary.py`` and ``tests/test_recap.py``.
+All three share the common core prefix; comparison + watchlist append
+scope-specific clauses. If you change any of them, run the regression
+guard tests in ``tests/test_llm_summary.py``, ``tests/test_recap.py``,
+and ``tests/intelligence/test_comparison_narrative.py``.
 """
 
 from __future__ import annotations
@@ -57,4 +60,27 @@ GROUNDING_RULES_WATCHLIST = (
 )
 
 
-__all__ = ["GROUNDING_RULES_PER_SYMBOL", "GROUNDING_RULES_WATCHLIST"]
+# Comparison-narrative grounding text (used by LLMComparisonNarrator).
+# Adds the two-symbol-scope clause: the narrative must only reference
+# the two symbols passed in. The pre-computed metric verdicts in the
+# ComparisonView are the source of truth — the LLM is paraphrasing
+# structured data into prose, not generating new claims.
+GROUNDING_RULES_COMPARISON = (
+    "GROUNDING RULES — non-negotiable:\n\n"
+    + _CORE_RULES
+    + "\n- This is a comparison between exactly two symbols. Reference ONLY those two "
+    "symbols by name. Do not bring up indices, peers, sectors, or any other instrument."
+    "\n- The pre-computed metric verdicts in the comparison view are the ground truth. "
+    "Do not contradict them — if the view says the left side has a higher trust score, "
+    "your narrative must reflect that."
+    "\n- Express the trade-off honestly. If one side wins on momentum and the other on "
+    "valuation, say so. Do not artificially declare a single winner when the metrics "
+    "are split."
+)
+
+
+__all__ = [
+    "GROUNDING_RULES_COMPARISON",
+    "GROUNDING_RULES_PER_SYMBOL",
+    "GROUNDING_RULES_WATCHLIST",
+]

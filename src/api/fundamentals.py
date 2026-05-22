@@ -44,6 +44,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.encoders import jsonable_encoder
 
 from src.config import get_settings
+from src.data.accuracy_store import AccuracyStore
 from src.data.health_store import HealthStore
 from src.data.retry_queue import RetryQueue
 from src.intelligence.fundamentals import (
@@ -64,6 +65,7 @@ def register_fundamentals_routes(
     service: FundamentalsService | None = None,
     health_store: HealthStore | None = None,
     retry_queue: RetryQueue | None = None,
+    accuracy_store: AccuracyStore | None = None,
 ) -> None:
     """Attach fundamentals routes to ``app``.
 
@@ -102,6 +104,7 @@ def register_fundamentals_routes(
                 settings,
                 health_store=health_store,
                 retry_queue=retry_queue,
+                accuracy_store=accuracy_store,
             )
             service_holder[0] = cached
         return cached

@@ -34,6 +34,7 @@ from fastapi import FastAPI
 from fastapi.encoders import jsonable_encoder
 
 from src.config import get_settings
+from src.data.accuracy_store import AccuracyStore
 from src.data.health_store import HealthStore
 from src.data.retry_queue import RetryQueue
 from src.intelligence.analyzer import (
@@ -55,6 +56,10 @@ from src.intelligence.fundamentals import (
     NormalizedFundamentals,
     ProviderChainExhausted,
 )
+from src.intelligence.trust_score import (
+    TrustScore,
+    compute_analyzer_trust_score,
+)
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -72,6 +77,7 @@ def register_analyzer_routes(
     health_store: HealthStore | None = None,
     retry_queue: RetryQueue | None = None,
     calibration_store: CalibrationStore | None = None,
+    accuracy_store: AccuracyStore | None = None,
 ) -> None:
     """Attach analyzer routes to ``app``.
 
@@ -98,9 +104,29 @@ def register_analyzer_routes(
                 settings,
                 health_store=health_store,
                 retry_queue=retry_queue,
+                accuracy_store=accuracy_store,
             )
             service_holder[0] = cached
         return cached
+
+    async def _assemble(symbol: str, fresh: bool) -> dict[str, Any]:
+        """Cache-aware assembly for one symbol. Shared by the analyzer
+        route and the comparison route."""
+        return await assemble_analyzer_report(
+            symbol,
+            controller=controller,
+            service=_service(),
+            cache_dir=cache_dir,
+            settings=settings,
+            calibration_store=calibration_store,
+            fresh=fresh,
+        )
+
+    # Stash the assembler on the FastAPI app state so the comparison
+    # route can reach it without re-wiring fundamentals + calibration
+    # by hand. ``app.state`` is the canonical FastAPI extension point;
+    # routes that need the assembler look it up by attribute.
+    app.state.analyzer_assembler = _assemble
 
     @app.get("/api/analyzer/{symbol}")
     async def analyzer(symbol: str, fresh: bool = False) -> dict[str, Any]:
@@ -110,105 +136,7 @@ def register_analyzer_routes(
         ``fundamentals_cache_ttl_hours`` since fundamentals are the
         slowest-moving input. Pass ``?fresh=true`` to force a rebuild.
         """
-        sym = symbol.upper()
-        cache_file = cache_dir / f"{sym}.json"
-        ttl_seconds = settings.fundamentals_cache_ttl_hours * 3600.0
-
-        if not fresh and cache_file.exists():
-            age = time.time() - cache_file.stat().st_mtime
-            if age < ttl_seconds:
-                cached_payload: dict[str, Any] = json.loads(
-                    cache_file.read_text(encoding="utf-8")
-                )
-                cached_payload["cache"] = "hit"
-                cached_payload["cache_age_seconds"] = int(age)
-                return cached_payload
-
-        log.info("analyzer.assemble.start", symbol=sym, fresh=fresh)
-
-        # ---- gather inputs ----
-        warnings: list[str] = []
-
-        last_price, sentiment_score, headline_count, headlines = await _pull_row_context(
-            controller, sym, warnings
-        )
-
-        bars_df = await controller.fetch_bars(sym)
-        if bars_df is None or bars_df.empty:
-            warnings.append("Technical scoring unavailable — no bars returned.")
-            technicals: TechnicalScores | None = None
-        else:
-            technicals = score_technicals(bars_df)
-
-        fundamentals, fundamentals_freshness, fundamentals_warnings = (
-            await _pull_fundamentals(_service(), sym)
-        )
-        warnings.extend(fundamentals_warnings)
-
-        valuation: ValuationEnsemble | None = None
-        if fundamentals is not None:
-            valuation = build_valuation(fundamentals)
-
-        # Probabilistic scenario layer. Requires bars and a positive
-        # last price; degrades to None when either is missing so the
-        # analyzer card can render "scenarios unavailable" cleanly.
-        scenarios: ScenarioModel | None = None
-        if bars_df is not None and not bars_df.empty and last_price is not None:
-            scenarios = build_scenarios(
-                current_price=last_price,
-                ohlcv=bars_df,
-                valuation=valuation,
-            )
-
-        # Calibration readings: one entry per (score, outcome)
-        # pairing the analyzer publishes. The lookup gates on
-        # min_observations so day-1 users see "calibration pending"
-        # instead of fabricated probabilities.
-        calibrations = _lookup_calibration_readings(
-            technicals, calibration_store, settings
-        )
-
-        volume_z, volume_spike = _volume_signals(technicals)
-
-        inputs = AnalyzerInputs(
-            symbol=sym,
-            last_price=last_price,
-            technicals=technicals,
-            fundamentals=fundamentals,
-            valuation=valuation,
-            sentiment_score=sentiment_score,
-            headline_count=headline_count,
-            top_headlines=headlines,
-            volume_z=volume_z,
-            volume_spike_score=volume_spike,
-        )
-
-        explanation: AnalyzerExplanation = build_grounded_explanation(inputs)
-
-        payload = _serialize_report(
-            symbol=sym,
-            last_price=last_price,
-            technicals=technicals,
-            valuation=valuation,
-            fundamentals=fundamentals,
-            fundamentals_freshness=fundamentals_freshness,
-            scenarios=scenarios,
-            calibrations=calibrations,
-            explanation=explanation,
-            warnings=warnings,
-        )
-
-        cache_file.write_text(json.dumps(payload), encoding="utf-8")
-        payload["cache"] = "miss"
-        payload["cache_age_seconds"] = 0
-        log.info(
-            "analyzer.assemble.ok",
-            symbol=sym,
-            warnings=len(warnings),
-            has_technicals=technicals is not None,
-            has_valuation=valuation is not None,
-        )
-        return payload
+        return await _assemble(symbol.upper(), fresh)
 
     @app.delete("/api/analyzer/{symbol}/cache")
     async def clear_analyzer_cache(symbol: str) -> dict[str, Any]:
@@ -221,6 +149,140 @@ def register_analyzer_routes(
 
 
 # ---- helpers -------------------------------------------------------------
+
+
+async def assemble_analyzer_report(
+    symbol: str,
+    *,
+    controller: BaseController,
+    service: FundamentalsService,
+    cache_dir: Path,
+    settings: Any,
+    calibration_store: CalibrationStore | None,
+    fresh: bool = False,
+) -> dict[str, Any]:
+    """Assemble the analyzer report dict for ``symbol``, cache-first.
+
+    Standalone so the comparison endpoint can call it for two symbols
+    in parallel without re-implementing the cache + pipeline logic.
+    Returns the wire dict — same shape ``/api/analyzer/{symbol}`` emits.
+
+    On any cache miss this walks the full pipeline (controller bars,
+    fundamentals chain, valuation ensemble, scenarios, calibrations,
+    explanation, trust score) and persists the result. Pass
+    ``fresh=True`` to bypass the cache; useful when the user clicks
+    "regenerate".
+    """
+    sym = symbol.upper()
+    cache_file = cache_dir / f"{sym}.json"
+    ttl_seconds = settings.fundamentals_cache_ttl_hours * 3600.0
+
+    if not fresh and cache_file.exists():
+        age = time.time() - cache_file.stat().st_mtime
+        if age < ttl_seconds:
+            cached_payload: dict[str, Any] = json.loads(
+                cache_file.read_text(encoding="utf-8")
+            )
+            cached_payload["cache"] = "hit"
+            cached_payload["cache_age_seconds"] = int(age)
+            return cached_payload
+
+    log.info("analyzer.assemble.start", symbol=sym, fresh=fresh)
+
+    warnings: list[str] = []
+
+    last_price, sentiment_score, headline_count, headlines = await _pull_row_context(
+        controller, sym, warnings
+    )
+
+    bars_df = await controller.fetch_bars(sym)
+    if bars_df is None or bars_df.empty:
+        warnings.append("Technical scoring unavailable — no bars returned.")
+        technicals: TechnicalScores | None = None
+    else:
+        technicals = score_technicals(bars_df)
+
+    fundamentals, fundamentals_freshness, fundamentals_warnings = (
+        await _pull_fundamentals(service, sym)
+    )
+    warnings.extend(fundamentals_warnings)
+
+    valuation: ValuationEnsemble | None = None
+    if fundamentals is not None:
+        valuation = build_valuation(fundamentals)
+
+    scenarios: ScenarioModel | None = None
+    if bars_df is not None and not bars_df.empty and last_price is not None:
+        scenarios = build_scenarios(
+            current_price=last_price,
+            ohlcv=bars_df,
+            valuation=valuation,
+        )
+
+    calibrations = _lookup_calibration_readings(
+        technicals, calibration_store, settings
+    )
+
+    volume_z, volume_spike = _volume_signals(technicals)
+
+    inputs = AnalyzerInputs(
+        symbol=sym,
+        last_price=last_price,
+        technicals=technicals,
+        fundamentals=fundamentals,
+        valuation=valuation,
+        sentiment_score=sentiment_score,
+        headline_count=headline_count,
+        top_headlines=headlines,
+        volume_z=volume_z,
+        volume_spike_score=volume_spike,
+    )
+
+    explanation: AnalyzerExplanation = build_grounded_explanation(inputs)
+
+    trust_score = compute_analyzer_trust_score(
+        freshness=(
+            fundamentals_freshness.get("freshness")
+            if fundamentals_freshness is not None
+            else None
+        ),
+        provider_confidence=(
+            fundamentals_freshness.get("provider_confidence")
+            if fundamentals_freshness is not None
+            else None
+        ),
+        analyzer_confidence=(
+            technicals.confidence_score if technicals is not None else None
+        ),
+        calibration_coverage=_calibration_coverage(calibrations),
+        scenarios_available=(scenarios is not None),
+    )
+
+    payload = _serialize_report(
+        symbol=sym,
+        last_price=last_price,
+        technicals=technicals,
+        valuation=valuation,
+        fundamentals=fundamentals,
+        fundamentals_freshness=fundamentals_freshness,
+        scenarios=scenarios,
+        calibrations=calibrations,
+        explanation=explanation,
+        trust_score=trust_score,
+        warnings=warnings,
+    )
+
+    cache_file.write_text(json.dumps(payload), encoding="utf-8")
+    payload["cache"] = "miss"
+    payload["cache_age_seconds"] = 0
+    log.info(
+        "analyzer.assemble.ok",
+        symbol=sym,
+        warnings=len(warnings),
+        has_technicals=technicals is not None,
+        has_valuation=valuation is not None,
+    )
+    return payload
 
 
 async def _pull_row_context(
@@ -356,6 +418,21 @@ def _calibration_reading_to_wire(reading: CalibrationReading) -> dict[str, Any]:
     }
 
 
+def _calibration_coverage(
+    calibrations: tuple[CalibrationReading, ...],
+) -> float | None:
+    """Fraction of analyzer score/outcome pairings with a published bucket.
+
+    Returns ``None`` when the readings tuple is empty (store unwired,
+    table never built, or no technical scores) so the trust score
+    marks calibration as ``missing`` rather than fabricating a zero.
+    """
+    if not calibrations:
+        return None
+    published = sum(1 for r in calibrations if r.bucket_published)
+    return published / len(calibrations)
+
+
 def _serialize_report(
     *,
     symbol: str,
@@ -367,6 +444,7 @@ def _serialize_report(
     scenarios: ScenarioModel | None,
     calibrations: tuple[CalibrationReading, ...],
     explanation: AnalyzerExplanation,
+    trust_score: TrustScore,
     warnings: list[str],
 ) -> dict[str, Any]:
     """Render the wire shape.
@@ -410,6 +488,7 @@ def _serialize_report(
             _calibration_reading_to_wire(r) for r in calibrations
         ],
         "explanation": jsonable_encoder(explanation.to_dict()),
+        "trust_score": jsonable_encoder(trust_score.to_dict()),
         "warnings": warnings,
     }
 
@@ -474,4 +553,4 @@ def _overall_analyzer_score(
     return sum(parts) / len(parts)
 
 
-__all__ = ["register_analyzer_routes"]
+__all__ = ["assemble_analyzer_report", "register_analyzer_routes"]

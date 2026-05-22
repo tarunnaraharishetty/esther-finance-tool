@@ -208,6 +208,56 @@ class ProviderHealth:
 
 
 @dataclass(frozen=True)
+class AccuracyEvent:
+    """One reconciliation observation for the provider accuracy ledger.
+
+    Emitted by cross-provider reconciliation: for each high-trust
+    field present on both the primary and the secondary statement,
+    we record one event describing the comparison. Aggregated over
+    time these become the empirical accuracy signal that feeds the
+    provider trust weight.
+
+    Fields:
+        provider: The provider whose reading is being judged
+            (typically the primary in the reconciliation pair).
+        reference_provider: The provider whose reading served as the
+            comparison reference (typically the secondary). SEC EDGAR
+            is preferred when available; otherwise the next configured
+            provider after the primary.
+        symbol: Trading symbol the comparison was for.
+        field: One of the four high-trust fields — ``revenue``,
+            ``net_income``, ``eps_diluted``, ``total_debt``.
+        observed_value / reference_value: The raw numbers compared.
+            ``None`` only when the extractor returned ``None`` for
+            that side; in practice both sides are populated since
+            reconciliation skips field pairs where either is missing.
+        rel_error: Symmetric relative error
+            ``|observed - reference| / max(|observed|, |reference|)``.
+            ``1.0`` is the sentinel used when one side is missing or
+            both are exactly zero — those cases are recorded but the
+            agreement decision uses ``agreed`` directly.
+        agreed: ``True`` when ``rel_error`` is within the configured
+            tolerance AND signs match. Sign-flip pairs never agree
+            regardless of magnitude.
+        fiscal_date: The statement period that was compared. Useful
+            for auditing "providers diverged on FY2024 revenue".
+        observed_at: When the reconciliation ran (not when either
+            provider originally fetched the data).
+    """
+
+    provider: ProviderName
+    reference_provider: ProviderName
+    symbol: str
+    field: str
+    observed_value: float | None
+    reference_value: float | None
+    rel_error: float
+    agreed: bool
+    fiscal_date: datetime | None
+    observed_at: datetime
+
+
+@dataclass(frozen=True)
 class NormalizedFundamentals:
     """The full normalized record for one symbol.
 
@@ -249,6 +299,7 @@ class NormalizedFundamentals:
 
 
 __all__ = [
+    "AccuracyEvent",
     "AnalystTargets",
     "BalanceSheet",
     "CashFlow",

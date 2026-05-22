@@ -1,6 +1,7 @@
 import { AlertOctagon, RefreshCw } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { HistoricalOutcomesPanel } from "@/components/history/HistoricalOutcomesPanel";
+import { TrustScoreBadge } from "@/components/trust/TrustScoreBadge";
 import { useAnalyzerReport } from "@/lib/analyzer";
 import { AiExplanation } from "./AiExplanation";
 import { BullBearCases } from "./BullBearCases";
@@ -60,7 +61,8 @@ export function AnalyzerTab({ symbol }: Props) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-end">
+      <div className="flex items-start justify-end gap-2">
+        <TrustScoreBadge trust={report.trust_score} />
         <button
           type="button"
           onClick={() => {

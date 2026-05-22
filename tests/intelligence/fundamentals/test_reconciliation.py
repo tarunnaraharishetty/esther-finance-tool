@@ -292,3 +292,79 @@ def test_zero_threshold_fires_on_any_difference() -> None:
     result = reconcile(primary, secondary, threshold=0.0)
     revenue_divs = [d for d in result.divergences if d.field == "revenue"]
     assert len(revenue_divs) == 1
+
+
+# -----------------------------------------------------------------------------
+# Accuracy-event emission (provider accuracy ledger)
+# -----------------------------------------------------------------------------
+
+
+def test_events_emitted_for_every_compared_field_agreement() -> None:
+    """Agreements produce events too — the ledger needs the denominator."""
+    primary = _fundamentals(provider=ProviderName.FMP)
+    secondary = _fundamentals(provider=ProviderName.FINNHUB)
+    result = reconcile(primary, secondary, threshold=0.05)
+    # 3 income fields (revenue / net_income / eps_diluted) + 1 balance field.
+    assert len(result.events) == 4
+    assert all(e.agreed for e in result.events)
+    assert {e.field for e in result.events} == {
+        "revenue",
+        "net_income",
+        "eps_diluted",
+        "total_debt",
+    }
+    # All events carry the primary as provider, secondary as reference.
+    for ev in result.events:
+        assert ev.provider == ProviderName.FMP
+        assert ev.reference_provider == ProviderName.FINNHUB
+        assert ev.symbol == "AAPL"
+        assert ev.observed_at is not None
+
+
+def test_events_carry_disagreement_when_divergence_fires() -> None:
+    """A disagreed field's event has agreed=False and a nonzero rel_error."""
+    primary = _fundamentals(income=_income(revenue=100.0))
+    secondary = _fundamentals(
+        provider=ProviderName.FINNHUB, income=_income(revenue=200.0)
+    )
+    result = reconcile(primary, secondary, threshold=0.05)
+    revenue_events = [e for e in result.events if e.field == "revenue"]
+    assert len(revenue_events) == 1
+    ev = revenue_events[0]
+    assert ev.agreed is False
+    assert ev.observed_value == 100.0
+    assert ev.reference_value == 200.0
+    # rel_error = |100-200|/200 = 0.5
+    assert ev.rel_error == pytest.approx(0.5)
+
+
+def test_missing_field_emits_no_event() -> None:
+    """Sparse field on either side → skip the event (no comparison happened)."""
+    primary = _fundamentals(income=_income(revenue=100.0, net_income=20.0))
+    secondary = _fundamentals(
+        provider=ProviderName.FINNHUB,
+        income=_income(revenue=None, net_income=20.0),
+    )
+    result = reconcile(primary, secondary, threshold=0.05)
+    fields = {e.field for e in result.events}
+    assert "revenue" not in fields  # not comparable
+    assert "net_income" in fields  # still emitted (agreement)
+
+
+def test_fiscal_date_mismatch_emits_no_events() -> None:
+    """Fiscal date mismatch is a warning, not an observation — no events."""
+    primary = _fundamentals(
+        income=_income(fiscal_date=datetime(2024, 12, 31, tzinfo=UTC))
+    )
+    secondary = _fundamentals(
+        provider=ProviderName.FINNHUB,
+        income=_income(fiscal_date=datetime(2023, 12, 31, tzinfo=UTC)),
+    )
+    result = reconcile(primary, secondary, threshold=0.05)
+    income_events = [
+        e for e in result.events if e.field in {"revenue", "net_income", "eps_diluted"}
+    ]
+    assert income_events == []
+    # Balance family still compared (same fiscal date by default).
+    balance_events = [e for e in result.events if e.field == "total_debt"]
+    assert len(balance_events) == 1

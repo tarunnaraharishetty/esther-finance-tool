@@ -78,6 +78,7 @@ data/news/
 data/research_cache/
 data/fundamentals_cache/
 data/analyzer_cache/
+data/compare_narrative_cache/
 data/session_state.json
 
 # Notebooks

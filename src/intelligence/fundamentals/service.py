@@ -37,12 +37,14 @@ from src.intelligence.fundamentals.base import (
 from src.intelligence.fundamentals.finnhub import FinnhubProvider
 from src.intelligence.fundamentals.fmp import FmpProvider
 from src.intelligence.fundamentals.models import (
+    AccuracyEvent,
     NormalizedFundamentals,
     ProviderHealth,
     ProviderName,
     ProviderRawResponse,
     ReportPeriod,
 )
+from src.intelligence.fundamentals.provider_trust import ProviderTrust
 from src.intelligence.fundamentals.reconciliation import (
     FieldDivergence,
     ReconciliationWarning,
@@ -56,6 +58,7 @@ if TYPE_CHECKING:
     # Avoid circular import: health_store.py imports ProviderHealth from
     # this package's models. The service only needs HealthStore as a
     # type annotation — actual instances are duck-typed via record().
+    from src.data.accuracy_store import AccuracyStore
     from src.data.health_store import HealthStore
     from src.data.retry_queue import RetryQueue
 
@@ -214,12 +217,23 @@ class FundamentalsService:
         client: httpx.AsyncClient | None = None,
         health_store: HealthStore | None = None,
         retry_queue: RetryQueue | None = None,
+        accuracy_store: AccuracyStore | None = None,
+        provider_trust: ProviderTrust | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._client = client
         self._owns_client = False
         self._health_store = health_store
         self._retry_queue = retry_queue
+        self._accuracy_store = accuracy_store
+        # When the caller didn't pass an explicit trust computer, build
+        # one from whatever stores we have. The result is cheap to
+        # construct and gracefully no-ops when both stores are None
+        # (returns 1.0 for every provider — neutral cold start).
+        self._provider_trust = provider_trust or ProviderTrust(
+            accuracy_store=accuracy_store,
+            health_store=health_store,
+        )
         if providers is not None:
             self._providers = providers
         else:
@@ -232,11 +246,13 @@ class FundamentalsService:
         *,
         health_store: HealthStore | None = None,
         retry_queue: RetryQueue | None = None,
+        accuracy_store: AccuracyStore | None = None,
     ) -> FundamentalsService:
         return cls(
             settings=settings,
             health_store=health_store,
             retry_queue=retry_queue,
+            accuracy_store=accuracy_store,
         )
 
     def _sink_health(self, rows: list[ProviderHealth]) -> None:
@@ -258,12 +274,39 @@ class FundamentalsService:
                 row_count=len(rows),
             )
 
+    def _sink_accuracy(self, events: tuple[AccuracyEvent, ...]) -> None:
+        """Write accuracy ledger entries, swallowing failures.
+
+        Same best-effort contract as :meth:`_sink_health`: a stuck DB
+        write must never break a fundamentals fetch. The trust-weight
+        cache is invalidated after a successful write so the next
+        lookup picks up the new evidence within the TTL window.
+        """
+        if self._accuracy_store is None or not events:
+            return
+        try:
+            self._accuracy_store.record(events)
+        except Exception as exc:
+            log.warning(
+                "accuracy_store.record.failed",
+                error=str(exc),
+                event_count=len(events),
+            )
+            return
+        # New evidence — drop cached weights so the next fetch sees
+        # the freshest aggregate.
+        self._provider_trust.invalidate()
+
     async def _maybe_reconcile(
         self,
         symbol: str,
         primary_index: int,
         primary_normalized: NormalizedFundamentals,
-    ) -> tuple[tuple[FieldDivergence, ...], tuple[ReconciliationWarning, ...]]:
+    ) -> tuple[
+        tuple[FieldDivergence, ...],
+        tuple[ReconciliationWarning, ...],
+        tuple[AccuracyEvent, ...],
+    ]:
         """Run one cross-provider reconciliation call.
 
         Fires only when:
@@ -273,27 +316,27 @@ class FundamentalsService:
         * ``primary_index > 0`` — we only pay the extra call when we
           fell through to a fallback. The happy path stays single-call.
 
-        Secondary provider selection: first configured provider in
-        the chain *after* the primary. Earlier-position providers
-        already failed this call, so re-asking them would waste a
-        quota and almost certainly fail again.
+        Secondary provider selection: prefer SEC EDGAR when it's
+        configured and isn't the primary itself — official filings
+        are the strongest available reference. Otherwise fall back to
+        the first configured provider after the primary. Earlier-
+        position providers already failed this call, so re-asking
+        them would waste a quota and almost certainly fail again.
 
-        Returns empty tuples on any non-success — secondary not
+        Returns three empty tuples on any non-success — secondary not
         configured, secondary fetch failed, no comparable fields.
         Reconciliation never breaks the primary fetch.
         """
         if not self._settings.reconciliation_enabled:
-            return (), ()
+            return (), (), ()
         if primary_index == 0:
-            return (), ()
+            return (), (), ()
 
-        secondary_provider: FundamentalsProvider | None = None
-        for prov in self._providers[primary_index + 1 :]:
-            if prov.is_configured:
-                secondary_provider = prov
-                break
+        secondary_provider = self._select_reference_provider(
+            primary_index, primary_normalized.primary_provider
+        )
         if secondary_provider is None:
-            return (), ()
+            return (), (), ()
 
         try:
             secondary_normalized, _raw = await secondary_provider.fetch(symbol)
@@ -308,7 +351,7 @@ class FundamentalsService:
                 secondary=secondary_provider.name.value,
                 error=str(exc),
             )
-            return (), ()
+            return (), (), ()
 
         result = reconcile(
             primary_normalized,
@@ -322,8 +365,41 @@ class FundamentalsService:
             secondary=secondary_provider.name.value,
             divergence_count=len(result.divergences),
             warning_count=len(result.warnings),
+            event_count=len(result.events),
         )
-        return result.divergences, result.warnings
+        return result.divergences, result.warnings, result.events
+
+    def _select_reference_provider(
+        self, primary_index: int, primary_name: ProviderName
+    ) -> FundamentalsProvider | None:
+        """Pick the secondary used as a reference for reconciliation.
+
+        Prefers SEC EDGAR when it's configured and isn't the primary
+        we already used — official filings outrank any commercial
+        provider as an accuracy reference. Falls back to the first
+        configured provider after the primary in the chain when EDGAR
+        isn't available.
+        """
+        edgar = next(
+            (
+                p
+                for p in self._providers
+                if p.name is ProviderName.SEC_EDGAR
+                and p.name is not primary_name
+                and p.is_configured
+            ),
+            None,
+        )
+        if edgar is not None:
+            return edgar
+        return next(
+            (
+                p
+                for p in self._providers[primary_index + 1 :]
+                if p.is_configured
+            ),
+            None,
+        )
 
     async def fetch(self, symbol: str) -> FundamentalsResult:
         """Walk the chain; return the first healthy provider's result.
@@ -443,10 +519,20 @@ class FundamentalsService:
             # Cross-provider reconciliation on high-trust fields when we
             # fell through to a fallback. Returns empty tuples on the
             # happy path or any failure mode — never raises.
-            divergences, recon_warnings = await self._maybe_reconcile(
+            divergences, recon_warnings, accuracy_events = await self._maybe_reconcile(
                 sym, index, normalized
             )
-            confidence = _confidence_after_divergences(base_confidence, divergences)
+            confidence_after_divergences = _confidence_after_divergences(
+                base_confidence, divergences
+            )
+            # Multiply by the empirical trust weight derived from
+            # accuracy ledger + health log. Cold-start providers
+            # return 1.0; the multiplier only bites once we have
+            # statistically meaningful history. This is the entry
+            # point through which the platform's "providers learn
+            # from outcomes" moat enters every report.
+            trust_weight = self._provider_trust.weight_for(provider.name)
+            confidence = max(0.0, min(1.0, confidence_after_divergences * trust_weight))
 
             envelope: DataEnvelope[NormalizedFundamentals] = DataEnvelope(
                 data=normalized,
@@ -457,9 +543,11 @@ class FundamentalsService:
                 provider_confidence=confidence,
             )
 
-            # Persist the per-call health log for the rolling SLO view.
-            # Best-effort: a sink failure must not break the fetch.
+            # Persist the per-call health log for the rolling SLO view
+            # and the accuracy events for the trust ledger. Both are
+            # best-effort: a sink failure must not break the fetch.
             self._sink_health(health)
+            self._sink_accuracy(accuracy_events)
 
             return FundamentalsResult(
                 envelope=envelope,

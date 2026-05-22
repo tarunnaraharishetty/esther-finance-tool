@@ -48,9 +48,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from src.intelligence.fundamentals.models import (
+    AccuracyEvent,
     BalanceSheet,
     IncomeStatement,
     NormalizedFundamentals,
@@ -92,10 +93,17 @@ class ReconciliationWarning:
 
 @dataclass(frozen=True)
 class ReconciliationResult:
-    """Aggregate output of :func:`reconcile`."""
+    """Aggregate output of :func:`reconcile`.
+
+    ``events`` is the empirical accuracy stream — one entry per
+    comparable (field, primary, secondary) tuple, recording both
+    agreements and disagreements. Persisted by the service to the
+    :class:`AccuracyStore`; powers the provider trust weighting.
+    """
 
     divergences: tuple[FieldDivergence, ...]
     warnings: tuple[ReconciliationWarning, ...]
+    events: tuple[AccuracyEvent, ...] = ()
 
 
 # How to pull each high-trust field off a NormalizedFundamentals.
@@ -152,6 +160,10 @@ def reconcile(
 
     divergences: list[FieldDivergence] = []
     warnings: list[ReconciliationWarning] = []
+    events: list[AccuracyEvent] = []
+    # Single observation timestamp for every event in this call so
+    # the ledger's rolling windows align cleanly per reconciliation.
+    observed_at = datetime.now(UTC)
 
     primary_income = primary.latest_annual_income
     secondary_income = secondary.latest_annual_income
@@ -160,11 +172,13 @@ def reconcile(
         primary_stmt=primary_income,
         secondary_stmt=secondary_income,
         extractors=_HIGH_TRUST_INCOME_FIELDS,
-        primary_name=primary.primary_provider.value,
-        secondary_name=secondary.primary_provider.value,
+        primary=primary,
+        secondary=secondary,
         threshold=threshold,
         divergences=divergences,
         warnings=warnings,
+        events=events,
+        observed_at=observed_at,
     )
 
     primary_balance = primary.latest_annual_balance
@@ -174,16 +188,19 @@ def reconcile(
         primary_stmt=primary_balance,
         secondary_stmt=secondary_balance,
         extractors=_HIGH_TRUST_BALANCE_FIELDS,
-        primary_name=primary.primary_provider.value,
-        secondary_name=secondary.primary_provider.value,
+        primary=primary,
+        secondary=secondary,
         threshold=threshold,
         divergences=divergences,
         warnings=warnings,
+        events=events,
+        observed_at=observed_at,
     )
 
     return ReconciliationResult(
         divergences=tuple(divergences),
         warnings=tuple(warnings),
+        events=tuple(events),
     )
 
 
@@ -193,11 +210,13 @@ def _compare_family(
     primary_stmt: IncomeStatement | BalanceSheet | None,
     secondary_stmt: IncomeStatement | BalanceSheet | None,
     extractors: dict[str, _IncomeExtractor] | dict[str, _BalanceExtractor],
-    primary_name: str,
-    secondary_name: str,
+    primary: NormalizedFundamentals,
+    secondary: NormalizedFundamentals,
     threshold: float,
     divergences: list[FieldDivergence],
     warnings: list[ReconciliationWarning],
+    events: list[AccuracyEvent],
+    observed_at: datetime,
 ) -> None:
     """Run the comparison for one statement family (income or balance).
 
@@ -207,6 +226,8 @@ def _compare_family(
     warnings (so the operator can see exactly which numbers were
     not compared and why).
     """
+    primary_name = primary.primary_provider.value
+    secondary_name = secondary.primary_provider.value
     if primary_stmt is None or secondary_stmt is None:
         # Sparse coverage isn't disagreement. Worth flagging as a
         # warning so the operator can see that reconciliation
@@ -246,6 +267,9 @@ def _compare_family(
         primary_value: float | None = extractor(primary_stmt)  # type: ignore[arg-type]
         secondary_value: float | None = extractor(secondary_stmt)  # type: ignore[arg-type]
         if primary_value is None or secondary_value is None:
+            # No comparable observation — neither divergence nor
+            # agreement; skip the event too so the accuracy ledger
+            # only carries real comparisons.
             continue
 
         divergence = _grade(primary_value, secondary_value, threshold)
@@ -261,6 +285,43 @@ def _compare_family(
                     fiscal_date=primary_stmt.fiscal_date,
                 )
             )
+
+        # Compute the ledger-friendly view of this comparison: a
+        # symmetric relative error plus an agreement flag. The event
+        # is emitted regardless of whether the field diverged — the
+        # accuracy ledger needs the denominator (total comparisons)
+        # to compute a rate, not just the numerator (disagreements).
+        rel_error = _relative_error(primary_value, secondary_value)
+        agreed = divergence is None
+        events.append(
+            AccuracyEvent(
+                provider=primary.primary_provider,
+                reference_provider=secondary.primary_provider,
+                symbol=primary.profile.symbol,
+                field=field_name,
+                observed_value=primary_value,
+                reference_value=secondary_value,
+                rel_error=rel_error,
+                agreed=agreed,
+                fiscal_date=primary_stmt.fiscal_date,
+                observed_at=observed_at,
+            )
+        )
+
+
+def _relative_error(primary_value: float, secondary_value: float) -> float:
+    """Symmetric relative error in ``[0, 1]``. Returns 1.0 when both zero.
+
+    Mirrors the divergence formula in :func:`_grade`; computed
+    independently so the event always carries a number even when
+    the field agreed (in which case the value is below threshold).
+    """
+    abs_p = abs(primary_value)
+    abs_s = abs(secondary_value)
+    scale = max(abs_p, abs_s)
+    if scale == 0.0:
+        return 0.0
+    return abs(primary_value - secondary_value) / scale
 
 
 def _grade(

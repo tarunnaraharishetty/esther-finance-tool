@@ -53,11 +53,13 @@ from starlette.staticfiles import StaticFiles
 
 from src.api.analyzer import register_analyzer_routes
 from src.api.broker import SnapshotBroker
+from src.api.compare import register_compare_routes
 from src.api.fundamentals import register_fundamentals_routes
 from src.api.health import register_health_routes
 from src.api.history import register_history_routes
 from src.api.research import register_research_routes
 from src.config import get_settings
+from src.data.accuracy_store import AccuracyStore
 from src.data.health_store import HealthStore
 from src.data.retry_queue import BackoffPolicy, RetryQueue
 from src.data.retry_worker import (
@@ -97,6 +99,7 @@ def create_app(
     calibration_store: CalibrationStore | None = None,
     calibration_maturation_enabled: bool | None = None,
     research_cache_dir: Path | None = None,
+    compare_narrative_cache_dir: Path | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a controller.
 
@@ -317,6 +320,14 @@ def create_app(
     if effective_health_store is None and settings.health_store_path is not None:
         effective_health_store = HealthStore(settings.health_store_path)
 
+    # Accuracy ledger: shares the same SQLite file as the health store
+    # so operators have a single backup target. Lazy schema init means
+    # the table only materializes the first time reconciliation fires
+    # — tests that never exercise it pay no I/O cost.
+    effective_accuracy_store: AccuracyStore | None = None
+    if settings.health_store_path is not None:
+        effective_accuracy_store = AccuracyStore(settings.health_store_path)
+
     # Retry queue: same opt-out shape. ``retry_queue_path=None`` in
     # settings disables persistence; otherwise we wire one up.
     effective_retry_queue: RetryQueue | None = retry_queue
@@ -364,6 +375,7 @@ def create_app(
         service=fundamentals_service,
         health_store=effective_health_store,
         retry_queue=effective_retry_queue,
+        accuracy_store=effective_accuracy_store,
     )
 
     # Analyzer routes (Phase 6) — assemble technicals + valuation +
@@ -383,7 +395,19 @@ def create_app(
         health_store=effective_health_store,
         retry_queue=effective_retry_queue,
         calibration_store=effective_calibration_store,
+        accuracy_store=effective_accuracy_store,
     )
+
+    # Compare endpoint reads the analyzer assembler off app.state, so
+    # this registration must come *after* the analyzer routes are wired.
+    # The narrative cache lives under data/ alongside the other on-disk
+    # caches so it rotates with the rest of the runtime state.
+    compare_narrative_cache = (
+        compare_narrative_cache_dir
+        if compare_narrative_cache_dir is not None
+        else settings.project_root / "data" / "compare_narrative_cache"
+    )
+    register_compare_routes(app, narrative_cache_dir=compare_narrative_cache)
 
     # Per-symbol historical outcomes drill-down. Only registered when
     # the calibration store exists — when calibration is disabled,

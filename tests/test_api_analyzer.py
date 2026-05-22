@@ -163,11 +163,21 @@ def test_analyzer_endpoint_returns_assembled_report(
         "scenarios",
         "calibrations",
         "explanation",
+        "trust_score",
         "warnings",
         "cache",
         "cache_age_seconds",
     }
     assert expected_keys.issubset(body.keys())
+
+    # Trust score is composed from the same envelope fields the test
+    # asserts below; a fully-populated analyzer report should grade
+    # at least B and carry the documented wire shape.
+    trust = body["trust_score"]
+    assert set(trust.keys()) == {"score", "grade", "components"}
+    assert trust["grade"] in {"A+", "A", "B"}
+    assert 0.0 <= trust["score"] <= 100.0
+    assert len(trust["components"]) == 6  # six named ingredients, always.
 
     # Freshness envelope surfaces alongside the profile.
     fresh_block = body["fundamentals_freshness"]

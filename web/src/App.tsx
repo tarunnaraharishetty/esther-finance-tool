@@ -11,6 +11,7 @@ import { NewsPage } from "@/pages/NewsPage";
 import { AiPage } from "@/pages/AiPage";
 import { ResearchPage } from "@/pages/ResearchPage";
 import { AnalyzerPage } from "@/pages/AnalyzerPage";
+import { ComparePage } from "@/pages/ComparePage";
 import type { DashboardSnapshot } from "@/lib/types";
 
 // Code-split the chart-heavy page and the palette so the initial
@@ -202,6 +203,14 @@ function RouteSwitch({
           setActiveSymbol={setActiveSymbol}
         />
       );
+    case "compare":
+      return (
+        <ComparePage
+          snapshot={snapshot}
+          activeSymbol={activeSymbol}
+          setActiveSymbol={setActiveSymbol}
+        />
+      );
   }
 }
 
@@ -223,6 +232,8 @@ function pageTitle(nav: NavKey): string {
       return "Research Thesis";
     case "analyzer":
       return "Financial Analyzer";
+    case "compare":
+      return "Compare";
   }
 }
 
@@ -244,6 +255,8 @@ function pageSubtitle(nav: NavKey): string {
       return "Institutional-style report · per symbol";
     case "analyzer":
       return "Scored read · valuation ensemble · grounded AI";
+    case "compare":
+      return "Two symbols · per-metric verdicts · grounded";
   }
 }
 

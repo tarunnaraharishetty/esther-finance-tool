@@ -9,6 +9,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { TrustScore } from "@/lib/trust";
+
 // ---- citation vocabulary ----
 
 export type CitationTag =
@@ -215,6 +217,7 @@ export interface AnalyzerReport {
   scenarios: ScenarioModel | null;
   calibrations: CalibrationReading[];
   explanation: AnalyzerExplanation;
+  trust_score: TrustScore;
   warnings: string[];
   cache: "hit" | "miss";
   cache_age_seconds: number;

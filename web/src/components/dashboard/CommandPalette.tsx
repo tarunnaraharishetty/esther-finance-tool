@@ -3,6 +3,8 @@ import { Command } from "cmdk";
 import {
   Activity,
   FileText,
+  Gauge,
+  GitCompareArrows,
   Globe,
   LayoutDashboard,
   LineChart,
@@ -34,6 +36,8 @@ const PAGES: Array<{ key: NavKey; label: string; icon: typeof LineChart }> = [
   { key: "news", label: "News Feed", icon: Newspaper },
   { key: "ai", label: "AI Insights", icon: Sparkles },
   { key: "research", label: "Research Thesis", icon: FileText },
+  { key: "analyzer", label: "Financial Analyzer", icon: Gauge },
+  { key: "compare", label: "Compare", icon: GitCompareArrows },
 ];
 
 export function CommandPalette({

@@ -1,6 +1,7 @@
 import {
   FileText,
   Gauge,
+  GitCompareArrows,
   LayoutDashboard,
   LineChart,
   Newspaper,
@@ -19,7 +20,8 @@ export type NavKey =
   | "ai"
   | "charts"
   | "research"
-  | "analyzer";
+  | "analyzer"
+  | "compare";
 
 interface NavItem {
   key: NavKey;
@@ -36,6 +38,7 @@ const PRIMARY_NAV: NavItem[] = [
   { key: "ai", label: "AI Insights", icon: Sparkles },
   { key: "research", label: "Research", icon: FileText },
   { key: "analyzer", label: "Analyzer", icon: Gauge },
+  { key: "compare", label: "Compare", icon: GitCompareArrows },
 ];
 
 interface Props {

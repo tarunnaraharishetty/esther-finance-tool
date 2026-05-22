@@ -43,6 +43,7 @@ from src.intelligence.research_validator import (
     validate_thesis,
     validation_to_wire,
 )
+from src.intelligence.trust_score import compute_research_trust_score
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -218,11 +219,15 @@ def register_research_routes(
         # in normal operation drops are zero; a non-zero drop count on
         # the template path is a regression signal worth surfacing.
         validated, report = validate_thesis(thesis, payload)
+        trust = compute_research_trust_score(
+            validation_drop_count=report.drop_count,
+        )
         encoded: dict[str, Any] = jsonable_encoder(asdict(validated))
         encoded["cache"] = "miss"
         encoded["cache_age_seconds"] = 0
         encoded["mode"] = mode_used
         encoded["validation"] = jsonable_encoder(validation_to_wire(report))
+        encoded["trust_score"] = jsonable_encoder(trust.to_dict())
         if warning:
             encoded["warning"] = warning
 
