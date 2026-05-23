@@ -1,23 +1,26 @@
 """Provider-health observability API.
 
-Surfaces the rolling SLO view from :class:`HealthStore` and the in-flight
-:class:`RetryQueue` state so operators and the trader-facing UI can
-see "Fundamentals provider FMP degraded · 76% success in the last
-hour · 3 symbols queued for retry" instead of an unexplained spinner.
+Surfaces the rolling SLO view from :class:`HealthStore`, the empirical
+accuracy ledger from :class:`AccuracyStore`, the composed trust weight
+from :class:`ProviderTrust`, and the in-flight :class:`RetryQueue`
+state — so operators (and the trader-facing Providers page) can answer
+"why is FMP down-weighted right now?" without SSH-ing into SQLite.
 
 Routes
 ------
-* ``GET /api/health/providers`` — rolling summary per provider, plus
-  the 20 most recent failure rows. Accepts a ``window=<int><s|m|h|d>``
-  query param (default ``1h``); rejects anything else with 400.
-* ``GET /api/health/queue`` — :class:`RetryQueue` snapshot: counts of
-  pending vs permanently-failed entries plus the full entry list.
+* ``GET /api/health/providers`` — per-provider rolling summary + trust
+  breakdown + per-field accuracy + recent failure rows. Accepts a
+  ``window=<int><s|m|h|d>`` query param (default ``1h``); rejects
+  anything else with 400.
+* ``GET /api/health/queue`` — :class:`RetryQueue` snapshot.
 
-Why one endpoint instead of two
--------------------------------
-Trader-facing UI surfaces the rolling summary + recent-failures list
-together (it's the same "what is FMP doing right now" question). One
-fetch + one render is simpler than two coordinated calls.
+Union of provider sources
+-------------------------
+The endpoint emits a row for every provider that appears in *either*
+the health log OR the accuracy ledger over the window. A provider
+with only accuracy events (no health rows yet because nothing failed)
+would be invisible under the legacy "health-store only" enumeration —
+the Trust Score wouldn't have a place to surface its contribution.
 """
 
 from __future__ import annotations
@@ -25,14 +28,19 @@ from __future__ import annotations
 import re
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 
-from src.data.health_store import HealthStore
+from src.data.health_store import HealthStore, ProviderSummary
 from src.data.retry_queue import RetryQueue, RetryStatus
+from src.intelligence.fundamentals.models import ProviderName
 from src.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from src.data.accuracy_store import AccuracyStore
+    from src.intelligence.fundamentals.provider_trust import ProviderTrust
 
 log = get_logger(__name__)
 
@@ -75,19 +83,24 @@ def register_health_routes(
     *,
     store: HealthStore,
     retry_queue: RetryQueue | None = None,
+    accuracy_store: AccuracyStore | None = None,
+    provider_trust: ProviderTrust | None = None,
 ) -> None:
     """Attach provider-health routes to ``app``.
 
     Args:
         app: FastAPI app to extend.
-        store: Bound :class:`HealthStore`. The route closes over it so
-            the same instance backs every call. Tests inject a
-            ``tmp_path``-rooted store; production gets the default
-            from ``Settings.health_store_path``.
+        store: Bound :class:`HealthStore`. Closes over it so the same
+            instance backs every call.
         retry_queue: Optional bound :class:`RetryQueue`. When provided,
-            registers the ``/api/health/queue`` endpoint. ``None``
-            means the operator opted out of retry-queue persistence
-            (``RETRY_QUEUE_PATH=``) and the queue endpoint 404s.
+            registers the ``/api/health/queue`` endpoint.
+        accuracy_store: Optional bound :class:`AccuracyStore`. When
+            provided, per-provider rows carry a ``field_accuracy``
+            block (rolling per-high-trust-field agree rates).
+        provider_trust: Optional bound :class:`ProviderTrust`. When
+            provided, per-provider rows carry a ``trust_breakdown``
+            block (the composite weight + its components). The
+            Providers page keys off this to render the trust gauge.
     """
 
     @app.get("/api/health/providers")
@@ -106,11 +119,11 @@ def register_health_routes(
             description="Max recent failure rows to include.",
         ),
     ) -> dict[str, Any]:
-        """Return rolling per-provider health + recent failures.
+        """Return rolling per-provider health + trust + recent failures.
 
-        On a fresh store with no data, returns an empty
-        ``providers`` array and empty ``recent_failures``. The endpoint
-        never 500s on "no data" — that's expected on a first boot.
+        On a fresh store with no data, returns an empty ``providers``
+        array and empty ``recent_failures``. Never 500s on "no data" —
+        that's expected on a first boot.
         """
         try:
             window_td = _parse_window(window)
@@ -120,10 +133,48 @@ def register_health_routes(
         moment = datetime.now(UTC)
         summaries = store.summarize(window_td, now=moment)
         failures = store.list_recent_failures(limit=recent_limit)
+
+        # Index health summaries by provider name for the union step.
+        summary_by_name: dict[str, ProviderSummary] = {
+            s.provider: s for s in summaries
+        }
+
+        # Union: every provider that has either a health row OR an
+        # accuracy event in the window. Providers seen only in the
+        # accuracy ledger get a degraded "no health rows" summary so
+        # the Trust Score's contribution still surfaces.
+        accuracy_provider_names: tuple[str, ...] = ()
+        if accuracy_store is not None:
+            try:
+                accuracy_provider_names = accuracy_store.known_providers()
+            except Exception as exc:
+                # Best-effort: a stuck accuracy store must not break
+                # the health endpoint. Log and degrade.
+                log.warning(
+                    "health.accuracy_store.enumerate_failed",
+                    error=str(exc),
+                )
+
+        all_names = sorted(
+            set(summary_by_name.keys()) | set(accuracy_provider_names)
+        )
+
+        provider_rows: list[dict[str, Any]] = []
+        for name in all_names:
+            summary = summary_by_name.get(name)
+            if summary is None:
+                summary = _degraded_summary(name, window_td)
+            row = _summary_to_wire(summary)
+            row["trust_breakdown"] = _trust_block(provider_trust, name)
+            row["field_accuracy"] = _field_accuracy_block(
+                accuracy_store, name, window_td
+            )
+            provider_rows.append(row)
+
         return {
             "as_of": moment.isoformat(),
             "window_seconds": int(window_td.total_seconds()),
-            "providers": [_summary_to_wire(s) for s in summaries],
+            "providers": provider_rows,
             "recent_failures": jsonable_encoder([asdict(f) for f in failures]),
         }
 
@@ -150,6 +201,83 @@ def register_health_routes(
             }
 
 
+# ---------------------------------------------------------------------------
+# Composer helpers
+# ---------------------------------------------------------------------------
+
+
+def _trust_block(
+    provider_trust: ProviderTrust | None, provider: str
+) -> dict[str, Any] | None:
+    """Resolve the :class:`TrustBreakdown` for ``provider``, or None.
+
+    ``None`` only when provider_trust isn't wired or the breakdown
+    call raises — the frontend reads ``trust_breakdown is null`` as
+    "trust ledger not configured" and renders a placeholder.
+    """
+    if provider_trust is None:
+        return None
+    try:
+        pname = ProviderName(provider)
+    except ValueError:
+        # Provider name unknown to the enum (deleted provider, etc.) —
+        # skip the trust lookup rather than crashing the row.
+        return None
+    try:
+        breakdown = provider_trust.breakdown_for(pname)
+    except Exception as exc:
+        log.warning(
+            "health.trust_breakdown.failed",
+            provider=provider,
+            error=str(exc),
+        )
+        return None
+    return breakdown.to_dict()
+
+
+def _field_accuracy_block(
+    accuracy_store: AccuracyStore | None,
+    provider: str,
+    window: timedelta,
+) -> dict[str, Any] | None:
+    """Build the per-field accuracy summary for ``provider``.
+
+    Returns ``None`` when the accuracy store isn't wired or the
+    lookup raises. Empty ``by_field`` (no events in window) returns
+    a populated summary with zero counts so the UI can render
+    "no observations yet" honestly.
+    """
+    if accuracy_store is None:
+        return None
+    try:
+        summary = accuracy_store.summarize(provider, window)
+    except Exception as exc:
+        log.warning(
+            "health.field_accuracy.failed",
+            provider=provider,
+            error=str(exc),
+        )
+        return None
+    return summary.to_dict()
+
+
+def _degraded_summary(provider: str, window: timedelta) -> ProviderSummary:
+    """Build a zero-count ProviderSummary for a provider that's only in
+    the accuracy ledger (no health rows yet).
+
+    Lets the union step include the provider in the response without
+    branching the wire shape per source. ``last_seen_at`` /
+    ``last_error_at`` are ``None`` so the UI shows "no health calls
+    yet" rather than a fake timestamp.
+    """
+    return ProviderSummary(provider=provider, window=window, total=0)
+
+
+# ---------------------------------------------------------------------------
+# Per-record wire serializers
+# ---------------------------------------------------------------------------
+
+
 def _entry_to_wire(entry: Any) -> dict[str, Any]:
     """Serialize a :class:`RetryEntry` to JSON-safe shape."""
     return {
@@ -167,7 +295,7 @@ def _entry_to_wire(entry: Any) -> dict[str, Any]:
     }
 
 
-def _summary_to_wire(summary: Any) -> dict[str, Any]:
+def _summary_to_wire(summary: ProviderSummary) -> dict[str, Any]:
     """Serialize :class:`ProviderSummary` for the JSON wire shape.
 
     ``window`` is a ``timedelta`` on the dataclass; the wire form is

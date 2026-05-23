@@ -12,6 +12,7 @@ import { AiPage } from "@/pages/AiPage";
 import { ResearchPage } from "@/pages/ResearchPage";
 import { AnalyzerPage } from "@/pages/AnalyzerPage";
 import { ComparePage } from "@/pages/ComparePage";
+import { ProvidersPage } from "@/pages/ProvidersPage";
 import type { DashboardSnapshot } from "@/lib/types";
 
 // Code-split the chart-heavy page and the palette so the initial
@@ -211,6 +212,8 @@ function RouteSwitch({
           setActiveSymbol={setActiveSymbol}
         />
       );
+    case "providers":
+      return <ProvidersPage />;
   }
 }
 
@@ -234,6 +237,8 @@ function pageTitle(nav: NavKey): string {
       return "Financial Analyzer";
     case "compare":
       return "Compare";
+    case "providers":
+      return "Data Providers";
   }
 }
 
@@ -257,6 +262,8 @@ function pageSubtitle(nav: NavKey): string {
       return "Scored read · valuation ensemble · grounded AI";
     case "compare":
       return "Two symbols · per-metric verdicts · grounded";
+    case "providers":
+      return "Trust weights · accuracy ledger · per-field calibration";
   }
 }
 

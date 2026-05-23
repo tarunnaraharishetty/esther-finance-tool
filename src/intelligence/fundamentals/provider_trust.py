@@ -91,6 +91,32 @@ class TrustBreakdown:
     health_calls: int
     cold_start: bool  # True when we returned 1.0 due to thin data
 
+    def to_dict(self) -> dict[str, object]:
+        """Wire shape consumed by the Providers page on the frontend."""
+        return {
+            "provider": self.provider,
+            "weight": round(self.weight, 4),
+            "accuracy": (
+                None if self.accuracy is None else round(self.accuracy, 4)
+            ),
+            "uptime": (
+                None if self.uptime is None else round(self.uptime, 4)
+            ),
+            "latency_p95_ms": (
+                None
+                if self.latency_p95_ms is None
+                else round(self.latency_p95_ms, 2)
+            ),
+            "latency_score": (
+                None
+                if self.latency_score is None
+                else round(self.latency_score, 4)
+            ),
+            "events": self.events,
+            "health_calls": self.health_calls,
+            "cold_start": self.cold_start,
+        }
+
 
 class ProviderTrust:
     """Compute per-provider trust weights from accuracy + health stores.

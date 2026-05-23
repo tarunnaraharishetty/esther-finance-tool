@@ -75,6 +75,15 @@ class FieldAccuracy:
     agreed: int
     accuracy: float  # agreed / total; 0.0 when total == 0
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "provider": self.provider,
+            "field": self.field,
+            "total": self.total,
+            "agreed": self.agreed,
+            "accuracy": round(self.accuracy, 4),
+        }
+
 
 @dataclass(frozen=True)
 class ProviderAccuracySummary:
@@ -98,6 +107,16 @@ class ProviderAccuracySummary:
     total_agreed: int
     overall_accuracy: float
     by_field: tuple[FieldAccuracy, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "provider": self.provider,
+            "window_seconds": int(self.window.total_seconds()),
+            "total_events": self.total_events,
+            "total_agreed": self.total_agreed,
+            "overall_accuracy": round(self.overall_accuracy, 4),
+            "by_field": [f.to_dict() for f in self.by_field],
+        }
 
 
 class AccuracyStore:
@@ -255,6 +274,26 @@ class AccuracyStore:
             overall_accuracy=overall,
             by_field=tuple(by_field),
         )
+
+    def known_providers(self) -> tuple[str, ...]:
+        """Return distinct provider names that have any rows in the ledger.
+
+        Used by the providers health endpoint to enumerate the cohort
+        for trust-breakdown surfacing. Includes both the ``provider``
+        and ``reference_provider`` sides so a provider that's only
+        ever served as a reference still appears (its accuracy is
+        observable through the symmetric comparisons).
+        """
+        conn = self._connect()
+        cur = conn.execute(
+            """
+            SELECT provider AS name FROM provider_accuracy_event
+            UNION
+            SELECT reference_provider AS name FROM provider_accuracy_event
+            """
+        )
+        names = sorted({str(row[0]) for row in cur.fetchall()})
+        return tuple(names)
 
     def has_events(self, provider: ProviderName | str) -> bool:
         """Cheap "any history?" check used by the trust-weight cold start.

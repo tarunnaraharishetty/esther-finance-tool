@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Command } from "cmdk";
 import {
   Activity,
+  Database,
   FileText,
   Gauge,
   GitCompareArrows,
@@ -38,6 +39,7 @@ const PAGES: Array<{ key: NavKey; label: string; icon: typeof LineChart }> = [
   { key: "research", label: "Research Thesis", icon: FileText },
   { key: "analyzer", label: "Financial Analyzer", icon: Gauge },
   { key: "compare", label: "Compare", icon: GitCompareArrows },
+  { key: "providers", label: "Data Providers", icon: Database },
 ];
 
 export function CommandPalette({

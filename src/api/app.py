@@ -106,6 +106,7 @@ def create_app(
     sector_cache_dir: Path | None = None,
     movement_cache_dir: Path | None = None,
     spotlight_cache_dir: Path | None = None,
+    accuracy_store: AccuracyStore | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a controller.
 
@@ -329,9 +330,14 @@ def create_app(
     # Accuracy ledger: shares the same SQLite file as the health store
     # so operators have a single backup target. Lazy schema init means
     # the table only materializes the first time reconciliation fires
-    # — tests that never exercise it pay no I/O cost.
-    effective_accuracy_store: AccuracyStore | None = None
-    if settings.health_store_path is not None:
+    # — tests that never exercise it pay no I/O cost. Tests can also
+    # inject their own instance via ``accuracy_store=`` to align the
+    # test's accuracy ledger with the app's view.
+    effective_accuracy_store: AccuracyStore | None = accuracy_store
+    if (
+        effective_accuracy_store is None
+        and settings.health_store_path is not None
+    ):
         effective_accuracy_store = AccuracyStore(settings.health_store_path)
 
     # Retry queue: same opt-out shape. ``retry_queue_path=None`` in
@@ -359,11 +365,24 @@ def create_app(
             settings.calibration_store_path
         )
 
+    # Provider trust composer — wires both stores so the providers
+    # health endpoint can surface trust_breakdown + field_accuracy
+    # per provider. Falls back gracefully when either store is None
+    # (cold-start defaults to weight = 1.0 across the board).
+    from src.intelligence.fundamentals.provider_trust import ProviderTrust as _PT
+
+    effective_provider_trust = _PT(
+        accuracy_store=effective_accuracy_store,
+        health_store=effective_health_store,
+    )
+
     if effective_health_store is not None:
         register_health_routes(
             app,
             store=effective_health_store,
             retry_queue=effective_retry_queue,
+            accuracy_store=effective_accuracy_store,
+            provider_trust=effective_provider_trust,
         )
 
     # Fundamentals routes (Phase 2). Independent of the controller —
