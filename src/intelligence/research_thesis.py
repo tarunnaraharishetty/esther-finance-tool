@@ -52,11 +52,17 @@ class ThesisSection:
     paragraphs). ``bullets`` are short, parallel-structure items the
     UI renders as a list. Either may be empty; the section renderer
     skips the missing half.
+
+    ``provenance`` maps each numeric token surviving validation to
+    its source-field label (e.g. ``"row.last_price"``). Empty when
+    the validator hasn't run yet or no tokens grounded. The UI
+    renders provenance entries as hover tooltips on the prose.
     """
 
     title: str
     body: str = ""
     bullets: tuple[str, ...] = ()
+    provenance: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -67,11 +73,15 @@ class BullBearArgument:
     argument is, normalized to [0, 1] across the side it belongs to.
     The UI uses it for the bar length so the eye can compare arguments
     against each other at a glance.
+
+    ``provenance`` mirrors :class:`ThesisSection` — numeric tokens in
+    ``detail`` mapped to their source-field labels.
     """
 
     label: str
     weight: float  # 0..1
     detail: str
+    provenance: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -82,6 +92,7 @@ class Catalyst:
     when: str  # human phrase: "Next 30 days" / "Q1 2026" / "post-CPI"
     impact: str  # "bullish" | "bearish" | "uncertain"
     detail: str
+    provenance: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -92,6 +103,7 @@ class OutlookEntry:
     bias: str  # "bullish" | "bearish" | "neutral"
     confidence: float  # 0..1
     detail: str
+    provenance: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -101,12 +113,17 @@ class MetricEntry:
     Designed to render in a compact grid. ``tone`` colors the cell:
     ``bull`` / ``bear`` / ``warn`` / ``None`` (neutral). ``delta``
     is an optional secondary line ("+12% YoY", "vs sector avg 14.2").
+
+    ``provenance`` records the source label for the metric's
+    ``value`` (the most important numeric on the card). Empty when
+    the validator hasn't run.
     """
 
     label: str
     value: str
     delta: str | None = None
     tone: str | None = None
+    provenance: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

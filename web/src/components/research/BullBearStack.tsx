@@ -1,6 +1,7 @@
 import { TrendingDown, TrendingUp } from "lucide-react";
 import type { BullBearArgument } from "@/lib/research";
 import { cn } from "@/lib/utils";
+import { ProvenanceProse } from "./ProvenanceProse";
 
 interface Props {
   bull: BullBearArgument[];
@@ -104,7 +105,7 @@ function Argument({
         />
       </div>
       <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-        {arg.detail}
+        <ProvenanceProse body={arg.detail} provenance={arg.provenance} />
       </p>
     </div>
   );

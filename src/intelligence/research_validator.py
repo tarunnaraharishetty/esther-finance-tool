@@ -135,7 +135,8 @@ def validate_thesis(
     thesis with empty section bodies + a high ``drop_count``. The
     caller surfaces both verbatim on the wire.
     """
-    corpus = _build_corpus(thesis, payload)
+    corpus_entries = _build_corpus_entries(thesis, payload)
+    corpus = " ".join(text for text, _label in corpus_entries).lower()
     allowance = _build_allowance(thesis, payload)
     dropped: list[DroppedClaim] = []
 
@@ -144,12 +145,13 @@ def validate_thesis(
     # so dropped entries vanish from the tuple instead of leaving holes.
 
     new_company = _scrub_section(
-        thesis.company_overview, "company_overview", corpus, allowance, dropped
+        thesis.company_overview, "company_overview", corpus, corpus_entries, allowance, dropped
     )
     new_technical = _scrub_section(
         thesis.technical_analysis,
         "technical_analysis",
         corpus,
+        corpus_entries,
         allowance,
         dropped,
     )
@@ -157,17 +159,18 @@ def validate_thesis(
         thesis.fundamental_analysis,
         "fundamental_analysis",
         corpus,
+        corpus_entries,
         allowance,
         dropped,
     )
     new_sentiment = _scrub_section(
-        thesis.sentiment_news, "sentiment_news", corpus, allowance, dropped
+        thesis.sentiment_news, "sentiment_news", corpus, corpus_entries, allowance, dropped
     )
     new_risk = _scrub_section(
-        thesis.risk_assessment, "risk_assessment", corpus, allowance, dropped
+        thesis.risk_assessment, "risk_assessment", corpus, corpus_entries, allowance, dropped
     )
     new_explainability = _scrub_section(
-        thesis.explainability, "explainability", corpus, allowance, dropped
+        thesis.explainability, "explainability", corpus, corpus_entries, allowance, dropped
     )
 
     new_tagline, tagline_dropped = _scrub_text(
@@ -176,19 +179,19 @@ def validate_thesis(
     dropped.extend(tagline_dropped)
 
     new_bull = _scrub_arguments(
-        thesis.bull_thesis, "bull_thesis", corpus, allowance, dropped
+        thesis.bull_thesis, "bull_thesis", corpus, corpus_entries, allowance, dropped
     )
     new_bear = _scrub_arguments(
-        thesis.bear_thesis, "bear_thesis", corpus, allowance, dropped
+        thesis.bear_thesis, "bear_thesis", corpus, corpus_entries, allowance, dropped
     )
     new_catalysts = _scrub_catalysts(
-        thesis.catalysts, "catalysts", corpus, allowance, dropped
+        thesis.catalysts, "catalysts", corpus, corpus_entries, allowance, dropped
     )
     new_outlook = _scrub_outlook(
-        thesis.outlook, "outlook", corpus, allowance, dropped
+        thesis.outlook, "outlook", corpus, corpus_entries, allowance, dropped
     )
     new_metrics = _scrub_metrics(
-        thesis.metrics, "metrics", corpus, allowance, dropped
+        thesis.metrics, "metrics", corpus, corpus_entries, allowance, dropped
     )
 
     validated = replace(
@@ -226,127 +229,200 @@ def validate_thesis(
 def _build_corpus(thesis: ResearchThesis, payload: ResearchInput) -> str:
     """Concatenate every grounding-eligible scalar from the input bundle.
 
-    The corpus is the substring-match space. A token in the thesis
-    prose is "supported" iff it appears verbatim somewhere in this
-    string. Lowercase + whitespace-normalized so case + spacing don't
-    cause false negatives.
-
-    Every field that could legitimately ground a numeric claim must
-    be included here — missing a field would cause the validator to
-    drop valid claims. New adapters need to be added when they ship.
+    Delegates to :func:`_build_corpus_entries` and flattens the
+    labeled entries into the original concatenated-blob shape the
+    drop-policy substring matcher expects. The two builders share a
+    source-of-truth so a new corpus field automatically participates
+    in both the drop policy AND the provenance graph.
     """
-    parts: list[str] = []
+    return " ".join(text for text, _label in _build_corpus_entries(thesis, payload)).lower()
+
+
+def _build_corpus_entries(
+    thesis: ResearchThesis, payload: ResearchInput
+) -> list[tuple[str, str]]:
+    """Build the labeled corpus — each entry is ``(text, source_label)``.
+
+    Source labels are short dotted paths the provenance tooltip
+    renders verbatim (e.g. ``"row.last_price"``, ``"fundamentals.pe"``,
+    ``"headlines[0]"``). Multiple surface forms of the same value
+    (``101.61`` / ``101.61`` / ``$101.61``) share one source label
+    so the tooltip is stable regardless of how the LLM rendered the
+    number.
+
+    Adding a new corpus field here automatically wires it into both
+    the drop policy and the provenance graph.
+    """
+    entries: list[tuple[str, str]] = []
     row = payload.row
-    # Scalars on the snapshot row. The currency-prefixed form of
-    # ``last_price`` is included alongside the bare float so a
-    # template/LLM rendering as "$101.61" still anchors against the
-    # row that carries 101.61. Same with other dollar-like quantities
-    # downstream — the corpus is a *surface-form* match space, not a
-    # numeric-equivalence engine.
-    parts.extend(
-        [
-            row.symbol,
-            f"{row.last_price}",
-            f"{row.last_price:.2f}",
-            f"${row.last_price:.2f}",
-            f"{row.rsi}",
-            f"{row.rsi:.1f}",
-            f"{row.macd}",
-            f"{row.macd:.2f}",
-            f"{row.bollinger}",
-            f"{row.bollinger:.2f}",
-            f"{row.confidence}",
-            f"{row.confidence:.2f}",
-            f"{row.combined_score}",
-            f"{row.combined_score:.2f}",
-            f"{row.technical_score}",
-            f"{row.technical_score:.2f}",
-            f"{row.sentiment_score}",
-            f"{row.sentiment_score:.2f}",
-            f"{row.num_news_articles}",
-            row.reasoning,
-        ]
-    )
-    parts.extend(payload.headlines)
+    entries.append((row.symbol, "row.symbol"))
+    entries.append((f"{row.last_price}", "row.last_price"))
+    entries.append((f"{row.last_price:.2f}", "row.last_price"))
+    entries.append((f"${row.last_price:.2f}", "row.last_price"))
+    entries.append((f"{row.rsi}", "row.rsi"))
+    entries.append((f"{row.rsi:.1f}", "row.rsi"))
+    entries.append((f"{row.macd}", "row.macd"))
+    entries.append((f"{row.macd:.2f}", "row.macd"))
+    entries.append((f"{row.bollinger}", "row.bollinger"))
+    entries.append((f"{row.bollinger:.2f}", "row.bollinger"))
+    entries.append((f"{row.confidence}", "row.confidence"))
+    entries.append((f"{row.confidence:.2f}", "row.confidence"))
+    entries.append((f"{row.combined_score}", "row.combined_score"))
+    entries.append((f"{row.combined_score:.2f}", "row.combined_score"))
+    entries.append((f"{row.technical_score}", "row.technical_score"))
+    entries.append((f"{row.technical_score:.2f}", "row.technical_score"))
+    entries.append((f"{row.sentiment_score}", "row.sentiment_score"))
+    entries.append((f"{row.sentiment_score:.2f}", "row.sentiment_score"))
+    entries.append((f"{row.num_news_articles}", "row.num_news_articles"))
+    entries.append((row.reasoning, "row.reasoning"))
+    for idx, headline in enumerate(payload.headlines):
+        entries.append((headline, f"headlines[{idx}]"))
 
     # Adapters — each contributes the scalars it carries when populated.
     if payload.company_profile is not None:
         prof = payload.company_profile
-        parts.extend([prof.name, prof.sector, prof.industry, prof.summary])
-        parts.extend(prof.revenue_drivers)
+        entries.append((prof.name, "company_profile.name"))
+        entries.append((prof.sector, "company_profile.sector"))
+        entries.append((prof.industry, "company_profile.industry"))
+        entries.append((prof.summary, "company_profile.summary"))
+        for idx, driver in enumerate(prof.revenue_drivers):
+            entries.append((driver, f"company_profile.revenue_drivers[{idx}]"))
         if prof.competitive_moat is not None:
-            parts.append(prof.competitive_moat)
+            entries.append(
+                (prof.competitive_moat, "company_profile.competitive_moat")
+            )
 
     if payload.fundamentals is not None:
         f = payload.fundamentals
-        for v in (
-            f.pe,
-            f.forward_pe,
-            f.peg,
-            f.ev_ebitda,
-            f.price_to_sales,
-            f.gross_margin,
-            f.operating_margin,
-            f.fcf_yield,
-            f.revenue_growth_yoy,
-            f.eps_growth_yoy,
-            f.debt_to_equity,
+        for field_name, value in (
+            ("pe", f.pe),
+            ("forward_pe", f.forward_pe),
+            ("peg", f.peg),
+            ("ev_ebitda", f.ev_ebitda),
+            ("price_to_sales", f.price_to_sales),
+            ("gross_margin", f.gross_margin),
+            ("operating_margin", f.operating_margin),
+            ("fcf_yield", f.fcf_yield),
+            ("revenue_growth_yoy", f.revenue_growth_yoy),
+            ("eps_growth_yoy", f.eps_growth_yoy),
+            ("debt_to_equity", f.debt_to_equity),
         ):
-            if v is not None:
-                parts.append(str(v))
-                parts.append(f"{v:.2f}")
-                parts.append(f"{v:.1f}")
+            if value is not None:
+                label = f"fundamentals.{field_name}"
+                entries.append((str(value), label))
+                entries.append((f"{value:.2f}", label))
+                entries.append((f"{value:.1f}", label))
 
     if payload.earnings is not None:
         e = payload.earnings
-        for v in (
-            e.last_eps_actual,
-            e.last_eps_estimate,
-            e.last_revenue_actual,
-            e.last_revenue_estimate,
+        for field_name, value in (
+            ("last_eps_actual", e.last_eps_actual),
+            ("last_eps_estimate", e.last_eps_estimate),
+            ("last_revenue_actual", e.last_revenue_actual),
+            ("last_revenue_estimate", e.last_revenue_estimate),
         ):
-            if v is not None:
-                parts.append(str(v))
-                parts.append(f"{v:.2f}")
-        parts.append(str(e.surprise_streak))
+            if value is not None:
+                label = f"earnings.{field_name}"
+                entries.append((str(value), label))
+                entries.append((f"{value:.2f}", label))
+        entries.append((str(e.surprise_streak), "earnings.surprise_streak"))
         if e.next_report is not None:
-            parts.append(e.next_report.isoformat())
-            parts.append(str(e.next_report.year))
+            entries.append((e.next_report.isoformat(), "earnings.next_report"))
+            entries.append((str(e.next_report.year), "earnings.next_report.year"))
 
     if payload.analyst_ratings is not None:
         a = payload.analyst_ratings
         if a.consensus is not None:
-            parts.append(a.consensus)
-        parts.extend([str(a.buy_count), str(a.hold_count), str(a.sell_count)])
-        for v in (a.avg_target, a.high_target, a.low_target):
-            if v is not None:
-                parts.append(str(v))
-                parts.append(f"{v:.2f}")
+            entries.append((a.consensus, "analyst_ratings.consensus"))
+        entries.append((str(a.buy_count), "analyst_ratings.buy_count"))
+        entries.append((str(a.hold_count), "analyst_ratings.hold_count"))
+        entries.append((str(a.sell_count), "analyst_ratings.sell_count"))
+        for field_name, value in (
+            ("avg_target", a.avg_target),
+            ("high_target", a.high_target),
+            ("low_target", a.low_target),
+        ):
+            if value is not None:
+                label = f"analyst_ratings.{field_name}"
+                entries.append((str(value), label))
+                entries.append((f"{value:.2f}", label))
 
     if payload.insider_activity is not None:
-        i = payload.insider_activity
-        if i.net_30d_usd is not None:
-            parts.append(str(i.net_30d_usd))
-        parts.extend([str(i.buys_30d), str(i.sells_30d)])
-        if i.last_event is not None:
-            parts.append(i.last_event)
+        ins = payload.insider_activity
+        if ins.net_30d_usd is not None:
+            entries.append(
+                (str(ins.net_30d_usd), "insider_activity.net_30d_usd")
+            )
+        entries.append((str(ins.buys_30d), "insider_activity.buys_30d"))
+        entries.append((str(ins.sells_30d), "insider_activity.sells_30d"))
+        if ins.last_event is not None:
+            entries.append((ins.last_event, "insider_activity.last_event"))
 
     if payload.macro_context is not None:
         m = payload.macro_context
-        for macro_field in (m.regime, m.next_fed_event, m.next_cpi, m.sector_trend):
-            if macro_field is not None:
-                parts.append(macro_field)
+        # Iteration order intentional — explicit typing so mypy doesn't
+        # widen the value union with the unrelated fundamentals loop above.
+        macro_fields: tuple[tuple[str, str | None], ...] = (
+            ("regime", m.regime),
+            ("next_fed_event", m.next_fed_event),
+            ("next_cpi", m.next_cpi),
+            ("sector_trend", m.sector_trend),
+        )
+        for macro_name, macro_value in macro_fields:
+            if macro_value is not None:
+                entries.append((macro_value, f"macro_context.{macro_name}"))
 
     if payload.social_sentiment is not None:
         s = payload.social_sentiment
         if s.overall is not None:
-            parts.append(str(s.overall))
+            entries.append((str(s.overall), "social_sentiment.overall"))
         if s.volume_24h is not None:
-            parts.append(str(s.volume_24h))
-        parts.extend(s.notable_threads)
+            entries.append((str(s.volume_24h), "social_sentiment.volume_24h"))
+        for idx, thread in enumerate(s.notable_threads):
+            entries.append(
+                (thread, f"social_sentiment.notable_threads[{idx}]")
+            )
 
-    # Single lowercased blob — the substring matcher is case-insensitive.
-    return " ".join(str(p) for p in parts).lower()
+    # Defensive: filter out empty-string entries (a None upstream would
+    # have been skipped, but an empty string would substring-match
+    # everything which is a grounding hole).
+    return [(text, label) for text, label in entries if text]
+
+
+def _token_provenance(
+    text: str,
+    corpus_entries: list[tuple[str, str]],
+    allowance: frozenset[str],
+) -> dict[str, str]:
+    """Record the source label for each supported numeric token in ``text``.
+
+    Returns ``{original_token: source_label}`` for tokens that
+    substring-match a corpus entry. Tokens that only clear the
+    allowance (small integers, year, ticker) are intentionally
+    omitted — they're trivially supported but have no meaningful
+    source to point at, so the UI renders them as plain text.
+
+    First-match-wins: when a token substring-matches multiple corpus
+    entries (e.g. ``"100"`` appears in both row.combined_score and
+    a headline), the first entry in the list wins. The corpus
+    builder orders entries by relevance — row scalars before
+    headlines — so the chosen label is the most informative one.
+    """
+    if not text:
+        return {}
+    out: dict[str, str] = {}
+    for match in _TOKEN_PATTERN.finditer(text):
+        token = match.group(0)
+        if token in out:
+            continue  # First occurrence in text wins for UI stability.
+        lowered = token.lower()
+        if lowered in allowance:
+            continue
+        for entry_text, source_label in corpus_entries:
+            if lowered in entry_text.lower():
+                out[token] = source_label
+                break
+    return out
 
 
 def _build_allowance(
@@ -403,10 +479,18 @@ def _scrub_section(
     section: ThesisSection,
     path: str,
     corpus: str,
+    corpus_entries: list[tuple[str, str]],
     allowance: frozenset[str],
     dropped: list[DroppedClaim],
 ) -> ThesisSection:
-    """Validate ``section.body`` + each bullet; return a new ThesisSection."""
+    """Validate ``section.body`` + each bullet; return a new ThesisSection.
+
+    Also attaches per-token provenance covering tokens in the body
+    AND any surviving bullets. The provenance map is a single dict
+    per section — duplicate tokens (same token appearing in body
+    and bullets) collapse to one entry (body takes precedence since
+    we merge body first).
+    """
     new_body, body_dropped = _scrub_text(section.body, f"{path}.body", corpus, allowance)
     new_bullets: list[str] = []
     for i, bullet in enumerate(section.bullets):
@@ -419,13 +503,23 @@ def _scrub_section(
             new_bullets.append(kept)
         body_dropped.extend(dropped_for_bullet)
     dropped.extend(body_dropped)
-    return replace(section, body=new_body, bullets=tuple(new_bullets))
+    provenance = _token_provenance(new_body, corpus_entries, allowance)
+    for bullet in new_bullets:
+        for token, label in _token_provenance(bullet, corpus_entries, allowance).items():
+            provenance.setdefault(token, label)
+    return replace(
+        section,
+        body=new_body,
+        bullets=tuple(new_bullets),
+        provenance=provenance,
+    )
 
 
 def _scrub_arguments(
     args: tuple[BullBearArgument, ...],
     path: str,
     corpus: str,
+    corpus_entries: list[tuple[str, str]],
     allowance: frozenset[str],
     dropped: list[DroppedClaim],
 ) -> tuple[BullBearArgument, ...]:
@@ -437,7 +531,10 @@ def _scrub_arguments(
         )
         dropped.extend(arg_dropped)
         if new_detail.strip():
-            out.append(replace(arg, detail=new_detail))
+            provenance = _token_provenance(
+                new_detail, corpus_entries, allowance
+            )
+            out.append(replace(arg, detail=new_detail, provenance=provenance))
     return tuple(out)
 
 
@@ -445,6 +542,7 @@ def _scrub_catalysts(
     items: tuple[Catalyst, ...],
     path: str,
     corpus: str,
+    corpus_entries: list[tuple[str, str]],
     allowance: frozenset[str],
     dropped: list[DroppedClaim],
 ) -> tuple[Catalyst, ...]:
@@ -455,7 +553,10 @@ def _scrub_catalysts(
         )
         dropped.extend(item_dropped)
         if new_detail.strip():
-            out.append(replace(item, detail=new_detail))
+            provenance = _token_provenance(
+                new_detail, corpus_entries, allowance
+            )
+            out.append(replace(item, detail=new_detail, provenance=provenance))
     return tuple(out)
 
 
@@ -463,6 +564,7 @@ def _scrub_outlook(
     items: tuple[OutlookEntry, ...],
     path: str,
     corpus: str,
+    corpus_entries: list[tuple[str, str]],
     allowance: frozenset[str],
     dropped: list[DroppedClaim],
 ) -> tuple[OutlookEntry, ...]:
@@ -473,7 +575,10 @@ def _scrub_outlook(
         )
         dropped.extend(item_dropped)
         if new_detail.strip():
-            out.append(replace(item, detail=new_detail))
+            provenance = _token_provenance(
+                new_detail, corpus_entries, allowance
+            )
+            out.append(replace(item, detail=new_detail, provenance=provenance))
     return tuple(out)
 
 
@@ -481,13 +586,16 @@ def _scrub_metrics(
     items: tuple[MetricEntry, ...],
     path: str,
     corpus: str,
+    corpus_entries: list[tuple[str, str]],
     allowance: frozenset[str],
     dropped: list[DroppedClaim],
 ) -> tuple[MetricEntry, ...]:
     """Metric values are numeric strings. Drop the entry whole if value is unsupported.
 
     Unlike prose, a metric card with no value is useless — a bad
-    value means the whole card goes.
+    value means the whole card goes. Surviving metrics get a
+    provenance dict over the value tokens so the UI can tooltip
+    the value chip.
     """
     out: list[MetricEntry] = []
     for i, item in enumerate(items):
@@ -501,7 +609,8 @@ def _scrub_metrics(
                 )
             )
             continue
-        out.append(item)
+        provenance = _token_provenance(item.value, corpus_entries, allowance)
+        out.append(replace(item, provenance=provenance))
     return tuple(out)
 
 

@@ -1,6 +1,8 @@
 import { useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { ProvenanceMap } from "@/lib/research";
+import { ProvenanceProse } from "./ProvenanceProse";
 
 interface Props {
   title: string;
@@ -65,20 +67,29 @@ export function ThesisSection({
 /**
  * Common renderer for a `ThesisSection` payload (prose + bullets).
  * Used inside section cards that wrap server-provided text.
+ *
+ * When ``provenance`` is supplied, the body + bullets render through
+ * :component:`ProvenanceProse` — numeric tokens get hover tooltips
+ * showing their source field. Empty provenance map = plain text.
  */
 export function ProseAndBullets({
   body,
   bullets,
+  provenance,
 }: {
   body: string;
   bullets: string[];
+  provenance?: ProvenanceMap;
 }) {
+  const map = provenance ?? {};
   return (
     <div className="space-y-3">
       {body && (
         <div className="space-y-2 text-[13px] leading-relaxed text-foreground/90">
           {body.split(/\n{2,}/).map((p, i) => (
-            <p key={i}>{p}</p>
+            <p key={i}>
+              <ProvenanceProse body={p} provenance={map} />
+            </p>
           ))}
         </div>
       )}
@@ -86,7 +97,7 @@ export function ProseAndBullets({
         <ul className="space-y-1.5 border-l border-border/40 pl-3">
           {bullets.map((b, i) => (
             <li key={i} className="text-[13px] leading-relaxed text-muted-foreground">
-              {b}
+              <ProvenanceProse body={b} provenance={map} />
             </li>
           ))}
         </ul>

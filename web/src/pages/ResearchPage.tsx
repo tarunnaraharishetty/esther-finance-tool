@@ -140,6 +140,7 @@ export function ResearchPage({
               <ProseAndBullets
                 body={thesis.company_overview.body}
                 bullets={thesis.company_overview.bullets}
+                provenance={thesis.company_overview.provenance}
               />
             </ThesisSection>
 
@@ -166,6 +167,7 @@ export function ResearchPage({
               <ProseAndBullets
                 body={thesis.technical_analysis.body}
                 bullets={thesis.technical_analysis.bullets}
+                provenance={thesis.technical_analysis.provenance}
               />
             </ThesisSection>
 
@@ -177,6 +179,7 @@ export function ResearchPage({
               <ProseAndBullets
                 body={thesis.fundamental_analysis.body}
                 bullets={thesis.fundamental_analysis.bullets}
+                provenance={thesis.fundamental_analysis.provenance}
               />
             </ThesisSection>
 
@@ -188,6 +191,7 @@ export function ResearchPage({
               <ProseAndBullets
                 body={thesis.sentiment_news.body}
                 bullets={thesis.sentiment_news.bullets}
+                provenance={thesis.sentiment_news.provenance}
               />
             </ThesisSection>
 
@@ -207,6 +211,7 @@ export function ResearchPage({
               <ProseAndBullets
                 body={thesis.risk_assessment.body}
                 bullets={thesis.risk_assessment.bullets}
+                provenance={thesis.risk_assessment.provenance}
               />
             </ThesisSection>
 
@@ -226,6 +231,7 @@ export function ResearchPage({
               <ProseAndBullets
                 body={thesis.explainability.body}
                 bullets={thesis.explainability.bullets}
+                provenance={thesis.explainability.provenance}
               />
             </ThesisSection>
 

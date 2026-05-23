@@ -1,5 +1,6 @@
 import type { MetricEntry } from "@/lib/research";
 import { cn } from "@/lib/utils";
+import { ProvenanceProse } from "./ProvenanceProse";
 
 interface Props {
   metrics: MetricEntry[];
@@ -40,7 +41,7 @@ function MetricCard({ metric }: { metric: MetricEntry }) {
           metric.tone === "warn" && "text-warn",
         )}
       >
-        {metric.value}
+        <ProvenanceProse body={metric.value} provenance={metric.provenance} />
       </div>
       {metric.delta && (
         <div className="font-mono text-[10px] tabular-nums text-muted-foreground">

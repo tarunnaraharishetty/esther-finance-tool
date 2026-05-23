@@ -1,5 +1,6 @@
 import type { OutlookEntry } from "@/lib/research";
 import { cn } from "@/lib/utils";
+import { ProvenanceProse } from "./ProvenanceProse";
 
 interface Props {
   outlook: OutlookEntry[];
@@ -88,7 +89,7 @@ function OutlookCard({ entry }: { entry: OutlookEntry }) {
         </div>
       </div>
       <p className="mt-2 text-[12px] leading-relaxed text-muted-foreground">
-        {entry.detail}
+        <ProvenanceProse body={entry.detail} provenance={entry.provenance} />
       </p>
     </div>
   );

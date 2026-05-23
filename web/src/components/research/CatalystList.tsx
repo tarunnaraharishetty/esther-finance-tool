@@ -1,6 +1,7 @@
 import { CalendarClock } from "lucide-react";
 import type { Catalyst } from "@/lib/research";
 import { cn } from "@/lib/utils";
+import { ProvenanceProse } from "./ProvenanceProse";
 
 interface Props {
   catalysts: Catalyst[];
@@ -70,7 +71,10 @@ function Row({ catalyst }: { catalyst: Catalyst }) {
           </span>
         </div>
         <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-          {catalyst.detail}
+          <ProvenanceProse
+            body={catalyst.detail}
+            provenance={catalyst.provenance}
+          />
         </p>
       </div>
     </div>
