@@ -1,4 +1,5 @@
 import { AiSummary } from "@/components/dashboard/AiSummary";
+import { DriverSpotlight } from "@/components/dashboard/DriverSpotlight";
 import { TopPicks } from "@/components/dashboard/TopPicks";
 import { Watchlist } from "@/components/dashboard/Watchlist";
 import { Pulse } from "@/components/dashboard/Pulse";
@@ -23,6 +24,11 @@ export function DashboardPage({
   return (
     <div className="space-y-5">
       <AiSummary snapshot={snapshot} />
+
+      <DriverSpotlight
+        watchlistFingerprint={snapshot.rows.length}
+        onSelectSymbol={setActiveSymbol}
+      />
 
       <Section
         title="Top Picks"
