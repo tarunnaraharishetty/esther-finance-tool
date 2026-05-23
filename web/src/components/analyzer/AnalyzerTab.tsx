@@ -7,6 +7,7 @@ import { AiExplanation } from "./AiExplanation";
 import { BullBearCases } from "./BullBearCases";
 import { CalibrationStrip } from "./CalibrationStrip";
 import { FairValueRange } from "./FairValueRange";
+import { KeyDriversPanel } from "./KeyDriversPanel";
 import { OverboughtSpectrum } from "./OverboughtSpectrum";
 import { RiskWarnings } from "./RiskWarnings";
 import { ScenarioRange } from "./ScenarioRange";
@@ -80,6 +81,8 @@ export function AnalyzerTab({ symbol }: Props) {
             : "Refresh"}
         </button>
       </div>
+
+      <KeyDriversPanel symbol={report.symbol} />
 
       <ScoreHeader
         symbol={report.symbol}

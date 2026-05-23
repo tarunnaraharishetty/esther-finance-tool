@@ -57,6 +57,7 @@ from src.api.compare import register_compare_routes
 from src.api.fundamentals import register_fundamentals_routes
 from src.api.health import register_health_routes
 from src.api.history import register_history_routes
+from src.api.movement import register_movement_routes
 from src.api.research import register_research_routes
 from src.api.sector import register_sector_routes
 from src.config import get_settings
@@ -102,6 +103,7 @@ def create_app(
     research_cache_dir: Path | None = None,
     compare_narrative_cache_dir: Path | None = None,
     sector_cache_dir: Path | None = None,
+    movement_cache_dir: Path | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a controller.
 
@@ -419,6 +421,15 @@ def create_app(
         else settings.project_root / "data" / "sector_cache"
     )
     register_sector_routes(app, controller, cache_dir=sector_cache)
+
+    # Key Drivers endpoint — composes analyzer + sector + row, so it
+    # must be registered after both the analyzer and sector routes.
+    movement_cache = (
+        movement_cache_dir
+        if movement_cache_dir is not None
+        else settings.project_root / "data" / "movement_cache"
+    )
+    register_movement_routes(app, controller, cache_dir=movement_cache)
 
     # Per-symbol historical outcomes drill-down. Only registered when
     # the calibration store exists — when calibration is disabled,
