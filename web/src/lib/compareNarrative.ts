@@ -13,6 +13,7 @@
 
 import { useCallback, useRef, useState } from "react";
 
+import type { ProvenanceMap } from "@/lib/provenance";
 import type { TrustScore } from "@/lib/trust";
 
 export type NarrativeMode = "template" | "llm" | "auto";
@@ -21,6 +22,11 @@ export interface NarrativeSection {
   title: string;
   body: string;
   bullets: string[];
+  /** Per-token source-field map produced by the compare narrative
+   *  validator. Empty when the validator hasn't run or no tokens
+   *  grounded. Frontend renders entries as hover tooltips via the
+   *  shared `ProvenanceProse` component. */
+  provenance: ProvenanceMap;
 }
 
 export interface DroppedNarrativeClaim {

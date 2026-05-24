@@ -26,7 +26,7 @@ fixed section*, not to invent organization.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 from xml.etree import ElementTree as ET
@@ -76,17 +76,26 @@ class NarrativeSection:
     ``bullets`` are the supporting numeric reads — typically 2-4
     short data points. After validation either field may be empty
     if every claim got dropped.
+
+    ``provenance`` maps surviving numeric tokens to their source-field
+    labels (e.g. ``"left.trust_score.score"`` /
+    ``"view.trust.trust_score.right"``). Empty when the validator
+    hasn't run or no tokens grounded. The frontend renders provenance
+    entries as hover tooltips so any numeric in the narrative is
+    traceable to its source side + field with one mouseover.
     """
 
     title: str
     body: str
     bullets: tuple[str, ...] = ()
+    provenance: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "title": self.title,
             "body": self.body,
             "bullets": list(self.bullets),
+            "provenance": dict(self.provenance),
         }
 
 
@@ -673,6 +682,7 @@ def replace_section(
     *,
     body: str | None = None,
     bullets: tuple[str, ...] | None = None,
+    provenance: dict[str, str] | None = None,
 ) -> ComparisonNarrative:
     """Return a copy of ``narrative`` with one section replaced.
 
@@ -688,6 +698,8 @@ def replace_section(
         updates["body"] = body
     if bullets is not None:
         updates["bullets"] = bullets
+    if provenance is not None:
+        updates["provenance"] = provenance
     new_section = replace(section, **updates)
     # mypy can't statically prove that ``key`` is one of the dataclass
     # field names — assert membership via SECTION_KEYS (checked above)

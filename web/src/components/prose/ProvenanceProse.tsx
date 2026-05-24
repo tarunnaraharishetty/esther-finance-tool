@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { ProvenanceMap } from "@/lib/research";
+import type { ProvenanceMap } from "@/lib/provenance";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -13,12 +13,13 @@ interface Props {
  * Renders a prose body with hover-tooltips over numeric tokens that
  * have provenance entries.
  *
- * The body comes from the research validator's surviving prose;
- * provenance is the per-section ``{token: source_field}`` map the
- * validator emits alongside. We tokenize the body using the SAME
- * regex the validator uses, wrap any token present in the provenance
- * map in a ``<span title="Sourced from …">``, and render the rest
- * as plain text.
+ * Shared by every grounded-AI surface: the research thesis sections,
+ * the compare narrative sections, and any future LLM surface that
+ * emits a {token: source_field} provenance map alongside its prose.
+ * We tokenize the body using the SAME regex the backend validators
+ * use, wrap any token present in the provenance map in a
+ * ``<span title="Sourced from …">``, and render the rest as plain
+ * text.
  *
  * Why hover tooltips (not click popovers): the audit story is
  * "every number is traceable in one mouseover." A click would force
@@ -67,12 +68,14 @@ type Segment =
   | { kind: "token"; text: string; source: string };
 
 /**
- * Mirror of the validator's `_TOKEN_PATTERN` (kept in sync manually).
- * Splits the body into alternating plain-text + numeric-token segments
- * so the renderer can wrap tokens individually.
+ * Mirror of the backend validators' `_TOKEN_PATTERN` (kept in sync
+ * manually across `research_validator.py` and
+ * `comparison_narrative_validator.py`). Splits the body into
+ * alternating plain-text + numeric-token segments so the renderer
+ * can wrap tokens individually.
  *
- * If the backend's regex evolves, update this one too — the contract
- * is "the validator's numeric tokens are the provenance keys" and
+ * If a backend's regex evolves, update this one too — the contract
+ * is "the validators' numeric tokens are the provenance keys" and
  * the frontend must match the same surface forms.
  */
 const TOKEN_RE =

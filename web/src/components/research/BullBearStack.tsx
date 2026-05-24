@@ -1,7 +1,7 @@
 import { TrendingDown, TrendingUp } from "lucide-react";
 import type { BullBearArgument } from "@/lib/research";
 import { cn } from "@/lib/utils";
-import { ProvenanceProse } from "./ProvenanceProse";
+import { ProvenanceProse } from "@/components/prose/ProvenanceProse";
 
 interface Props {
   bull: BullBearArgument[];

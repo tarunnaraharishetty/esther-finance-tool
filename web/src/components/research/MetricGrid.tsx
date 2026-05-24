@@ -1,6 +1,6 @@
 import type { MetricEntry } from "@/lib/research";
 import { cn } from "@/lib/utils";
-import { ProvenanceProse } from "./ProvenanceProse";
+import { ProvenanceProse } from "@/components/prose/ProvenanceProse";
 
 interface Props {
   metrics: MetricEntry[];

@@ -12,6 +12,7 @@ function section(over: Partial<NarrativeSection> = {}): NarrativeSection {
     title: "Stub",
     body: "Stub body sentence.",
     bullets: [],
+    provenance: {},
     ...over,
   };
 }
@@ -196,6 +197,34 @@ describe("NarrativePanel", () => {
       return p;
     });
     expect(panel).toHaveTextContent(/AI narrative failed/);
+  });
+
+  it("renders body tokens as provenance spans when section.provenance is set", async () => {
+    mockFetchOk(
+      narrative({
+        momentum: section({
+          title: "Momentum",
+          body: "AAA reads $180.50 against an oversold 60.0 setup.",
+          provenance: {
+            "$180.50": "left.last_price",
+            "60.0": "left.technicals.oversold_score",
+          },
+        }),
+      }),
+    );
+    render(<NarrativePanel leftSymbol="AAA" rightSymbol="BBB" />);
+    fireEvent.click(screen.getByRole("button", { name: /Generate/i }));
+    const panel = await waitFor(() => {
+      const p = screen.getByTestId("narrative-panel");
+      expect(p.getAttribute("data-state")).toBe("ready");
+      return p;
+    });
+    const tokens = panel.querySelectorAll('[data-testid="prose-token"]');
+    const sources = Array.from(tokens).map((t) =>
+      t.getAttribute("data-source"),
+    );
+    expect(sources).toContain("left.last_price");
+    expect(sources).toContain("left.technicals.oversold_score");
   });
 
   it("renders the error state with a retry button when the fetch fails", async () => {

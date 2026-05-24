@@ -366,7 +366,7 @@ def test_narrative_endpoint_template_mode_returns_grounded_narrative(
         "bottom_line",
     ):
         section = body[key]
-        assert set(section.keys()) == {"title", "body", "bullets"}
+        assert set(section.keys()) == {"title", "body", "bullets", "provenance"}
         assert isinstance(section["bullets"], list)
 
 

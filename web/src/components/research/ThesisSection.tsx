@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ProvenanceMap } from "@/lib/research";
-import { ProvenanceProse } from "./ProvenanceProse";
+import { ProvenanceProse } from "@/components/prose/ProvenanceProse";
 
 interface Props {
   title: string;

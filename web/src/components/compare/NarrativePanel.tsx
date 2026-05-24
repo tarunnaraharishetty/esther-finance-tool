@@ -15,6 +15,7 @@ import {
   type NarrativeMode,
   type NarrativeValidation,
 } from "@/lib/compareNarrative";
+import { ProvenanceProse } from "@/components/prose/ProvenanceProse";
 import { TrustScoreBadge } from "@/components/trust/TrustScoreBadge";
 import { cn } from "@/lib/utils";
 
@@ -255,7 +256,10 @@ function NarrativeSectionBlock({
             <>
               {section.body.trim() && (
                 <p className="text-[13px] leading-relaxed text-foreground/90">
-                  {section.body}
+                  <ProvenanceProse
+                    body={section.body}
+                    provenance={section.provenance}
+                  />
                 </p>
               )}
               {section.bullets.length > 0 && (
@@ -266,7 +270,10 @@ function NarrativeSectionBlock({
                       className="flex items-start gap-2 text-[12px] text-muted-foreground"
                     >
                       <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-muted-foreground/60" />
-                      <span>{b}</span>
+                      <ProvenanceProse
+                        body={b}
+                        provenance={section.provenance}
+                      />
                     </li>
                   ))}
                 </ul>

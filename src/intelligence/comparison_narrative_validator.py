@@ -85,7 +85,12 @@ def validate_narrative(
     nothing to ground a momentum claim." Bullets that scrub out are
     dropped entirely.
     """
-    corpus = _build_corpus(narrative, view, left_report, right_report)
+    corpus_entries = _build_corpus_entries(
+        narrative, view, left_report, right_report
+    )
+    corpus = " ".join(
+        text for text, _label in corpus_entries if text
+    ).lower()
     allowance = _build_allowance(narrative, view)
     dropped: list[DroppedNarrativeClaim] = []
 
@@ -104,8 +109,20 @@ def validate_narrative(
             dropped.extend(bullet_drops)
             if kept.strip():
                 new_bullets.append(kept)
+        # Compute provenance over the surviving body + bullets. Body
+        # wins on duplicate tokens (we merge body first via setdefault).
+        provenance = _token_provenance(new_body, corpus_entries, allowance)
+        for bullet in new_bullets:
+            for token, label in _token_provenance(
+                bullet, corpus_entries, allowance
+            ).items():
+                provenance.setdefault(token, label)
         validated = replace_section(
-            validated, key, body=new_body, bullets=tuple(new_bullets)
+            validated,
+            key,
+            body=new_body,
+            bullets=tuple(new_bullets),
+            provenance=provenance,
         )
 
     # Tagline is short prose — same scrub rules.
@@ -143,37 +160,89 @@ def _build_corpus(
     left_report: dict[str, Any] | None,
     right_report: dict[str, Any] | None,
 ) -> str:
-    """Concatenate every grounding-eligible scalar into one lowercase blob."""
-    parts: list[str] = [
-        narrative.left_symbol,
-        narrative.right_symbol,
-    ]
-    # Pre-computed view metrics — these are the canonical numbers.
+    """Concatenate every grounding-eligible scalar into one lowercase blob.
+
+    Delegates to :func:`_build_corpus_entries` and flattens to the
+    string shape the drop-policy substring matcher expects. Both the
+    drop policy and the provenance graph share one source — adding a
+    field in the entries builder automatically wires it into both.
+    """
+    return " ".join(
+        text for text, _label in _build_corpus_entries(narrative, view, left_report, right_report) if text
+    ).lower()
+
+
+def _build_corpus_entries(
+    narrative: ComparisonNarrative,
+    view: ComparisonView,
+    left_report: dict[str, Any] | None,
+    right_report: dict[str, Any] | None,
+) -> list[tuple[str, str]]:
+    """Build the labeled corpus — each entry is ``(text, source_label)``.
+
+    Source labels distinguish the two sides — ``"left.last_price"``,
+    ``"right.trust_score.score"`` — so the provenance tooltip on a
+    rendered token like ``"$180.50"`` says exactly which symbol it
+    came from. ``"view.*"`` labels carry the pre-computed comparison
+    metric values; those are the canonical numbers the narrator was
+    paraphrasing from in the first place.
+
+    Multiple surface forms of the same value share one source label
+    so hovering ``"180"`` and ``"180.50"`` produces the same tooltip.
+    """
+    entries: list[tuple[str, str]] = []
+    # Symbol tickers themselves.
+    entries.append((narrative.left_symbol, "left.symbol"))
+    entries.append((narrative.right_symbol, "right.symbol"))
+
+    # Pre-computed view metric values — the canonical numbers the
+    # narrator paraphrased from.
     for section in view.sections:
+        section_key = section.title.lower().replace(" ", "_")
         for m in section.metrics:
-            for v in (m.left_value, m.right_value):
-                if v is not None:
-                    parts.extend(_render_numeric_forms(v))
-    # Headline display strings — already formatted for display, include verbatim.
+            if m.left_value is not None:
+                label = f"view.{section_key}.{m.metric}.left"
+                for text in _render_numeric_forms(m.left_value):
+                    entries.append((text, label))
+            if m.right_value is not None:
+                label = f"view.{section_key}.{m.metric}.right"
+                for text in _render_numeric_forms(m.right_value):
+                    entries.append((text, label))
+
+    # Headline display strings (e.g. "$180.50", "A+", "92") map back
+    # to view headline columns. Both sides labeled so left/right
+    # disambiguation flows to the tooltip.
     for h in view.headline:
-        parts.append(h.left_display)
-        parts.append(h.right_display)
-    # Raw reports — extract every grounding-eligible scalar.
-    for report in (left_report, right_report):
-        if report is not None:
-            parts.extend(_extract_report_scalars(report))
-    return " ".join(str(p) for p in parts if p).lower()
+        label_key = h.label.lower().replace(" ", "_")
+        entries.append((h.left_display, f"view.headline.{label_key}.left"))
+        entries.append((h.right_display, f"view.headline.{label_key}.right"))
+
+    # Raw report scalars per side.
+    if left_report is not None:
+        entries.extend(_extract_report_entries(left_report, "left"))
+    if right_report is not None:
+        entries.extend(_extract_report_entries(right_report, "right"))
+
+    # Filter out empty-text entries — they'd substring-match everything.
+    return [(text, label) for text, label in entries if text]
 
 
-def _extract_report_scalars(report: dict[str, Any]) -> list[str]:
-    """Pull every value from the analyzer report worth grounding against."""
-    parts: list[str] = []
+def _extract_report_entries(
+    report: dict[str, Any], side: str
+) -> list[tuple[str, str]]:
+    """Pull labeled scalars from one side's analyzer report.
+
+    ``side`` is ``"left"`` or ``"right"`` and prefixes every label so
+    the provenance tooltip carries the side context.
+    """
+    entries: list[tuple[str, str]] = []
     symbol = report.get("symbol")
     if symbol:
-        parts.append(str(symbol))
+        entries.append((str(symbol), f"{side}.symbol"))
     last_price = report.get("last_price")
     if last_price is not None:
-        parts.extend(_render_numeric_forms(last_price))
+        for text in _render_numeric_forms(last_price):
+            entries.append((text, f"{side}.last_price"))
     for key in (
         "overall_analyzer_score",
         "technical_score",
@@ -182,7 +251,8 @@ def _extract_report_scalars(report: dict[str, Any]) -> list[str]:
     ):
         v = report.get(key)
         if v is not None:
-            parts.extend(_render_numeric_forms(v))
+            for text in _render_numeric_forms(v):
+                entries.append((text, f"{side}.{key}"))
     technicals = report.get("technicals") or {}
     for k in (
         "overbought_score",
@@ -198,7 +268,9 @@ def _extract_report_scalars(report: dict[str, Any]) -> list[str]:
     ):
         v = technicals.get(k)
         if v is not None:
-            parts.extend(_render_numeric_forms(v))
+            label = f"{side}.technicals.{k}"
+            for text in _render_numeric_forms(v):
+                entries.append((text, label))
     valuation = report.get("valuation") or {}
     for k in (
         "bear_case",
@@ -209,25 +281,60 @@ def _extract_report_scalars(report: dict[str, Any]) -> list[str]:
     ):
         v = valuation.get(k)
         if v is not None:
-            parts.extend(_render_numeric_forms(v))
+            label = f"{side}.valuation.{k}"
+            for text in _render_numeric_forms(v):
+                entries.append((text, label))
     fresh = report.get("fundamentals_freshness") or {}
     for k in ("freshness", "data_age_days", "provider_confidence"):
         v = fresh.get(k)
         if v is not None:
-            parts.append(str(v))
+            label = f"{side}.fundamentals_freshness.{k}"
+            entries.append((str(v), label))
             if isinstance(v, (int, float)):
-                parts.extend(_render_numeric_forms(v))
+                for text in _render_numeric_forms(v):
+                    entries.append((text, label))
     chain = fresh.get("source_chain") if fresh else None
     if isinstance(chain, list):
-        parts.extend(str(p) for p in chain)
+        for i, p in enumerate(chain):
+            entries.append((str(p), f"{side}.source_chain[{i}]"))
     trust = report.get("trust_score") or {}
     score = trust.get("score")
     if score is not None:
-        parts.extend(_render_numeric_forms(score))
+        for text in _render_numeric_forms(score):
+            entries.append((text, f"{side}.trust_score.score"))
     grade = trust.get("grade")
     if grade:
-        parts.append(str(grade))
-    return parts
+        entries.append((str(grade), f"{side}.trust_score.grade"))
+    return entries
+
+
+def _token_provenance(
+    text: str,
+    corpus_entries: list[tuple[str, str]],
+    allowance: frozenset[str],
+) -> dict[str, str]:
+    """Record the source label for each supported numeric token in ``text``.
+
+    Mirrors :func:`src.intelligence.research_validator._token_provenance` —
+    same regex, same allowance-skip semantics, same first-match-wins
+    ordering. Returns ``{original_token: source_label}`` for tokens
+    that substring-match a corpus entry.
+    """
+    if not text:
+        return {}
+    out: dict[str, str] = {}
+    for match in _TOKEN_PATTERN.finditer(text):
+        token = match.group(0)
+        if token in out:
+            continue
+        lowered = token.lower()
+        if lowered in allowance:
+            continue
+        for entry_text, source_label in corpus_entries:
+            if lowered in entry_text.lower():
+                out[token] = source_label
+                break
+    return out
 
 
 def _render_numeric_forms(value: float | int) -> list[str]:

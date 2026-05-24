@@ -18,19 +18,13 @@ export type Rating =
   | "sell"
   | "strong_sell";
 
-/**
- * Per-section provenance map produced by the research validator.
- *
- * Keys are the verbatim numeric tokens that appeared in the section's
- * prose (e.g. ``"$101.61"``, ``"73%"``); values are short dotted
- * paths describing the source field (e.g. ``"row.last_price"``,
- * ``"fundamentals.pe"``). The `ProvenanceProse` component renders
- * matching tokens as hover-tooltipped spans so any number in the
- * thesis is traceable to its source field with one mouseover.
- *
- * Empty when the validator hasn't run or no tokens grounded.
- */
-export type ProvenanceMap = Record<string, string>;
+// Re-export the shared ProvenanceMap so existing imports keep working.
+// The canonical definition lives in `@/lib/provenance` so the type
+// can be reused by surfaces that don't depend on research (e.g.
+// the compare narrative).
+import type { ProvenanceMap } from "./provenance";
+
+export type { ProvenanceMap };
 
 export interface ThesisSection {
   title: string;
