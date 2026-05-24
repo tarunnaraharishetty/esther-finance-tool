@@ -152,6 +152,28 @@ class Settings(BaseSettings):
     # that don't exercise the /api/health/providers endpoint.
     health_store_path: Path | None = PROJECT_ROOT / "data" / "health.db"
 
+    # ---- Auth / sessions ----
+    # User accounts + session tokens live here. Separate from the
+    # health/analyzer DBs because user state has different backup +
+    # access-control needs than observability. Set to ``None``
+    # (env: ``USER_STORE_PATH=``) to disable auth entirely — useful
+    # for the single-user dev workflow that pre-dates accounts.
+    user_store_path: Path | None = PROJECT_ROOT / "data" / "users.db"
+    # Key used to sign session cookies. Dev fallback is a
+    # human-readable string — for any deployment you'd flip this in
+    # the env (``SESSION_SECRET_KEY=…``). Length isn't enforced;
+    # itsdangerous accepts arbitrary bytes.
+    session_secret_key: SecretStr = SecretStr(
+        "esther-dev-session-key-change-in-production"
+    )
+    # Session lifetime. 30 days matches the default browser cookie
+    # expectation for "stay logged in" — long enough to feel
+    # persistent, short enough to bound exposure on a stolen device.
+    session_ttl_days: int = 30
+    # Cookie name. Stable across deployments; changing this would
+    # invalidate every issued session.
+    session_cookie_name: str = "esther_session"
+
     # ---- Analyzer / valuation ----
     # Sector-median multiples (P/E, EV/EBITDA, P/S, PEG) used by the
     # multiple-based valuation models. Shipped seed lives at

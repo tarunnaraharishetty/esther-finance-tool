@@ -3,6 +3,7 @@ import { Sidebar, type NavKey } from "./Sidebar";
 import { TopNav } from "./TopNav";
 import { Footer } from "./Footer";
 import { MarketTickerStrip } from "./MarketTickerStrip";
+import type { AuthUser } from "@/lib/auth";
 import type { StreamStatus } from "@/lib/stream";
 
 interface Props {
@@ -15,6 +16,10 @@ interface Props {
   onSearch?: (query: string) => void;
   onOpenPalette?: () => void;
   navCounts?: Partial<Record<NavKey, number>>;
+  /** When set, header renders the real account menu instead of the
+   *  legacy placeholder avatar. Wired from App's session state. */
+  authUser?: AuthUser | null;
+  onLogout?: () => Promise<void>;
   children: ReactNode;
 }
 
@@ -28,6 +33,8 @@ export function AppShell({
   onSearch,
   onOpenPalette,
   navCounts,
+  authUser,
+  onLogout,
   children,
 }: Props) {
   const [desktopCollapsed, setDesktopCollapsed] = useState(false);
@@ -63,6 +70,8 @@ export function AppShell({
           onToggleSidebar={handleToggle}
           onSearch={onSearch}
           onOpenPalette={onOpenPalette}
+          authUser={authUser}
+          onLogout={onLogout}
         />
         <MarketTickerStrip />
         <main className="flex-1 overflow-auto p-4 lg:p-6">{children}</main>

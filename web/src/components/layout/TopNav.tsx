@@ -3,7 +3,8 @@ import { Bell, Menu, Search, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MarketClock } from "./MarketClock";
-import { useUser } from "@/lib/auth";
+import { UserMenu } from "./UserMenu";
+import { useUser, type AuthUser } from "@/lib/auth";
 import type { StreamStatus } from "@/lib/stream";
 import { cn } from "@/lib/utils";
 
@@ -15,6 +16,10 @@ interface Props {
   onToggleSidebar: () => void;
   onSearch?: (query: string) => void;
   onOpenPalette?: () => void;
+  /** Set when a real session exists; renders UserMenu instead of
+   *  the legacy placeholder avatar. */
+  authUser?: AuthUser | null;
+  onLogout?: () => Promise<void>;
 }
 
 export function TopNav({
@@ -25,6 +30,8 @@ export function TopNav({
   onToggleSidebar,
   onSearch,
   onOpenPalette,
+  authUser,
+  onLogout,
 }: Props) {
   const [query, setQuery] = useState("");
   const user = useUser();
@@ -76,14 +83,18 @@ export function TopNav({
         <Button variant="ghost" size="icon" aria-label="Notifications">
           <Bell className="h-4 w-4" />
         </Button>
-        <div className="flex items-center gap-2 rounded-full border border-border/60 bg-secondary/40 py-1 pl-1 pr-3 transition-colors hover:border-primary/40">
-          <div className="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br from-primary to-accent shadow-glow">
-            <User className="h-3.5 w-3.5 text-primary-foreground" />
+        {authUser && onLogout ? (
+          <UserMenu user={authUser} onLogout={onLogout} />
+        ) : (
+          <div className="flex items-center gap-2 rounded-full border border-border/60 bg-secondary/40 py-1 pl-1 pr-3 transition-colors hover:border-primary/40">
+            <div className="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br from-primary to-accent shadow-glow">
+              <User className="h-3.5 w-3.5 text-primary-foreground" />
+            </div>
+            <span className="hidden text-xs font-medium md:inline">
+              {user.name}
+            </span>
           </div>
-          <span className="hidden text-xs font-medium md:inline">
-            {user.name}
-          </span>
-        </div>
+        )}
       </div>
     </header>
   );

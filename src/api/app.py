@@ -52,6 +52,7 @@ from starlette.responses import FileResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
 from src.api.analyzer import register_analyzer_routes
+from src.api.auth import register_auth_routes
 from src.api.broker import SnapshotBroker
 from src.api.compare import register_compare_routes
 from src.api.fundamentals import register_fundamentals_routes
@@ -70,6 +71,7 @@ from src.data.retry_worker import (
     RetryWorker,
     TransientRetryFailure,
 )
+from src.data.user_store import UserStore
 from src.intelligence.calibration import CalibrationStore
 from src.intelligence.calibration_worker import (
     CalibrationMaturationWorker,
@@ -107,6 +109,7 @@ def create_app(
     movement_cache_dir: Path | None = None,
     spotlight_cache_dir: Path | None = None,
     accuracy_store: AccuracyStore | None = None,
+    user_store: UserStore | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a controller.
 
@@ -339,6 +342,30 @@ def create_app(
         and settings.health_store_path is not None
     ):
         effective_accuracy_store = AccuracyStore(settings.health_store_path)
+
+    # User store + auth routes. Same opt-out shape as the others —
+    # ``USER_STORE_PATH=`` in env disables auth entirely (the
+    # dev/single-user workflow that pre-dates accounts). When a
+    # store IS wired, /api/auth/* mounts and the session-aware
+    # dependencies become available on every request.
+    effective_user_store: UserStore | None = user_store
+    if (
+        effective_user_store is None
+        and settings.user_store_path is not None
+    ):
+        effective_user_store = UserStore(settings.user_store_path)
+    if effective_user_store is not None:
+        register_auth_routes(
+            app,
+            user_store=effective_user_store,
+            session_secret=settings.session_secret_key.get_secret_value(),
+            session_ttl_days=settings.session_ttl_days,
+            cookie_name=settings.session_cookie_name,
+            # Secure cookies require HTTPS. Off in dev (localhost),
+            # production deployments should flip ``ESTHER_SECURE_COOKIES=1``
+            # — exposed via Settings.app_env once we wire that.
+            secure_cookies=False,
+        )
 
     # Retry queue: same opt-out shape. ``retry_queue_path=None`` in
     # settings disables persistence; otherwise we wire one up.

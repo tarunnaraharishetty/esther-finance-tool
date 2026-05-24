@@ -1,10 +1,12 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Bell, TrendingDown, TrendingUp } from "lucide-react";
+import { AlertTriangle, Bell, Loader2, TrendingDown, TrendingUp } from "lucide-react";
+import { useSession } from "@/lib/auth";
 import { useSnapshotStream } from "@/lib/stream";
 import { lookupTicker } from "@/lib/tickers";
 import { AppShell } from "@/components/layout/AppShell";
 import type { NavKey } from "@/components/layout/Sidebar";
 import { DashboardPage } from "@/pages/DashboardPage";
+import { LoginPage } from "@/pages/LoginPage";
 import { WatchlistPage } from "@/pages/WatchlistPage";
 import { MoversPage } from "@/pages/MoversPage";
 import { NewsPage } from "@/pages/NewsPage";
@@ -28,6 +30,12 @@ const CommandPalette = lazy(() =>
 );
 
 export default function App() {
+  // Session must resolve before we know whether to render the app
+  // shell or the login screen. While the /api/auth/me request is in
+  // flight we render a neutral loader — flipping straight from
+  // "logged out" to "logged in" without the loader would briefly
+  // flash the LoginPage on every refresh.
+  const session = useSession();
   const { snapshot, status, isStale, msSinceLastEvent } = useSnapshotStream();
   const [activeSymbol, setActiveSymbol] = useState<string | null>(null);
   const [activeNav, setActiveNav] = useState<NavKey>("dashboard");
@@ -79,6 +87,23 @@ export default function App() {
     setActiveNav("charts");
   }, []);
 
+  // Pre-render gate: hold the login flip until /me settles. Once
+  // resolved, an absent user redirects to the LoginPage; a present
+  // user falls through to the app shell.
+  if (!session.resolved) {
+    return (
+      <div
+        data-testid="auth-loading"
+        className="grid min-h-screen place-items-center bg-background"
+      >
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+  if (session.user === null) {
+    return <LoginPage onLogin={session.login} onSignup={session.signup} />;
+  }
+
   return (
     <>
       <AppShell
@@ -90,6 +115,8 @@ export default function App() {
         onNavChange={setActiveNav}
         onSearch={handleSearch}
         onOpenPalette={() => setPaletteOpen(true)}
+        authUser={session.user}
+        onLogout={session.logout}
         navCounts={{
           watchlist: snapshot?.rows.length ?? 0,
           news: snapshot
