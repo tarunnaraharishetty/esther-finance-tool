@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, Search } from "lucide-react";
 import { Watchlist } from "@/components/dashboard/Watchlist";
+import { WatchlistEditor } from "@/components/watchlist/WatchlistEditor";
 import { Panel } from "@/components/layout/Panel";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -10,6 +11,15 @@ interface Props {
   snapshot: DashboardSnapshot;
   activeSymbol: string | null;
   setActiveSymbol: (s: string) => void;
+  /** When set, render the editor above the table. ``null`` means
+   *  the viewer is anonymous and editing is disabled. */
+  editor?: {
+    symbols: string[];
+    onAdd: (symbol: string) => Promise<void>;
+    onRemove: (symbol: string) => Promise<void>;
+    busy: boolean;
+    resolved: boolean;
+  } | null;
 }
 
 type Filter = "all" | "buy" | "sell" | "hold";
@@ -19,6 +29,7 @@ export function WatchlistPage({
   snapshot,
   activeSymbol,
   setActiveSymbol,
+  editor,
 }: Props) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
@@ -52,10 +63,20 @@ export function WatchlistPage({
   }, [snapshot.rows, query, filter, sortKey, sortDir]);
 
   return (
-    <Panel
-      title="Watchlist"
-      subtitle={`${rows.length} of ${counts.all} · ${sortKey} ${sortDir}`}
-    >
+    <>
+      {editor && (
+        <WatchlistEditor
+          symbols={editor.symbols}
+          onAdd={editor.onAdd}
+          onRemove={editor.onRemove}
+          busy={editor.busy}
+          resolved={editor.resolved}
+        />
+      )}
+      <Panel
+        title="Watchlist"
+        subtitle={`${rows.length} of ${counts.all} · ${sortKey} ${sortDir}`}
+      >
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="relative max-w-xs flex-1">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -110,12 +131,13 @@ export function WatchlistPage({
         />
       </div>
 
-      <Watchlist
-        rows={rows}
-        activeSymbol={activeSymbol}
-        onSelect={setActiveSymbol}
-      />
-    </Panel>
+        <Watchlist
+          rows={rows}
+          activeSymbol={activeSymbol}
+          onSelect={setActiveSymbol}
+        />
+      </Panel>
+    </>
   );
 }
 

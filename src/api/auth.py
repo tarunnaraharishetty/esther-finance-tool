@@ -27,6 +27,7 @@ let us delete one row and invalidate any in-flight token.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
@@ -88,6 +89,7 @@ def register_auth_routes(
     session_ttl_days: int,
     cookie_name: str,
     secure_cookies: bool = False,
+    post_signup_hook: Callable[[User], None] | None = None,
 ) -> None:
     """Attach ``/api/auth/*`` routes to ``app``.
 
@@ -104,6 +106,13 @@ def register_auth_routes(
         secure_cookies: When True, marks cookies ``Secure`` so they
             only ship over HTTPS. Off in dev (localhost is HTTP);
             production deployments should pass True.
+        post_signup_hook: Optional callback invoked with the new
+            :class:`User` after a successful signup, before the
+            response is returned. ``app.py`` wires the watchlist
+            default-seed through this hook so first-run users land
+            on a populated dashboard. Hook exceptions are logged but
+            don't fail signup (the user still gets an account; the
+            seed is best-effort).
     """
     serializer = URLSafeSerializer(session_secret, salt=_COOKIE_SALT)
     ttl = timedelta(days=session_ttl_days)
@@ -133,6 +142,19 @@ def register_auth_routes(
             ) from None
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
+
+        # Best-effort post-signup hook (e.g. watchlist default seed).
+        # Hook failures must not abort signup — the user exists, the
+        # account works, the seed is convenience not correctness.
+        if post_signup_hook is not None:
+            try:
+                post_signup_hook(user)
+            except Exception as exc:
+                log.warning(
+                    "auth.signup.post_hook_failed",
+                    user_id=user.id,
+                    error=str(exc),
+                )
 
         session = user_store.create_session(user.id, ttl)
         _set_session_cookie(

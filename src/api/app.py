@@ -62,6 +62,7 @@ from src.api.movement import register_movement_routes
 from src.api.research import register_research_routes
 from src.api.sector import register_sector_routes
 from src.api.spotlight import register_spotlight_routes
+from src.api.watchlist import register_watchlist_routes
 from src.config import get_settings
 from src.data.accuracy_store import AccuracyStore
 from src.data.health_store import HealthStore
@@ -71,7 +72,8 @@ from src.data.retry_worker import (
     RetryWorker,
     TransientRetryFailure,
 )
-from src.data.user_store import UserStore
+from src.data.user_store import User, UserStore
+from src.data.watchlist_store import WatchlistStore
 from src.intelligence.calibration import CalibrationStore
 from src.intelligence.calibration_worker import (
     CalibrationMaturationWorker,
@@ -110,6 +112,8 @@ def create_app(
     spotlight_cache_dir: Path | None = None,
     accuracy_store: AccuracyStore | None = None,
     user_store: UserStore | None = None,
+    watchlist_store: WatchlistStore | None = None,
+    default_watchlist_symbols: list[str] | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a controller.
 
@@ -354,7 +358,42 @@ def create_app(
         and settings.user_store_path is not None
     ):
         effective_user_store = UserStore(settings.user_store_path)
+
+    # WatchlistStore shares the users.db file when one is configured
+    # (per-user data colocated with accounts). Independent connection;
+    # WAL handles cross-store concurrency. ``None`` when auth itself
+    # is disabled — no users, no watchlists.
+    effective_watchlist_store: WatchlistStore | None = watchlist_store
+    if (
+        effective_watchlist_store is None
+        and effective_user_store is not None
+    ):
+        effective_watchlist_store = WatchlistStore(
+            effective_user_store.db_path
+        )
+
     if effective_user_store is not None:
+        # Closures for the auth post-signup hook and the watchlist
+        # add hook. Both reach into module-scope objects (the
+        # watchlist store, the controller), but staying anonymous
+        # here keeps the wiring local to app.py.
+        seed_symbols = tuple(
+            default_watchlist_symbols
+            if default_watchlist_symbols is not None
+            else settings.default_watchlist_symbols
+        )
+
+        def _seed_user_watchlist(user: User) -> None:
+            if effective_watchlist_store is None or not seed_symbols:
+                return
+            effective_watchlist_store.seed_default(user.id, seed_symbols)
+            # Also nudge the controller so first-tick after signup
+            # already has rows for the seeded symbols. add_symbol
+            # is idempotent so the typical case (seeded symbols
+            # already in the default watchlist) is a no-op.
+            for sym in seed_symbols:
+                controller.add_symbol(sym)
+
         register_auth_routes(
             app,
             user_store=effective_user_store,
@@ -365,7 +404,25 @@ def create_app(
             # production deployments should flip ``ESTHER_SECURE_COOKIES=1``
             # — exposed via Settings.app_env once we wire that.
             secure_cookies=False,
+            post_signup_hook=(
+                _seed_user_watchlist
+                if effective_watchlist_store is not None
+                else None
+            ),
         )
+
+        if effective_watchlist_store is not None:
+
+            def _track_in_controller(sym: str) -> None:
+                # Closure over the bound controller. Idempotent —
+                # add_symbol returns False on duplicate.
+                controller.add_symbol(sym)
+
+            register_watchlist_routes(
+                app,
+                watchlist_store=effective_watchlist_store,
+                on_symbol_added=_track_in_controller,
+            )
 
     # Retry queue: same opt-out shape. ``retry_queue_path=None`` in
     # settings disables persistence; otherwise we wire one up.

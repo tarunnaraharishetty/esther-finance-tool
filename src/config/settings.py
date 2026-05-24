@@ -173,6 +173,18 @@ class Settings(BaseSettings):
     # Cookie name. Stable across deployments; changing this would
     # invalidate every issued session.
     session_cookie_name: str = "esther_session"
+    # Symbols seeded into a new user's watchlist on signup. Picked to
+    # give a first-run user something to look at without making any
+    # implicit recommendation (these are the most-traded names on the
+    # board, not a model output). Empty list = no seed, user lands on
+    # an empty watchlist.
+    default_watchlist_symbols: list[str] = [
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "GOOGL",
+        "TSLA",
+    ]
 
     # ---- Analyzer / valuation ----
     # Sector-median multiples (P/E, EV/EBITDA, P/S, PEG) used by the
@@ -325,6 +337,28 @@ class Settings(BaseSettings):
         """Same opt-out convention as the health store path."""
         if isinstance(v, str) and not v.strip():
             return None
+        return v
+
+    @field_validator("default_watchlist_symbols", mode="before")
+    @classmethod
+    def _split_default_watchlist(cls, v: object) -> object:
+        """Accept ``DEFAULT_WATCHLIST_SYMBOLS=AAPL,MSFT`` or a JSON list.
+
+        Same convention as ``cors_origins`` / ``fundamentals_provider_order``
+        — deploy hosts pass env vars as plain strings, comma-separated
+        is the friendlier form.
+        """
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                return v
+            return [
+                piece.strip().upper()
+                for piece in stripped.split(",")
+                if piece.strip()
+            ]
         return v
 
     @field_validator("fundamentals_provider_order", mode="before")
