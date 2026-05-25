@@ -184,6 +184,40 @@ def register_research_routes(
 
         try:
             thesis = generator.generate(payload)
+        except anthropic.APITimeoutError as e:
+            # Differentiate "Anthropic hung" from "Anthropic refused".
+            # A timeout is the upstream's fault, not an input problem,
+            # so 504 is the right code. ``mode == "auto"`` still falls
+            # back to the deterministic template (handled below) so the
+            # page renders rather than 504s — only the explicit LLM
+            # mode bubbles the timeout to the caller.
+            if mode == "llm":
+                log.warning(
+                    "research.llm.timeout",
+                    symbol=sym,
+                    error=str(e),
+                )
+                raise HTTPException(
+                    status_code=504,
+                    detail=(
+                        "LLM research generation timed out. "
+                        "Try again in a moment."
+                    ),
+                ) from None
+            log.warning(
+                "research.llm.timeout_fallback_template",
+                symbol=sym,
+                error=str(e),
+            )
+            warning = (
+                "AI generation timed out; rendering deterministic "
+                "template instead."
+            )
+            generator = TemplateThesisGenerator()
+            mode_used = "template"
+            cache_key = _cache_key_for(row, mode_used)
+            cache_file = cache_dir / sym / f"{cache_key}.json"
+            thesis = generator.generate(payload)
         except (
             anthropic.AuthenticationError,
             anthropic.RateLimitError,

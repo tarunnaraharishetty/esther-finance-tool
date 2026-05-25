@@ -7,7 +7,7 @@ Guidance for Claude Code working in this repository. Read this before making cha
 Esther is an **AI market intelligence platform** for discretionary traders. It helps humans make better trading decisions — it does **not** trade on their behalf. The product combines:
 
 - A multi-provider fundamentals pipeline with freshness contracts, cross-provider reconciliation, persistent health monitoring, and a durable retry queue.
-- A grounded analyzer (technical scoring, multi-method valuation ensemble, AI explanations) with no-hallucination guarantees and per-claim citations.
+- A grounded analyzer (technical scoring, multi-method valuation ensemble, AI explanations). Every LLM call site runs a post-hoc validator that drops sentences whose numeric tokens are not present in the input corpus, and the research thesis ships per-claim provenance. The validators bound numeric hallucination on the surfaces that ship them (research, compare narrative, analyzer explanation, summary, recap, OPP brief); they do **not** guarantee zero prose hallucination — that's an unenforceable claim that this codebase deliberately avoids.
 - A Textual TUI and a React + Vite web frontend served by FastAPI, sharing the same SSE-streamed snapshot pipeline.
 - A research-thesis surface (LLM-backed or deterministic template) with structured bull/bear/catalyst/valuation/technical/risk sections.
 
@@ -160,7 +160,8 @@ cd web && npm run typecheck                   # tsc --noEmit
 - **No order submission anywhere in the codebase.** Esther is decision-support; if a future module needs to talk to the broker side of Alpaca, raise it with the user first.
 - **Paper feed only.** Even though we don't submit orders, the data layer points at `paper-api.alpaca.markets`. Live URLs are refused at startup by `DashboardController` / `recommend`.
 - **No network in unit tests.** Mock provider/Alpaca at the SDK boundary. Real-API tests must be marked `@pytest.mark.integration` and are skipped by default.
-- **All LLM outputs grounded.** Every Claude call routes through `src/intelligence/grounding.py`. Forecast language banned, headlines quoted verbatim, sourced fields only. Citation validator drops claims that don't trace to an input fact.
+- **LLM outputs grounded by system prompt AND post-hoc validator.** Every Claude call routes through `src/intelligence/grounding.py` so the system prompt bans forecast language, quotes headlines verbatim, and restricts the model to sourced fields. Every call site also runs a post-hoc dropper over its output: research thesis (`research_validator.validate_thesis`), analyzer explanation (`validate_citations`), compare narrative (`comparison_narrative_validator.validate_narrative` — full per-side corpus with provenance), and summary / recap / opportunity-brief (shared lightweight `text_grounding.validate_prose`). Drops are logged with `drop_count` so the UI / logs can surface "AI declined N unsupported claims" as a positive trust signal. Three validator implementations remain because the research and compare surfaces carry surface-specific corpus + provenance; consolidating the regex is tracked as B-19.
+- **LLM call hygiene.** Every Anthropic `messages.create` site must pass `timeout=settings.llm_timeout_seconds` and `temperature=settings.llm_temperature` (default 0). External strings (symbols, headlines) are interpolated through `sanitize_prompt_value` to bound length, strip control chars, and XML-escape — prompt-injection mitigation is partial, not absolute.
 
 ## Testing notes
 
@@ -179,10 +180,4 @@ cd web && npm run typecheck                   # tsc --noEmit
 - P1.4 — Cross-provider reconciliation on high-trust fields with confidence penalty.
 - P1.5 — Durable retry queue (JSON-on-disk) + opt-in async drain worker + `/api/health/queue`.
 
-**Repo state:** 988 passing tests (1 deselected integration), `mypy src --strict` green across 80 source files, `ruff check .` green, `npm run typecheck` green.
-
-**Next focus areas** (see `NEXT_STEPS.md` for the punch list):
-- Priority #2 — Probabilistic analyzer (scenario tail probabilities, signal-history calibration).
-- Priority #3 — Grounded research validator (per-claim source attribution + drop policy).
-- Priority #4 — Trader workflow features (historical outcomes view, compare two stocks, sector-relative ranking).
-- Priority #5 — Institutional-grade UX polish (loading states, freshness badges, mobile readability).
+**Authoritative punch list** lives in `BUGS.md` (severity-tagged defects), `TODO.md` (sequenced fixes cross-referenced to bug IDs), and `ROADMAP.md` (phase plan). `NEXT_STEPS.md` is older and may be out of date — trust the three files above.
