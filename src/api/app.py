@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import FileResponse, StreamingResponse
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
 from src.api.analyzer import register_analyzer_routes
@@ -62,6 +62,7 @@ from src.api.middleware import (
     InMemoryRateLimiter,
     build_rate_limiter_dep,
     install_auth_gate,
+    install_csrf_gate,
     install_path_rate_limits,
 )
 from src.api.movement import register_movement_routes
@@ -239,8 +240,68 @@ def create_app(
         hang the health endpoint. The watchlist length is the only
         controller field we read here — cheap and useful for
         confirming the service is bound to the expected instance.
+
+        K8s-style separation: this endpoint says "the process is up
+        and the FastAPI app is wired"; readiness (DB connectivity,
+        downstream reachability) lives on ``/api/readyz`` below.
         """
         return {"status": "ok", "watchlist_size": len(controller.watchlist)}
+
+    @app.get("/api/readyz")
+    async def readyz() -> dict[str, Any]:
+        """Readiness probe — distinguish "wired" from "ready to serve."
+
+        Verifies each persistent dependency the process can't function
+        without. K8s / load balancers should remove an instance from
+        the rotation when this fails; the process stays alive (so
+        ``/api/health`` keeps passing) but no new requests are routed
+        to it until the underlying issue clears.
+
+        Checks are best-effort and bounded: each backend has a cheap
+        read it can answer in milliseconds. A 503 response carries a
+        ``checks`` map so operators can see which dependency degraded.
+        """
+        checks: dict[str, str] = {}
+        ok = True
+
+        users: UserStore | None = getattr(app.state, "user_store", None)
+        if users is not None:
+            try:
+                # Indexed SELECT on the unique email column — cheap,
+                # verifies the file is reachable AND the schema is in
+                # place. The probe email is impossible (no ``@``) so
+                # the row never matches; we only care that the query
+                # ran without an OperationalError.
+                users.get_user_by_email("__readyz_probe__")
+                checks["user_store"] = "ok"
+            except Exception as exc:
+                ok = False
+                checks["user_store"] = f"error: {type(exc).__name__}"
+        else:
+            checks["user_store"] = "disabled"
+
+        rq: RetryQueue | None = getattr(app.state, "retry_queue", None)
+        if rq is not None:
+            try:
+                # ``due_entries`` is the worker's hot path — exercising
+                # it as the probe means a regression that breaks it
+                # also degrades readiness. The (status, next_attempt_at)
+                # composite index keeps this cheap even at scale.
+                rq.due_entries()
+                checks["retry_queue"] = "ok"
+            except Exception as exc:
+                ok = False
+                checks["retry_queue"] = f"error: {type(exc).__name__}"
+        else:
+            checks["retry_queue"] = "disabled"
+
+        body: dict[str, Any] = {
+            "status": "ok" if ok else "degraded",
+            "checks": checks,
+        }
+        if not ok:
+            return JSONResponse(body, status_code=503)  # type: ignore[return-value]
+        return body
 
     def _user_allowed_symbols(user: User | None) -> frozenset[str] | None:
         """Resolve the user's watchlist symbols for per-user snapshot filtering.
@@ -555,6 +616,8 @@ def create_app(
             ),
             max_attempts=settings.retry_queue_max_attempts,
         )
+    # Stash on app.state so /api/readyz can probe it.
+    app.state.retry_queue = effective_retry_queue
 
     # Calibration store: same opt-out shape. Lazy init means
     # constructing the store doesn't touch disk until the analyzer
@@ -786,6 +849,15 @@ def create_app(
             ("/api/compare/", "llm", llm_route_limiter),
         ],
     )
+
+    # CSRF gate next. Stays a pass-through unless ``csrf_enabled`` is
+    # flipped on app.state — same opt-out shape as auth, so the dev
+    # workflow that has no UserStore doesn't suddenly require a token.
+    # Enforcement scope: POST/PUT/PATCH/DELETE to /api/* (except
+    # /api/auth/* and /api/health) must echo the esther_csrf cookie
+    # back in an X-CSRF-Token header.
+    app.state.csrf_enabled = effective_user_store is not None
+    install_csrf_gate(app)
 
     # AuthGate next so CORS (added below) wraps it — that way 401
     # responses still carry the right CORS headers and the browser

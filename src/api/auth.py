@@ -27,6 +27,7 @@ let us delete one row and invalidate any in-flight token.
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
@@ -51,6 +52,16 @@ log = get_logger(__name__)
 # the app's secret + this salt. Two different salts let us reuse
 # one secret for different cookie families without cross-collision.
 _COOKIE_SALT = "esther-session-v1"
+
+# CSRF double-submit cookie + header names. Lives here (not in
+# middleware.py) so cookie helpers + middleware pull from one source
+# without a circular import — middleware already depends on this
+# module for ``get_current_user``. Cookie is intentionally NOT
+# HttpOnly so the frontend can read it via ``document.cookie`` and
+# echo it as ``X-CSRF-Token``; a cross-origin attacker can't read it
+# because ``document.cookie`` is same-origin scoped.
+CSRF_COOKIE_NAME = "esther_csrf"
+CSRF_HEADER_NAME = "x-csrf-token"
 
 
 class SignupRequest(BaseModel):
@@ -196,6 +207,7 @@ def register_auth_routes(
             ttl_seconds=ttl_seconds,
             secure=secure_cookies,
         )
+        _set_csrf_cookie_on(response, secure=secure_cookies, ttl_seconds=ttl_seconds)
         log.info("auth.signup.ok", user_id=user.id, email=user.email)
         return {"user": user.to_wire()}
 
@@ -223,6 +235,7 @@ def register_auth_routes(
             ttl_seconds=ttl_seconds,
             secure=secure_cookies,
         )
+        _set_csrf_cookie_on(response, secure=secure_cookies, ttl_seconds=ttl_seconds)
         log.info("auth.login.ok", user_id=user.id, email=user.email)
         return {"user": user.to_wire()}
 
@@ -241,10 +254,13 @@ def register_auth_routes(
             if token:
                 revoked = user_store.revoke_session(token)
                 log.info("auth.logout.revoked", revoked=revoked)
-        # Always clear the cookie, even if there was nothing to revoke.
+        # Always clear both cookies, even if there was nothing to
+        # revoke server-side — a stale CSRF cookie would otherwise
+        # outlive the session and confuse the next login.
         _clear_session_cookie(
             response, cookie_name=cookie_name, secure=secure_cookies
         )
+        _clear_csrf_cookie_on(response, secure=secure_cookies)
         return {"ok": True}
 
     @router.get("/me")
@@ -340,6 +356,48 @@ def _clear_session_cookie(
         key=cookie_name,
         path="/",
         httponly=True,
+        secure=secure,
+        samesite="lax",
+    )
+
+
+def _generate_csrf_token() -> str:
+    """Mint a fresh CSRF token.
+
+    URL-safe base64, 32 bytes of entropy — same strength as the
+    session token. Stateless from the server's POV: the token's role
+    is "browser-restricted secret a cross-origin attacker can't
+    read," not "value the server can later look up."
+    """
+    return secrets.token_urlsafe(32)
+
+
+def _set_csrf_cookie_on(
+    response: Response, *, secure: bool, ttl_seconds: int
+) -> None:
+    """Mint + write a fresh CSRF cookie on ``response``.
+
+    Crucially NOT HttpOnly — the frontend must read it via
+    ``document.cookie`` and echo as ``X-CSRF-Token``. SameSite=lax +
+    Secure (in prod) bound exposure; the explicit header check is
+    the real defense.
+    """
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=_generate_csrf_token(),
+        max_age=ttl_seconds,
+        httponly=False,
+        secure=secure,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_csrf_cookie_on(response: Response, *, secure: bool) -> None:
+    """Drop the CSRF cookie. Paired with session clear on logout."""
+    response.delete_cookie(
+        key=CSRF_COOKIE_NAME,
+        path="/",
         secure=secure,
         samesite="lax",
     )

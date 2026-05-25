@@ -1,6 +1,6 @@
-"""ASGI middleware: auth gate + per-IP rate limiter.
+"""ASGI middleware: auth gate + CSRF gate + per-IP rate limiter.
 
-Three small helpers that wrap the FastAPI app without forcing every
+Four small helpers that wrap the FastAPI app without forcing every
 route module to be aware of them:
 
 * :func:`AuthGateMiddleware` — when a UserStore is wired on the app,
@@ -9,6 +9,15 @@ route module to be aware of them:
   (login / signup / me / logout themselves), and any ``OPTIONS``
   preflight (browser CORS — the response carries the auth cookie on
   the follow-up real request, not on the preflight).
+
+* :class:`CSRFMiddleware` — double-submit cookie defense against
+  cross-site state-changing requests. State-changing methods
+  (POST/PUT/PATCH/DELETE) on ``/api/*`` (except ``/api/auth/*`` +
+  ``/api/health``) must echo the ``esther_csrf`` cookie back in an
+  ``X-CSRF-Token`` header. SameSite=lax already blocks the most
+  common cross-site form-POST, but it doesn't help against
+  subdomain-cookie injection or attacker-controlled origins under
+  the same registrable domain — the explicit header check does.
 
 * :class:`InMemoryRateLimiter` + :func:`build_rate_limiter_dep` — a
   sliding-window per-IP-per-route limiter backed by a deque. Cheap
@@ -30,6 +39,7 @@ for a Redis backend; the limiter is the seam for that.
 
 from __future__ import annotations
 
+import secrets
 import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
@@ -40,17 +50,21 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
-from src.api.auth import get_current_user
+from src.api.auth import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, get_current_user
 from src.utils.logging import get_logger
 
 log = get_logger(__name__)
 
 
 # Routes that must remain reachable without auth, no matter what.
-# - ``/api/health``: load-balancer / uptime probe.
+# - ``/api/health``: liveness probe — load balancers and uptime
+#   monitors hit this anonymously.
+# - ``/api/readyz``: readiness probe — same operator-tool callers as
+#   /api/health, never carries cookies.
 # - ``/api/auth/*``: login / signup / me / logout endpoints themselves.
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/api/health",
+    "/api/readyz",
     "/api/auth/",
 )
 
@@ -225,6 +239,94 @@ def install_auth_gate(app: ASGIApp) -> None:
     app.add_middleware(AuthGateMiddleware)  # type: ignore[attr-defined]
 
 
+# ---------------------------------------------------------------------------
+# CSRF (double-submit cookie)
+# ---------------------------------------------------------------------------
+
+
+# Methods that mutate server state and therefore must carry a CSRF
+# token. Read-only methods (GET, HEAD) are exempt; OPTIONS is handled
+# upstream by CORS preflight.
+_CSRF_STATE_CHANGING_METHODS: frozenset[str] = frozenset(
+    {"POST", "PUT", "PATCH", "DELETE"}
+)
+
+# Path prefixes exempt from CSRF enforcement. ``/api/auth/*`` is the
+# bootstrap surface — a logged-out client has no CSRF cookie yet.
+# ``/api/health`` and ``/api/readyz`` are probe endpoints that never
+# mutate state. The CSRF middleware also short-circuits on GET/HEAD
+# methods, so these prefixes are belt-and-braces against a future
+# POST to a health route.
+_CSRF_EXEMPT_PREFIXES: tuple[str, ...] = (
+    "/api/auth/",
+    "/api/health",
+    "/api/readyz",
+)
+
+
+class CSRFMiddleware(BaseHTTPMiddleware):
+    """Enforce double-submit-cookie CSRF on state-changing API calls.
+
+    Activation is opt-in: when ``app.state.csrf_enabled`` is False
+    (the default for the no-auth dev workflow) the middleware is a
+    pass-through. ``create_app`` flips it on when a UserStore is
+    wired.
+
+    Verification: read the ``esther_csrf`` cookie + the
+    ``X-CSRF-Token`` header, compare with ``secrets.compare_digest``
+    (constant-time so a timing side-channel can't leak the token).
+    Reject 403 on missing or mismatched.
+    """
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        if not getattr(request.app.state, "csrf_enabled", False):
+            return await call_next(request)
+        path = request.url.path
+        method = request.method.upper()
+        if method not in _CSRF_STATE_CHANGING_METHODS:
+            return await call_next(request)
+        if not path.startswith("/api/"):
+            return await call_next(request)
+        if any(path.startswith(prefix) for prefix in _CSRF_EXEMPT_PREFIXES):
+            return await call_next(request)
+
+        cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
+        header_token = request.headers.get(CSRF_HEADER_NAME)
+        if not cookie_token or not header_token:
+            log.warning(
+                "csrf.reject.missing",
+                path=path,
+                has_cookie=bool(cookie_token),
+                has_header=bool(header_token),
+            )
+            return JSONResponse(
+                {"detail": "Missing CSRF token."},
+                status_code=403,
+            )
+        if not secrets.compare_digest(cookie_token, header_token):
+            log.warning("csrf.reject.mismatch", path=path)
+            return JSONResponse(
+                {"detail": "Invalid CSRF token."},
+                status_code=403,
+            )
+        return await call_next(request)
+
+
+def install_csrf_gate(app: ASGIApp) -> None:
+    """Attach :class:`CSRFMiddleware` to ``app``.
+
+    Mirrors :func:`install_auth_gate` so ``create_app`` can wire the
+    two gates next to each other; the actual enforcement is gated on
+    ``app.state.csrf_enabled`` so the no-auth dev workflow stays
+    untouched.
+    """
+    app.add_middleware(CSRFMiddleware)  # type: ignore[attr-defined]
+
+
 class PathRateLimitMiddleware(BaseHTTPMiddleware):
     """Throttle requests whose path matches one of the configured prefixes.
 
@@ -295,9 +397,11 @@ def install_path_rate_limits(
 
 __all__ = [
     "AuthGateMiddleware",
+    "CSRFMiddleware",
     "InMemoryRateLimiter",
     "PathRateLimitMiddleware",
     "build_rate_limiter_dep",
     "install_auth_gate",
+    "install_csrf_gate",
     "install_path_rate_limits",
 ]

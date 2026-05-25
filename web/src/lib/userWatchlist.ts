@@ -12,12 +12,42 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { z } from "zod";
+
+import { validateJson } from "@/lib/_validate";
+import { csrfHeaders } from "@/lib/csrf";
 
 export interface WatchlistEntry {
   symbol: string;
   added_at: string;
   sort_order: number;
 }
+
+// Runtime schema — runtime mirror of WatchlistEntry above and the
+// wire shape produced by ``src/api/watchlist.py``. B-18: catches a
+// renamed / dropped field at parse time instead of mid-render.
+const WatchlistEntrySchema = z.object({
+  symbol: z.string(),
+  added_at: z.string(),
+  sort_order: z.number(),
+});
+
+const WatchlistListResponseSchema = z.object({
+  entries: z.array(WatchlistEntrySchema),
+  // The server also emits ``symbols`` but the hook derives that
+  // client-side from entries. We don't require it in the schema so a
+  // future server-side prune of the redundant field doesn't fail us.
+  symbols: z.array(z.string()).optional(),
+});
+
+const WatchlistAddResponseSchema = z.object({
+  entry: WatchlistEntrySchema,
+});
+
+// Compile-time guard: schema and interface must agree on shape.
+type _EntryShapeOk = z.infer<typeof WatchlistEntrySchema> extends WatchlistEntry ? true : false;
+const _entryShapeCheck: _EntryShapeOk = true;
+void _entryShapeCheck;
 
 export interface WatchlistError {
   status: number;
@@ -63,7 +93,11 @@ export function useUserWatchlist(enabled: boolean): UseUserWatchlist {
         credentials: "same-origin",
       });
       if (!res.ok) throw await parseError(res);
-      const body = (await res.json()) as { entries: WatchlistEntry[] };
+      const body = await validateJson(
+        res,
+        WatchlistListResponseSchema,
+        "watchlist",
+      );
       if (reqRef.current === reqId) {
         setEntries(body.entries);
       }
@@ -104,7 +138,7 @@ export function useUserWatchlist(enabled: boolean): UseUserWatchlist {
         const res = await fetch("/api/watchlist/symbols", {
           method: "POST",
           credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...csrfHeaders() },
           body: JSON.stringify({ symbol: normalized }),
         });
         if (!res.ok) {
@@ -117,7 +151,11 @@ export function useUserWatchlist(enabled: boolean): UseUserWatchlist {
           }
           throw err;
         }
-        const body = (await res.json()) as { entry: WatchlistEntry };
+        const body = await validateJson(
+          res,
+          WatchlistAddResponseSchema,
+          "watchlist.add",
+        );
         // Replace the optimistic entry with the server-confirmed one
         // so added_at + sort_order match the canonical record.
         setEntries((prev) =>
@@ -147,6 +185,7 @@ export function useUserWatchlist(enabled: boolean): UseUserWatchlist {
           {
             method: "DELETE",
             credentials: "same-origin",
+            headers: csrfHeaders(),
           },
         );
         if (!res.ok) throw await parseError(res);
