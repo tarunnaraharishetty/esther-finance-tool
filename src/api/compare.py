@@ -208,6 +208,38 @@ def register_compare_routes(
 
         try:
             raw_narrative = narrator.generate(payload)
+        except anthropic.APITimeoutError as e:
+            # The settings ``llm_timeout_seconds`` cap fired upstream.
+            # Treat as 504 (upstream timeout) in explicit ``mode=llm`` so
+            # the caller can retry; in ``mode=auto`` fall back to the
+            # deterministic template so the page still renders.
+            if mode == "llm":
+                log.warning(
+                    "compare_narrative.llm.timeout",
+                    left=l_sym,
+                    right=r_sym,
+                    error=str(e),
+                )
+                raise HTTPException(
+                    status_code=504,
+                    detail=(
+                        "LLM narrative generation timed out. "
+                        "Try again in a moment."
+                    ),
+                ) from None
+            log.warning(
+                "compare_narrative.llm.timeout_fallback_template",
+                left=l_sym,
+                right=r_sym,
+                error=str(e),
+            )
+            warning = (
+                "AI narrative timed out; rendering deterministic "
+                "template instead."
+            )
+            narrator = TemplateComparisonNarrator()
+            mode_used = "template"
+            raw_narrative = narrator.generate(payload)
         except (
             anthropic.AuthenticationError,
             anthropic.RateLimitError,

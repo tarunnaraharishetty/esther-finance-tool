@@ -32,12 +32,26 @@ def _safe_test_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     # data/calibration.db under the project root from any test that
     # constructs an app.
     monkeypatch.setenv("CALIBRATION_STORE_PATH", "")
+    # Disable the user store + auth gate by default. Tests that exercise
+    # auth (test_api_auth, test_api_watchlist, and the new stream-auth
+    # tests) construct a tmp_path-rooted UserStore explicitly and pass
+    # it to create_app. Without this, the default user_store_path under
+    # the repo root would be wired and the auth gate middleware would
+    # 401 every API-contract test that doesn't sign up first.
+    monkeypatch.setenv("USER_STORE_PATH", "")
     # Bust the lru_cache on Settings between tests
     from src.config import settings as settings_mod
 
     settings_mod.get_settings.cache_clear()
+    # Clear any computed sector-median overrides so a test that
+    # installs them via refresh_computed_medians can't leak the
+    # override into an unrelated test that expects the static seed.
+    from src.intelligence.analyzer.sector_medians import register_computed_medians
+
+    register_computed_medians(None)
     yield
     settings_mod.get_settings.cache_clear()
+    register_computed_medians(None)
 
 
 @pytest.fixture

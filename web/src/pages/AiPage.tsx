@@ -13,9 +13,14 @@ interface Props {
 }
 
 /**
- * AI Insights surface: hero summary up top + a card per
- * non-hold row with the per-symbol AI rationale. Phase 4 swaps
- * the templated text for a live LLM-streamed version.
+ * Auto-insights surface: hero auto-briefing up top + a card per
+ * non-hold row with the per-symbol auto rationale.
+ *
+ * Both the hero card and the per-symbol cards render *templated*
+ * prose built from the snapshot fields already shown elsewhere on
+ * the page — they are not LLM-generated. The "Heuristic" badges
+ * surface this contract to the user. For LLM-written analysis,
+ * see the Research and Analyzer pages.
  */
 export function AiPage({ snapshot, setActiveSymbol }: Props) {
   const interesting = snapshot.rows
@@ -27,8 +32,8 @@ export function AiPage({ snapshot, setActiveSymbol }: Props) {
       <AiSummary snapshot={snapshot} />
 
       <Panel
-        title="Per-symbol AI Reads"
-        subtitle={`${interesting.length} actionable`}
+        title="Per-symbol Auto Reads"
+        subtitle={`${interesting.length} actionable · heuristic, not LLM-generated`}
       >
         {interesting.length === 0 ? (
           <div className="grid place-items-center rounded-md border border-dashed border-border/40 bg-card/30 py-8 font-mono text-xs uppercase tracking-wider text-muted-foreground">
@@ -59,6 +64,13 @@ export function AiPage({ snapshot, setActiveSymbol }: Props) {
                     {row.action.toUpperCase()}
                   </Badge>
                   <Badge variant="outline">{tierLabel(row.tier)}</Badge>
+                  <Badge
+                    variant="outline"
+                    className="font-mono text-[9px] uppercase tracking-wider"
+                    title="Templated prose. Not LLM-generated."
+                  >
+                    Heuristic
+                  </Badge>
                   <span className="ml-auto font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
                     {fmtConfidence(row.confidence)}
                   </span>

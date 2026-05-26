@@ -1,0 +1,64 @@
+# Keep the build context small and the runtime image clean.
+# Anything matched here is invisible to the Dockerfile COPY steps.
+
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Local environments
+.venv
+venv
+env
+node_modules
+
+# Python build artifacts
+__pycache__
+*.py[cod]
+*.so
+*.egg-info
+build
+dist
+.eggs
+
+# Test / coverage / cache
+.pytest_cache
+.coverage
+htmlcov
+.tox
+.mypy_cache
+.ruff_cache
+
+# Local data + logs (gitignored, never want them in the image)
+data
+logs
+
+# Operator-local secrets — must NOT leak into a built image
+.env
+.env.local
+
+# Editor / IDE
+.vscode
+.idea
+.DS_Store
+
+# Frontend build outputs (regenerated in the frontend-build stage)
+web/node_modules
+web/dist
+
+# Documentation (kept in repo for humans, not needed in image)
+*.md
+!README.md
+ARCHITECTURE.md
+BUGS.md
+TODO.md
+ROADMAP.md
+
+# Claude Code working files
+.claude
+ONBOARDING.md
+
+# Other tool configs we don't need in the image
+.github
+.editorconfig
+.pre-commit-config.yaml

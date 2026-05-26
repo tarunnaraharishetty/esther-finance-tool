@@ -15,7 +15,7 @@ from src.data.retry_queue import (
 
 
 def _queue(tmp_path: Path, **kwargs: object) -> RetryQueue:
-    return RetryQueue(tmp_path / "retry.json", **kwargs)  # type: ignore[arg-type]
+    return RetryQueue(tmp_path / "retry.db", **kwargs)  # type: ignore[arg-type]
 
 
 # -----------------------------------------------------------------------------
@@ -25,7 +25,7 @@ def _queue(tmp_path: Path, **kwargs: object) -> RetryQueue:
 
 def test_init_does_not_touch_disk(tmp_path: Path) -> None:
     """Same lazy contract as HealthStore — constructing is free."""
-    path = tmp_path / "nested" / "retry.json"
+    path = tmp_path / "nested" / "retry.db"
     RetryQueue(path)
     assert not path.exists()
     assert not path.parent.exists()
@@ -33,7 +33,7 @@ def test_init_does_not_touch_disk(tmp_path: Path) -> None:
 
 def test_max_attempts_must_be_at_least_one(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=">= 1"):
-        RetryQueue(tmp_path / "r.json", max_attempts=0)
+        RetryQueue(tmp_path / "r.db", max_attempts=0)
 
 
 # -----------------------------------------------------------------------------
@@ -169,6 +169,65 @@ def test_record_failure_returns_none_when_no_entry(tmp_path: Path) -> None:
     assert q.record_failure("MISSING", ("e",)) is None
 
 
+def test_record_failure_retry_after_overrides_backoff_when_longer(
+    tmp_path: Path,
+) -> None:
+    """A 600s server cooldown beats the worker's 120s backoff — RFC 6585.
+
+    Honors the larger of backoff vs Retry-After so a chatty provider that
+    asked us to wait 10 minutes isn't hit again 2 minutes later."""
+    q = _queue(
+        tmp_path,
+        backoff=BackoffPolicy(initial_seconds=60.0, max_seconds=3600.0),
+        max_attempts=5,
+    )
+    now = datetime(2026, 5, 21, 12, 0, tzinfo=UTC)
+    q.enqueue("AAPL", ("e",), now=now)
+    updated = q.record_failure(
+        "AAPL", ("e2",), now=now, retry_after_seconds=600.0
+    )
+    assert updated is not None
+    # Server hint (600s) > backoff (120s) → use the hint.
+    assert updated.next_attempt_at == now + timedelta(seconds=600)
+
+
+def test_record_failure_backoff_wins_when_longer_than_retry_after(
+    tmp_path: Path,
+) -> None:
+    """A 5-second server hint can't undercut a sensible backoff."""
+    q = _queue(
+        tmp_path,
+        backoff=BackoffPolicy(initial_seconds=60.0, max_seconds=3600.0),
+        max_attempts=5,
+    )
+    now = datetime(2026, 5, 21, 12, 0, tzinfo=UTC)
+    q.enqueue("AAPL", ("e",), now=now)
+    # Drive attempts up so backoff > hint.
+    q.record_failure("AAPL", ("e",), now=now)  # 120s
+    updated = q.record_failure(
+        "AAPL", ("e2",), now=now, retry_after_seconds=5.0
+    )
+    assert updated is not None
+    # Backoff at attempt 2 = 60 * 2**2 = 240s; hint = 5s → backoff wins.
+    assert updated.next_attempt_at == now + timedelta(seconds=240)
+
+
+def test_record_failure_none_retry_after_uses_pure_backoff(
+    tmp_path: Path,
+) -> None:
+    """The None default keeps the historical contract unchanged."""
+    q = _queue(
+        tmp_path,
+        backoff=BackoffPolicy(initial_seconds=60.0, max_seconds=3600.0),
+        max_attempts=5,
+    )
+    now = datetime(2026, 5, 21, 12, 0, tzinfo=UTC)
+    q.enqueue("AAPL", ("e",), now=now)
+    updated = q.record_failure("AAPL", ("e2",), now=now)
+    assert updated is not None
+    assert updated.next_attempt_at == now + timedelta(seconds=120)
+
+
 # -----------------------------------------------------------------------------
 # Persistence
 # -----------------------------------------------------------------------------
@@ -183,33 +242,41 @@ def test_entries_round_trip_across_instances(tmp_path: Path) -> None:
     assert symbols == {"AAPL", "MSFT"}
 
 
-def test_corrupt_file_starts_fresh_does_not_raise(tmp_path: Path) -> None:
-    """A truncated or malformed JSON must not bring down the queue."""
-    path = tmp_path / "retry.json"
-    path.write_text("{this is not valid json", encoding="utf-8")
+def test_non_sqlite_file_at_path_fails_fast(tmp_path: Path) -> None:
+    """A path pointing at a legacy JSON file (or any non-SQLite blob)
+    must surface a clear error on first use rather than silently
+    starting fresh and orphaning the operator's data. ``sqlite3``
+    raises ``DatabaseError("file is not a database")`` which is what
+    the operator sees in the logs at startup — they then rename or
+    delete the old file and restart. See BUGS.md B-23 for the
+    JSON → SQLite migration note."""
+    import sqlite3
+
+    path = tmp_path / "retry.db"
+    path.write_text("{legacy json blob from before B-23}", encoding="utf-8")
     q = RetryQueue(path)
-    # Reading must return empty rather than crash.
-    assert q.all_entries() == ()
-    # Subsequent writes must overwrite the corrupt file cleanly.
-    q.enqueue("AAPL", ("e",))
-    assert {e.symbol for e in q.all_entries()} == {"AAPL"}
+    with pytest.raises(sqlite3.DatabaseError):
+        q.enqueue("AAPL", ("e",))
 
 
-def test_schema_version_mismatch_starts_fresh(tmp_path: Path) -> None:
-    """Older / unknown schema versions are dropped, not migrated."""
-    path = tmp_path / "retry.json"
-    path.write_text(
-        '{"version": 99, "entries": [{"symbol": "AAPL"}]}', encoding="utf-8"
-    )
-    q = RetryQueue(path)
-    assert q.all_entries() == ()
+def test_schema_migration_records_version_row(tmp_path: Path) -> None:
+    """First connect runs the v1 migration which creates retry_entries
+    AND records (namespace='retry_queue', version=1) in the shared
+    _schema_migrations table. Second connect is a no-op."""
+    import sqlite3
 
-
-def test_atomic_write_leaves_no_dot_tmp_residue(tmp_path: Path) -> None:
     q = _queue(tmp_path)
-    q.enqueue("AAPL", ("e",))
-    leftover = list(tmp_path.glob(".*.tmp"))
-    assert leftover == []
+    q.enqueue("AAPL", ("e",))  # triggers _connect + migration
+    # Inspect the migrations table directly via a sibling connection.
+    inspect = sqlite3.connect(q.path)
+    try:
+        rows = inspect.execute(
+            "SELECT namespace, version FROM _schema_migrations "
+            "WHERE namespace = 'retry_queue' ORDER BY version"
+        ).fetchall()
+    finally:
+        inspect.close()
+    assert rows == [("retry_queue", 1)]
 
 
 # -----------------------------------------------------------------------------
@@ -252,3 +319,59 @@ def test_backoff_doubles_per_attempt() -> None:
     assert policy.next_backoff(0) == timedelta(seconds=10)
     assert policy.next_backoff(1) == timedelta(seconds=20)
     assert policy.next_backoff(2) == timedelta(seconds=40)
+
+
+# -----------------------------------------------------------------------------
+# B-23: due_entries is index-driven, not table-size dependent
+# -----------------------------------------------------------------------------
+
+
+def test_due_entries_returns_quickly_under_large_backlog(
+    tmp_path: Path,
+) -> None:
+    """The old JSON queue did a full read/filter/write per call;
+    ``due_entries()`` cost grew linearly with the total table size,
+    including thousands of permanently-failed rows that never expire
+    automatically. The SQLite rewrite (B-23) drives the hot path off
+    the (status, next_attempt_at) index so cost is proportional to
+    the *due* subset.
+
+    Concrete shape: 5000 permanently-failed entries + 5 pending and
+    due. ``due_entries()`` must complete in well under 500ms — a
+    generous bound that still catches a regression to full-scan
+    semantics (which would scale linearly to seconds on a busy
+    machine)."""
+    import time
+
+    q = _queue(
+        tmp_path,
+        backoff=BackoffPolicy(initial_seconds=60.0, max_seconds=3600.0),
+        max_attempts=2,
+    )
+    far_past = datetime(2024, 1, 1, tzinfo=UTC)
+    # Land 5000 permanently-failed rows. Each requires enqueue + two
+    # record_failure calls (max_attempts=2 → second failure promotes).
+    # Batch via direct executemany would be faster but the public API
+    # is the contract we're testing.
+    for i in range(5000):
+        sym = f"DEAD{i:05d}"
+        q.enqueue(sym, ("e",), now=far_past)
+        q.record_failure(sym, ("e",), now=far_past)
+        q.record_failure(sym, ("e",), now=far_past)
+    # Five pending entries due now.
+    now = datetime.now(UTC)
+    for i in range(5):
+        q.enqueue(f"DUE{i}", ("e",), now=now)
+
+    start = time.perf_counter()
+    due = q.due_entries(now=now)
+    elapsed = time.perf_counter() - start
+    assert {e.symbol for e in due} == {f"DUE{i}" for i in range(5)}
+    # Bound is intentionally loose — even a hot CI runner with the
+    # index should land in single-digit ms. Anything pushing 500ms
+    # signals the query stopped using the index.
+    assert elapsed < 0.5, (
+        f"due_entries() took {elapsed:.3f}s with 5005 rows present — "
+        f"the (status, next_attempt_at) index is not being used. "
+        f"Regression to full-scan semantics (BUGS.md B-23)."
+    )

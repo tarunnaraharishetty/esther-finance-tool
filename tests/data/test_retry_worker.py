@@ -62,6 +62,37 @@ async def test_tick_reschedules_on_transient_failure(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_tick_forwards_retry_after_hint_into_reschedule(
+    tmp_path: Path,
+) -> None:
+    """A TransientRetryFailure carrying a 600s Retry-After hint must push
+    the next-attempt past the default 60s backoff. Closes the second-attempt
+    half of B-10 (the first-attempt enqueue path was already covered)."""
+    from datetime import timedelta
+
+    q = _queue(
+        tmp_path,
+        backoff=BackoffPolicy(initial_seconds=60.0, max_seconds=3600.0),
+        max_attempts=5,
+    )
+    when = datetime(2026, 5, 21, 12, 0, tzinfo=UTC)
+    q.enqueue("AAPL", ("first",), now=when)
+
+    async def fetch(_symbol: str) -> None:
+        raise TransientRetryFailure(
+            ("fmp: rate-limited",), retry_after_seconds=600.0
+        )
+
+    worker = RetryWorker(q, fetch, interval_seconds=0.1)
+    await worker.tick()
+    entry = q.all_entries()[0]
+    # next_attempt_at - last_error_at should be ≥ 600s.
+    assert entry.last_error_at is not None
+    gap = entry.next_attempt_at - entry.last_error_at
+    assert gap >= timedelta(seconds=600)
+
+
+@pytest.mark.asyncio
 async def test_tick_marks_permanent_failure_in_one_shot(tmp_path: Path) -> None:
     q = _queue(tmp_path, max_attempts=5)
     q.enqueue("AAPL", ("e",))

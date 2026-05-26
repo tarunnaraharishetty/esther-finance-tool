@@ -1,8 +1,9 @@
-import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Bell, Loader2, TrendingDown, TrendingUp } from "lucide-react";
 import { useSession } from "@/lib/auth";
 import { useSnapshotStream } from "@/lib/stream";
 import { lookupTicker } from "@/lib/tickers";
+import { useUserWatchlist } from "@/lib/userWatchlist";
 import { AppShell } from "@/components/layout/AppShell";
 import type { NavKey } from "@/components/layout/Sidebar";
 import { DashboardPage } from "@/pages/DashboardPage";
@@ -36,17 +37,47 @@ export default function App() {
   // "logged out" to "logged in" without the loader would briefly
   // flash the LoginPage on every refresh.
   const session = useSession();
+  const watchlist = useUserWatchlist(session.user !== null);
   const { snapshot, status, isStale, msSinceLastEvent } = useSnapshotStream();
   const [activeSymbol, setActiveSymbol] = useState<string | null>(null);
   const [activeNav, setActiveNav] = useState<NavKey>("dashboard");
   const [paletteOpen, setPaletteOpen] = useState(false);
 
+  // Derive a snapshot view filtered to the user's watchlist. Until
+  // the watchlist GET resolves we show the unfiltered snapshot so
+  // signed-in users don't see a flash of empty rows on first load.
+  // Once resolved, the user's symbols are the source of truth for
+  // which rows the pages render — including the empty state when
+  // they've intentionally cleared their list.
+  const displayedSnapshot = useMemo(() => {
+    if (snapshot === null) return null;
+    if (session.user === null) return snapshot;
+    if (!watchlist.resolved) return snapshot;
+    const wanted = new Set(watchlist.symbols);
+    const filteredRows = snapshot.rows.filter((r) => wanted.has(r.symbol));
+    // Drop pulse so PageHeader bull/bear counts derive from the
+    // filtered rows instead of the server's full-snapshot aggregate.
+    // Alerts + ranked_opportunities pass through unfiltered: they
+    // help users discover symbols outside their watchlist.
+    return { ...snapshot, rows: filteredRows, pulse: null };
+  }, [snapshot, session.user, watchlist.resolved, watchlist.symbols]);
+
   useEffect(() => {
-    if (activeSymbol !== null) return;
-    if (snapshot && snapshot.rows.length > 0) {
-      setActiveSymbol(snapshot.rows[0].symbol);
+    if (displayedSnapshot === null) return;
+    // If activeSymbol is missing or no longer in the filtered set,
+    // snap to the first row. Empty-list users land on null and the
+    // per-page empty states render.
+    if (
+      activeSymbol === null ||
+      !displayedSnapshot.rows.some((r) => r.symbol === activeSymbol)
+    ) {
+      if (displayedSnapshot.rows.length > 0) {
+        setActiveSymbol(displayedSnapshot.rows[0].symbol);
+      } else {
+        setActiveSymbol(null);
+      }
     }
-  }, [snapshot, activeSymbol]);
+  }, [displayedSnapshot, activeSymbol]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -64,8 +95,8 @@ export default function App() {
 
   const handleSearch = useCallback(
     (query: string): void => {
-      if (!snapshot) return;
-      const match = snapshot.rows.find((r) => r.symbol === query);
+      if (!displayedSnapshot) return;
+      const match = displayedSnapshot.rows.find((r) => r.symbol === query);
       if (match) {
         setActiveSymbol(query);
         setActiveNav("charts");
@@ -79,7 +110,7 @@ export default function App() {
         setActiveNav("charts");
       }
     },
-    [snapshot],
+    [displayedSnapshot],
   );
 
   const handleSelectSymbolFromPalette = useCallback((symbol: string): void => {
@@ -109,8 +140,8 @@ export default function App() {
       <AppShell
         status={status}
         isStale={isStale}
-        tick={snapshot?.tick ?? null}
-        rowCount={snapshot?.rows.length ?? 0}
+        tick={displayedSnapshot?.tick ?? null}
+        rowCount={displayedSnapshot?.rows.length ?? 0}
         activeNav={activeNav}
         onNavChange={setActiveNav}
         onSearch={handleSearch}
@@ -118,13 +149,16 @@ export default function App() {
         authUser={session.user}
         onLogout={session.logout}
         navCounts={{
-          watchlist: snapshot?.rows.length ?? 0,
-          news: snapshot
-            ? snapshot.rows.reduce((s, r) => s + r.headlines.length, 0)
+          watchlist: displayedSnapshot?.rows.length ?? 0,
+          news: displayedSnapshot
+            ? displayedSnapshot.rows.reduce(
+                (s, r) => s + r.headlines.length,
+                0,
+              )
             : 0,
           ai:
-            (snapshot?.alerts.length ?? 0) +
-            (snapshot?.ranked_opportunities.length ?? 0),
+            (displayedSnapshot?.alerts.length ?? 0) +
+            (displayedSnapshot?.ranked_opportunities.length ?? 0),
         }}
       >
         {isStale && msSinceLastEvent !== null && (
@@ -134,10 +168,10 @@ export default function App() {
         <PageHeader
           title={pageTitle(activeNav)}
           subtitle={pageSubtitle(activeNav)}
-          snapshot={snapshot}
+          snapshot={displayedSnapshot}
         />
 
-        {snapshot === null ? (
+        {displayedSnapshot === null ? (
           <FirstLoadSkeleton />
         ) : (
           // `key` triggers the fade-in animation on every route change.
@@ -145,9 +179,20 @@ export default function App() {
             <Suspense fallback={<RouteSkeleton />}>
               <RouteSwitch
                 nav={activeNav}
-                snapshot={snapshot}
+                snapshot={displayedSnapshot}
                 activeSymbol={activeSymbol}
                 setActiveSymbol={setActiveSymbol}
+                editor={
+                  session.user !== null
+                    ? {
+                        symbols: watchlist.symbols,
+                        onAdd: watchlist.add,
+                        onRemove: watchlist.remove,
+                        busy: watchlist.loading,
+                        resolved: watchlist.resolved,
+                      }
+                    : null
+                }
               />
             </Suspense>
           </div>
@@ -159,7 +204,7 @@ export default function App() {
           <CommandPalette
             open={paletteOpen}
             onClose={() => setPaletteOpen(false)}
-            snapshot={snapshot}
+            snapshot={displayedSnapshot}
             onSelectSymbol={handleSelectSymbolFromPalette}
             onNavigate={setActiveNav}
           />
@@ -174,11 +219,19 @@ function RouteSwitch({
   snapshot,
   activeSymbol,
   setActiveSymbol,
+  editor,
 }: {
   nav: NavKey;
   snapshot: DashboardSnapshot;
   activeSymbol: string | null;
   setActiveSymbol: (s: string) => void;
+  editor: {
+    symbols: string[];
+    onAdd: (symbol: string) => Promise<void>;
+    onRemove: (symbol: string) => Promise<void>;
+    busy: boolean;
+    resolved: boolean;
+  } | null;
 }) {
   switch (nav) {
     case "dashboard":
@@ -203,6 +256,7 @@ function RouteSwitch({
           snapshot={snapshot}
           activeSymbol={activeSymbol}
           setActiveSymbol={setActiveSymbol}
+          editor={editor}
         />
       );
     case "movers":

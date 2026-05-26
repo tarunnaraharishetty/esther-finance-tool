@@ -337,3 +337,45 @@ def test_system_prompt_contains_grounding_rules() -> None:
     assert "do not predict" in system.lower()
     # OPP-specific: the engine's outputs are authoritative.
     assert "engine's outputs" in system or "deterministic classifications" in system
+
+
+# ---------------------------------------------------------------------------
+# Post-hoc validator — drop unsupported numeric claims (B-8 symmetry)
+# ---------------------------------------------------------------------------
+
+
+def test_brief_keeps_grounded_sentences() -> None:
+    """Sentences whose numerics all trace to the input corpus survive."""
+    grounded = (
+        "NVDA leads at composite 0.82 with confidence 0.78. "
+        "Technical alignment scores 1.00 with no outstanding tension."
+    )
+    client = _mock_anthropic_client(grounded)
+    briefer = LLMOpportunityBriefer(client=client)
+    out = briefer.brief(_ctx())
+    # Composite 0.82 + confidence 0.78 + technical_alignment 1.00 are
+    # all in the context — every sentence should survive.
+    assert "0.82" in out
+    assert "0.78" in out
+    assert "1.00" in out
+
+
+def test_brief_drops_sentence_with_fabricated_number() -> None:
+    """A sentence containing a number not in the corpus is dropped."""
+    text = (
+        "NVDA leads at composite 0.82 with confidence 0.78. "
+        "Revenue grew 47.3% last quarter according to the filings."
+    )
+    client = _mock_anthropic_client(text)
+    briefer = LLMOpportunityBriefer(client=client)
+    out = briefer.brief(_ctx())  # corpus has no 47.3%
+    assert "47.3%" not in out
+    assert "0.82" in out  # grounded sentence survives
+
+
+def test_brief_passes_through_when_no_numbers() -> None:
+    """A purely qualitative sentence with no numeric tokens is always kept."""
+    text = "The setup looks coherent across the available drivers."
+    client = _mock_anthropic_client(text)
+    briefer = LLMOpportunityBriefer(client=client)
+    assert briefer.brief(_ctx()) == text

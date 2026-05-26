@@ -46,11 +46,23 @@ class TransientRetryFailure(Exception):
     The ``errors`` tuple becomes the entry's ``last_errors`` on the
     next reschedule. Distinct from a generic exception so a stray
     KeyError from a bug doesn't masquerade as a retryable signal.
+
+    ``retry_after_seconds`` is a server-supplied cooldown hint (e.g.
+    the ``Retry-After`` header on a 429). When provided and larger
+    than the worker's default backoff, the queue uses it as the
+    reschedule floor so we don't keep hammering an upstream that
+    explicitly asked us to wait.
     """
 
-    def __init__(self, errors: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        errors: tuple[str, ...],
+        *,
+        retry_after_seconds: float | None = None,
+    ) -> None:
         super().__init__("; ".join(errors) or "transient retry failure")
         self.errors = errors
+        self.retry_after_seconds = retry_after_seconds
 
 
 class PermanentRetryFailure(Exception):
@@ -167,7 +179,11 @@ class RetryWorker:
         try:
             await self._retry_fn(symbol)
         except TransientRetryFailure as exc:
-            self._queue.record_failure(symbol, exc.errors)
+            self._queue.record_failure(
+                symbol,
+                exc.errors,
+                retry_after_seconds=exc.retry_after_seconds,
+            )
             return
         except PermanentRetryFailure as exc:
             # Force the entry past max_attempts so it lands at

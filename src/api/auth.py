@@ -27,10 +27,12 @@ let us delete one row and invalidate any in-flight token.
 
 from __future__ import annotations
 
+import secrets
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
-from fastapi import APIRouter, Cookie, FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request, Response
 from itsdangerous import BadSignature, URLSafeSerializer
 from pydantic import BaseModel, Field, field_validator
 
@@ -50,6 +52,16 @@ log = get_logger(__name__)
 # the app's secret + this salt. Two different salts let us reuse
 # one secret for different cookie families without cross-collision.
 _COOKIE_SALT = "esther-session-v1"
+
+# CSRF double-submit cookie + header names. Lives here (not in
+# middleware.py) so cookie helpers + middleware pull from one source
+# without a circular import — middleware already depends on this
+# module for ``get_current_user``. Cookie is intentionally NOT
+# HttpOnly so the frontend can read it via ``document.cookie`` and
+# echo it as ``X-CSRF-Token``; a cross-origin attacker can't read it
+# because ``document.cookie`` is same-origin scoped.
+CSRF_COOKIE_NAME = "esther_csrf"
+CSRF_HEADER_NAME = "x-csrf-token"
 
 
 class SignupRequest(BaseModel):
@@ -88,6 +100,9 @@ def register_auth_routes(
     session_ttl_days: int,
     cookie_name: str,
     secure_cookies: bool = False,
+    post_signup_hook: Callable[[User], None] | None = None,
+    login_rate_limit_dep: Callable[..., Awaitable[None]] | None = None,
+    signup_rate_limit_dep: Callable[..., Awaitable[None]] | None = None,
 ) -> None:
     """Attach ``/api/auth/*`` routes to ``app``.
 
@@ -104,6 +119,28 @@ def register_auth_routes(
         secure_cookies: When True, marks cookies ``Secure`` so they
             only ship over HTTPS. Off in dev (localhost is HTTP);
             production deployments should pass True.
+        post_signup_hook: Optional callback invoked with the new
+            :class:`User` after a successful signup, before the
+            response is returned. ``app.py`` wires the watchlist
+            default-seed through this hook so first-run users land
+            on a populated dashboard. **Hook exceptions abort signup
+            with a 503 response** (B-14): the hook owns its own
+            rollback (purging partially-seeded rows and deleting the
+            user) so signup is atomic from the client's perspective.
+            The previous best-effort behavior produced an account
+            whose first dashboard view was empty — users reasonably
+            concluded auth was broken.
+        login_rate_limit_dep: Optional FastAPI dependency applied to
+            ``/login`` only. ``app.py`` wires a tighter per-IP budget
+            here (10 attempts / 5 min) to bound brute-force +
+            credential-stuffing. ``None`` disables limiting on
+            ``/login`` (the default; tests and local dev).
+        signup_rate_limit_dep: Optional FastAPI dependency applied to
+            ``/signup`` only. ``app.py`` wires a separate per-IP budget
+            here (3 attempts / hour) — signup is rarer than login and
+            the abuse pattern is account-creation flooding, which
+            warrants a strict longer-window cap independent of the
+            login budget. ``None`` disables limiting on ``/signup``.
     """
     serializer = URLSafeSerializer(session_secret, salt=_COOKIE_SALT)
     ttl = timedelta(days=session_ttl_days)
@@ -116,8 +153,14 @@ def register_auth_routes(
     app.state.session_cookie_name = cookie_name
 
     router = APIRouter(prefix="/api/auth", tags=["auth"])
+    signup_dependencies = (
+        [Depends(signup_rate_limit_dep)] if signup_rate_limit_dep else []
+    )
+    login_dependencies = (
+        [Depends(login_rate_limit_dep)] if login_rate_limit_dep else []
+    )
 
-    @router.post("/signup", status_code=201)
+    @router.post("/signup", status_code=201, dependencies=signup_dependencies)
     async def signup(body: SignupRequest, response: Response) -> dict[str, Any]:
         """Create a new account + log the user in.
 
@@ -134,6 +177,28 @@ def register_auth_routes(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
+        # Post-signup hook (e.g. watchlist default seed). Hook
+        # failures abort signup with 503 — the hook is responsible
+        # for its own rollback so by the time we re-raise, the user
+        # row no longer exists. The trader gets a clean retry instead
+        # of an account whose first dashboard view is empty (B-14).
+        if post_signup_hook is not None:
+            try:
+                post_signup_hook(user)
+            except Exception as exc:
+                log.warning(
+                    "auth.signup.post_hook_failed",
+                    user_id=user.id,
+                    error=str(exc),
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Could not finish setting up the account. "
+                        "Please try again in a moment."
+                    ),
+                ) from None
+
         session = user_store.create_session(user.id, ttl)
         _set_session_cookie(
             response,
@@ -142,10 +207,11 @@ def register_auth_routes(
             ttl_seconds=ttl_seconds,
             secure=secure_cookies,
         )
+        _set_csrf_cookie_on(response, secure=secure_cookies, ttl_seconds=ttl_seconds)
         log.info("auth.signup.ok", user_id=user.id, email=user.email)
         return {"user": user.to_wire()}
 
-    @router.post("/login")
+    @router.post("/login", dependencies=login_dependencies)
     async def login(body: LoginRequest, response: Response) -> dict[str, Any]:
         """Verify credentials + mint a session.
 
@@ -169,6 +235,7 @@ def register_auth_routes(
             ttl_seconds=ttl_seconds,
             secure=secure_cookies,
         )
+        _set_csrf_cookie_on(response, secure=secure_cookies, ttl_seconds=ttl_seconds)
         log.info("auth.login.ok", user_id=user.id, email=user.email)
         return {"user": user.to_wire()}
 
@@ -187,10 +254,13 @@ def register_auth_routes(
             if token:
                 revoked = user_store.revoke_session(token)
                 log.info("auth.logout.revoked", revoked=revoked)
-        # Always clear the cookie, even if there was nothing to revoke.
+        # Always clear both cookies, even if there was nothing to
+        # revoke server-side — a stale CSRF cookie would otherwise
+        # outlive the session and confuse the next login.
         _clear_session_cookie(
             response, cookie_name=cookie_name, secure=secure_cookies
         )
+        _clear_csrf_cookie_on(response, secure=secure_cookies)
         return {"ok": True}
 
     @router.get("/me")
@@ -286,6 +356,48 @@ def _clear_session_cookie(
         key=cookie_name,
         path="/",
         httponly=True,
+        secure=secure,
+        samesite="lax",
+    )
+
+
+def _generate_csrf_token() -> str:
+    """Mint a fresh CSRF token.
+
+    URL-safe base64, 32 bytes of entropy — same strength as the
+    session token. Stateless from the server's POV: the token's role
+    is "browser-restricted secret a cross-origin attacker can't
+    read," not "value the server can later look up."
+    """
+    return secrets.token_urlsafe(32)
+
+
+def _set_csrf_cookie_on(
+    response: Response, *, secure: bool, ttl_seconds: int
+) -> None:
+    """Mint + write a fresh CSRF cookie on ``response``.
+
+    Crucially NOT HttpOnly — the frontend must read it via
+    ``document.cookie`` and echo as ``X-CSRF-Token``. SameSite=lax +
+    Secure (in prod) bound exposure; the explicit header check is
+    the real defense.
+    """
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=_generate_csrf_token(),
+        max_age=ttl_seconds,
+        httponly=False,
+        secure=secure,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_csrf_cookie_on(response: Response, *, secure: bool) -> None:
+    """Drop the CSRF cookie. Paired with session clear on logout."""
+    response.delete_cookie(
+        key=CSRF_COOKIE_NAME,
+        path="/",
         secure=secure,
         samesite="lax",
     )

@@ -1,0 +1,100 @@
+name: ci
+
+# Run on every push to main + every pull request. PR runs use the
+# merge-commit ref so the check reflects "what main would look like
+# after this merges," not the topic branch in isolation.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-flight runs when a new commit lands on the same branch /
+# PR — saves CI minutes without losing the latest signal.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (lint + types + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: ruff lint
+        run: python -m ruff check src tests
+
+      - name: mypy --strict
+        run: python -m mypy src
+
+      - name: pytest
+        env:
+          # Mirror the conftest opt-outs so CI runs the same shape as
+          # local development (auth gate off by default, no calibration
+          # store, no real Anthropic key).
+          USER_STORE_PATH: ""
+          CALIBRATION_STORE_PATH: ""
+          ANTHROPIC_API_KEY: ""
+        run: python -m pytest -q --no-cov
+
+  frontend:
+    name: frontend (types + tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install deps
+        run: npm ci --no-audit --no-fund
+
+      - name: tsc --noEmit
+        run: npm run typecheck
+
+      - name: vitest
+        run: npx vitest run --reporter=dot
+
+      - name: vite build (smoke test)
+        run: npm run build
+
+  docker:
+    name: docker build (smoke test)
+    runs-on: ubuntu-latest
+    # Only build the image on PRs and main pushes — the test signal is
+    # "the multi-stage Dockerfile still produces an image," not a
+    # publish step. Pushing to a registry happens separately.
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: esther:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

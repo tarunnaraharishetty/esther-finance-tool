@@ -139,6 +139,60 @@ class DashboardSnapshot:
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
+def filter_snapshot_for_symbols(
+    snap: DashboardSnapshot, allowed: frozenset[str] | None
+) -> DashboardSnapshot:
+    """Return ``snap`` filtered down to a user's allowed symbol set.
+
+    ``allowed=None`` is the firehose path — used by the TUI and any
+    operator endpoint that wants the full controller view. When a set
+    is given, every per-symbol collection on the snapshot is filtered
+    to only those symbols; watchlist-wide aggregates (pulse, regime,
+    session-store health, events, tick, timestamp) pass through
+    unchanged because they describe the operating environment, not
+    any individual user's positions.
+
+    Symbol matching is case-insensitive — the WatchlistStore upper-cases
+    on write, but defence-in-depth: a stray lower-case key never leaks
+    past the boundary.
+    """
+    if allowed is None:
+        return snap
+    norm = frozenset(s.upper() for s in allowed)
+
+    def _keep_row(sym: str) -> bool:
+        return sym.upper() in norm
+
+    rows = [r for r in snap.rows if _keep_row(r.symbol)]
+    alerts = [a for a in snap.alerts if _keep_row(a.symbol)]
+    recent_alerts = tuple(a for a in snap.recent_alerts if _keep_row(a.symbol))
+    signal_history = {s: v for s, v in snap.signal_history.items() if _keep_row(s)}
+    opp_history = {s: v for s, v in snap.opp_history.items() if _keep_row(s)}
+    ranked = tuple(o for o in snap.ranked_opportunities if _keep_row(o.symbol))
+    intraday_history = {
+        s: v for s, v in snap.intraday_signal_history.items() if _keep_row(s)
+    }
+    intraday_opp_history = {
+        s: v for s, v in snap.intraday_opp_history.items() if _keep_row(s)
+    }
+    intraday_ranked = tuple(
+        o for o in snap.intraday_ranked_opportunities if _keep_row(o.symbol)
+    )
+
+    return replace(
+        snap,
+        rows=rows,
+        alerts=alerts,
+        recent_alerts=recent_alerts,
+        signal_history=signal_history,
+        opp_history=opp_history,
+        ranked_opportunities=ranked,
+        intraday_signal_history=intraday_history,
+        intraday_opp_history=intraday_opp_history,
+        intraday_ranked_opportunities=intraday_ranked,
+    )
+
+
 class EventBuffer:
     """Bounded FIFO of EventEntry — used by the controller to accumulate log lines.
 

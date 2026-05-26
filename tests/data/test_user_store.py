@@ -221,3 +221,37 @@ def test_user_to_wire_omits_password_hash(tmp_path: Path) -> None:
     assert "password_hash" not in wire
     assert set(wire.keys()) == {"id", "email", "created_at", "last_login_at"}
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# delete_user — used by the signup-seed rollback path (B-14)
+# ---------------------------------------------------------------------------
+
+
+def test_delete_user_removes_row(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    assert store.delete_user(user.id) is True
+    assert store.get_user_by_id(user.id) is None
+    assert store.get_user_by_email("a@b.com") is None
+    store.close()
+
+
+def test_delete_user_missing_is_idempotent(tmp_path: Path) -> None:
+    """Rollback may race with another deletion — must not raise."""
+    store = UserStore(tmp_path / "users.db")
+    store.create_user("a@b.com", "longenough")  # force schema init
+    assert store.delete_user(99_999) is False
+    store.close()
+
+
+def test_delete_user_cascades_sessions(tmp_path: Path) -> None:
+    """FK ON DELETE CASCADE on sessions.user_id — deleting the user
+    must invalidate every issued session token in one step."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    session = store.create_session(user.id, timedelta(days=1))
+    assert store.lookup_session(session.token) is not None
+    store.delete_user(user.id)
+    assert store.lookup_session(session.token) is None
+    store.close()

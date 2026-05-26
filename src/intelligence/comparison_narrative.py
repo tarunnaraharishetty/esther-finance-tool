@@ -33,7 +33,10 @@ from xml.etree import ElementTree as ET
 
 from src.config import Settings, get_settings
 from src.intelligence.comparison import ComparisonView, MetricComparison
-from src.intelligence.grounding import GROUNDING_RULES_COMPARISON
+from src.intelligence.grounding import (
+    GROUNDING_RULES_COMPARISON,
+    sanitize_symbol,
+)
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -549,6 +552,8 @@ class LLMComparisonNarrator:
             max_tokens=_MAX_TOKENS,
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
+            temperature=self.settings.llm_temperature,
+            timeout=self.settings.llm_timeout_seconds,
         )
         text = "".join(b.text for b in response.content if b.type == "text").strip()
         log.info(
@@ -572,8 +577,10 @@ class LLMComparisonNarrator:
 
 def _build_user_message(payload: NarrativeInput) -> str:
     view = payload.view
+    safe_left = sanitize_symbol(view.left_symbol)
+    safe_right = sanitize_symbol(view.right_symbol)
     lines: list[str] = [
-        f"Comparing: LEFT={view.left_symbol} vs RIGHT={view.right_symbol}",
+        f"Comparing: LEFT={safe_left} vs RIGHT={safe_right}",
         f"Overall winner: {view.overall_winner}",
         "",
         "Headline metrics:",

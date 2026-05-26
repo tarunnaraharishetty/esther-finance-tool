@@ -52,7 +52,24 @@ class ProviderUnavailable(ProviderError):
 
 
 class ProviderRateLimited(ProviderError):
-    """Provider returned a 429 / quota-exhausted response."""
+    """Provider returned a 429 / quota-exhausted response.
+
+    ``retry_after_seconds`` carries the ``Retry-After`` header value when
+    the upstream supplied one (per RFC 6585). ``None`` when the response
+    had no header or the value couldn't be parsed. Honoured by the retry
+    queue scheduler so a provider asking for a 5-minute wait isn't
+    retried 30 seconds later by our default backoff.
+    """
+
+    def __init__(
+        self,
+        provider: ProviderName,
+        message: str,
+        *,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(provider, message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class ProviderNotFound(ProviderError):

@@ -26,8 +26,17 @@ from typing import TYPE_CHECKING
 import anthropic
 
 from src.config import Settings, get_settings
-from src.intelligence.grounding import GROUNDING_RULES_PER_SYMBOL
+from src.intelligence.grounding import (
+    GROUNDING_RULES_PER_SYMBOL,
+    sanitize_prompt_value,
+    sanitize_symbol,
+)
 from src.intelligence.opportunities import rank_opportunities
+from src.intelligence.text_grounding import (
+    build_corpus,
+    build_default_allowance,
+    validate_prose,
+)
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -554,6 +563,8 @@ class LLMOpportunityBriefer:
             output_config={"effort": "low"},
             cache_control={"type": "ephemeral"},
             messages=[{"role": "user", "content": user_message}],
+            temperature=self.settings.llm_temperature,
+            timeout=self.settings.llm_timeout_seconds,
         )
         text = "".join(b.text for b in response.content if b.type == "text").strip()
         log.info(
@@ -564,7 +575,68 @@ class LLMOpportunityBriefer:
             cache_read=getattr(response.usage, "cache_read_input_tokens", 0),
             cache_write=getattr(response.usage, "cache_creation_input_tokens", 0),
         )
-        return text
+        # Post-hoc grounding pass — drop any sentence whose numeric tokens
+        # aren't in the input corpus. Same contract as LLMSummarizer +
+        # LLMRecapGenerator + the compare narrative validator.
+        validated, dropped = validate_prose(
+            text,
+            corpus=_build_brief_corpus(context),
+            allowance=build_default_allowance(symbol=context.symbol),
+            where="llm_opp_brief",
+        )
+        if dropped:
+            log.warning(
+                "llm.opp_brief.dropped_claims",
+                symbol=context.symbol,
+                drop_count=len(dropped),
+                tokens=[t for c in dropped for t in c.unsupported_tokens],
+            )
+        return validated
+
+
+def _build_brief_corpus(ctx: OpportunityBriefContext) -> str:
+    """Assemble the substring corpus for validating an OPP brief.
+
+    Includes every numeric scalar the prompt exposes to the model: the
+    seven driver scores, composite + rank, the underlying indicators,
+    sentiment + article count, top-N membership counters, pre-computed
+    rationale phrases, and headlines verbatim.
+    """
+    parts: list[str] = [
+        ctx.symbol,
+        ctx.tier_display,
+        f"{ctx.composite_score:.2f}",
+        str(ctx.rank),
+        # Seven drivers, each in the surface forms the prompt uses.
+        f"{ctx.technical_alignment:.2f}",
+        f"{ctx.sentiment_alignment:.2f}",
+        f"{ctx.confidence_acceleration:.2f}",
+        f"{ctx.momentum_persistence:.2f}",
+        f"{ctx.unusual_activity:.2f}",
+        f"{ctx.reversal_strength:.2f}",
+        f"{ctx.signal_quality_score:.2f}",
+        # Profile labels.
+        ctx.stability,
+        ctx.trend,
+        ctx.persistence,
+        # Underlying market data.
+        f"{ctx.confidence:.2f}",
+        f"{ctx.rsi:.2f}",
+        f"{ctx.macd:+.2f}",
+        f"{ctx.bollinger:+.2f}",
+        f"{ctx.sentiment_score:+.2f}",
+        str(ctx.num_news_articles),
+        # Membership history counters.
+        str(ctx.streak),
+        str(ctx.appearances),
+        str(ctx.window),
+    ]
+    if _is_finite(ctx.last_price):
+        parts.append(f"{ctx.last_price:,.2f}")
+        parts.append(f"{ctx.last_price:.2f}")
+    parts.extend(ctx.rationale)
+    parts.extend(ctx.headlines)
+    return build_corpus(*parts)
 
 
 def _build_brief_user_message(ctx: OpportunityBriefContext) -> str:
@@ -573,8 +645,9 @@ def _build_brief_user_message(ctx: OpportunityBriefContext) -> str:
     Mirrors the per-symbol summary format so future-us can A/B prompts
     without surprising the model.
     """
+    safe_symbol = sanitize_symbol(ctx.symbol)
     lines: list[str] = [
-        f"Symbol: {ctx.symbol}",
+        f"Symbol: {safe_symbol}",
         f"Tier: {ctx.tier_display}",
         f"Composite score: {ctx.composite_score:.2f} (rank #{ctx.rank} in top-N)",
         "",
@@ -616,7 +689,7 @@ def _build_brief_user_message(ctx: OpportunityBriefContext) -> str:
         lines.append("")
         lines.append("Recent headlines (verbatim — quote exactly or do not reference):")
         for i, headline in enumerate(ctx.headlines, start=1):
-            lines.append(f'{i}. "{headline}"')
+            lines.append(f'{i}. "{sanitize_prompt_value(headline)}"')
 
     return "\n".join(lines)
 

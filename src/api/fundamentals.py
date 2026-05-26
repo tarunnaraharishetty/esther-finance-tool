@@ -47,6 +47,7 @@ from src.config import get_settings
 from src.data.accuracy_store import AccuracyStore
 from src.data.health_store import HealthStore
 from src.data.retry_queue import RetryQueue
+from src.intelligence.analyzer.sector_medians import SectorCohort
 from src.intelligence.fundamentals import (
     FundamentalsResult,
     FundamentalsService,
@@ -66,6 +67,7 @@ def register_fundamentals_routes(
     health_store: HealthStore | None = None,
     retry_queue: RetryQueue | None = None,
     accuracy_store: AccuracyStore | None = None,
+    sector_cohort: SectorCohort | None = None,
 ) -> None:
     """Attach fundamentals routes to ``app``.
 
@@ -105,6 +107,7 @@ def register_fundamentals_routes(
                 health_store=health_store,
                 retry_queue=retry_queue,
                 accuracy_store=accuracy_store,
+                sector_cohort=sector_cohort,
             )
             service_holder[0] = cached
         return cached

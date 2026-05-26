@@ -43,26 +43,37 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import FileResponse, StreamingResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
 from src.api.analyzer import register_analyzer_routes
-from src.api.auth import register_auth_routes
+from src.api.auth import get_current_user, register_auth_routes
 from src.api.broker import SnapshotBroker
 from src.api.compare import register_compare_routes
 from src.api.fundamentals import register_fundamentals_routes
 from src.api.health import register_health_routes
 from src.api.history import register_history_routes
+from src.api.middleware import (
+    InMemoryRateLimiter,
+    build_rate_limiter_dep,
+    install_auth_gate,
+    install_csrf_gate,
+    install_path_rate_limits,
+    install_request_log,
+)
 from src.api.movement import register_movement_routes
 from src.api.research import register_research_routes
 from src.api.sector import register_sector_routes
 from src.api.spotlight import register_spotlight_routes
+from src.api.watchlist import register_watchlist_routes
 from src.config import get_settings
+from src.dashboard.state import filter_snapshot_for_symbols
 from src.data.accuracy_store import AccuracyStore
 from src.data.health_store import HealthStore
 from src.data.retry_queue import BackoffPolicy, RetryQueue
@@ -71,12 +82,17 @@ from src.data.retry_worker import (
     RetryWorker,
     TransientRetryFailure,
 )
-from src.data.user_store import UserStore
+from src.data.user_store import User, UserStore
+from src.data.watchlist_store import WatchlistStore
+from src.intelligence.analyzer.sector_medians import SectorCohort
 from src.intelligence.calibration import CalibrationStore
 from src.intelligence.calibration_worker import (
     CalibrationMaturationWorker,
     bars_cache_price_lookup,
 )
+from src.utils.logging import get_logger
+
+log = get_logger(__name__)
 
 if TYPE_CHECKING:
     from src.dashboard.controller import BaseController
@@ -89,11 +105,21 @@ if TYPE_CHECKING:
 _SSE_HEARTBEAT_SECONDS = 15.0
 
 
+# Module-level dependency alias. FastAPI / pydantic resolve OpenAPI
+# schemas eagerly at first request; aliases declared inside the
+# ``create_app`` function body remain ForwardRefs and trip
+# ``PydanticUserError: TypeAdapter[...] is not fully defined``. Lifting
+# the alias to module scope keeps the dependency typing readable on
+# each route signature without poisoning the OpenAPI generator.
+OptionalUser = Annotated[User | None, Depends(get_current_user)]
+
+
 def create_app(
     controller: BaseController,
     *,
     stream_interval: float | None = None,
     cors_origins: list[str] | None = None,
+    trusted_hosts: list[str] | None = None,
     frontend_dir: Path | None = None,
     fundamentals_service: Any = None,
     fundamentals_cache_dir: Path | None = None,
@@ -110,6 +136,9 @@ def create_app(
     spotlight_cache_dir: Path | None = None,
     accuracy_store: AccuracyStore | None = None,
     user_store: UserStore | None = None,
+    watchlist_store: WatchlistStore | None = None,
+    default_watchlist_symbols: list[str] | None = None,
+    sector_cohort: SectorCohort | None = None,
 ) -> FastAPI:
     """Build a FastAPI app bound to a controller.
 
@@ -214,52 +243,165 @@ def create_app(
         hang the health endpoint. The watchlist length is the only
         controller field we read here — cheap and useful for
         confirming the service is bound to the expected instance.
+
+        K8s-style separation: this endpoint says "the process is up
+        and the FastAPI app is wired"; readiness (DB connectivity,
+        downstream reachability) lives on ``/api/readyz`` below.
         """
         return {"status": "ok", "watchlist_size": len(controller.watchlist)}
 
-    @app.get("/api/snapshot")
-    async def snapshot() -> dict[str, Any]:
-        """Fetch the next dashboard snapshot and return it as JSON.
+    @app.get("/api/livez")
+    async def livez() -> dict[str, Any]:
+        """K8s-convention alias for ``/api/health``.
 
-        Encoding rules (inherited from FastAPI's ``jsonable_encoder``):
-
-        - ``datetime`` → ISO-8601 with timezone (``2026-05-14T19:42:11+00:00``)
-        - ``Enum`` → ``.value`` (so ``SignalAction.BUY`` → ``"buy"``)
-        - ``dataclass`` → dict of its fields
-        - ``tuple`` → list
-
-        The response shape mirrors :class:`DashboardSnapshot` —
-        ``rows`` is the per-symbol watchlist data, top-level fields
-        carry the pulse / regime / alerts / events / session-store
-        status, and the timestamp marks when the snapshot was built
-        (not when the request arrived).
-
-        This endpoint is independent of ``/api/stream`` — it always
-        calls ``controller.fetch_snapshot()`` directly rather than
-        reading from the broker cache. Two parallel mechanisms keep
-        the REST contract simple (request-response) while letting the
-        stream endpoint share the broker tick loop.
+        Kept as a separate route (rather than 301-redirecting) so a
+        liveness probe never relies on the client following a
+        redirect — some prober configurations treat 3xx as failure.
+        Same payload; both routes stay public for cluster operators
+        who follow the livez/readyz convention.
         """
+        return {"status": "ok", "watchlist_size": len(controller.watchlist)}
+
+    @app.get("/api/readyz")
+    async def readyz() -> dict[str, Any]:
+        """Readiness probe — distinguish "wired" from "ready to serve."
+
+        Verifies each persistent dependency the process can't function
+        without. K8s / load balancers should remove an instance from
+        the rotation when this fails; the process stays alive (so
+        ``/api/health`` keeps passing) but no new requests are routed
+        to it until the underlying issue clears.
+
+        Checks are best-effort and bounded: each backend has a cheap
+        read it can answer in milliseconds. A 503 response carries a
+        ``checks`` map so operators can see which dependency degraded.
+        """
+        checks: dict[str, str] = {}
+        ok = True
+
+        users: UserStore | None = getattr(app.state, "user_store", None)
+        if users is not None:
+            try:
+                # Indexed SELECT on the unique email column — cheap,
+                # verifies the file is reachable AND the schema is in
+                # place. The probe email is impossible (no ``@``) so
+                # the row never matches; we only care that the query
+                # ran without an OperationalError.
+                users.get_user_by_email("__readyz_probe__")
+                checks["user_store"] = "ok"
+            except Exception as exc:
+                ok = False
+                checks["user_store"] = f"error: {type(exc).__name__}"
+        else:
+            checks["user_store"] = "disabled"
+
+        rq: RetryQueue | None = getattr(app.state, "retry_queue", None)
+        if rq is not None:
+            try:
+                # ``due_entries`` is the worker's hot path — exercising
+                # it as the probe means a regression that breaks it
+                # also degrades readiness. The (status, next_attempt_at)
+                # composite index keeps this cheap even at scale.
+                rq.due_entries()
+                checks["retry_queue"] = "ok"
+            except Exception as exc:
+                ok = False
+                checks["retry_queue"] = f"error: {type(exc).__name__}"
+        else:
+            checks["retry_queue"] = "disabled"
+
+        # Watchlist store shares the file with UserStore by default
+        # but has its own table + migrations trail — probe it
+        # independently so a schema break on the watchlist side
+        # doesn't hide behind a healthy users probe.
+        wl: WatchlistStore | None = getattr(app.state, "watchlist_store", None)
+        if wl is not None:
+            try:
+                # ``list_for(0)`` returns ``[]`` because no real user
+                # has id 0 — but it exercises the table and the
+                # ordering index. Cheap regression probe.
+                wl.list_for(0)
+                checks["watchlist_store"] = "ok"
+            except Exception as exc:
+                ok = False
+                checks["watchlist_store"] = f"error: {type(exc).__name__}"
+        else:
+            checks["watchlist_store"] = "disabled"
+
+        body: dict[str, Any] = {
+            "status": "ok" if ok else "degraded",
+            "checks": checks,
+        }
+        if not ok:
+            return JSONResponse(body, status_code=503)  # type: ignore[return-value]
+        return body
+
+    def _user_allowed_symbols(user: User | None) -> frozenset[str] | None:
+        """Resolve the user's watchlist symbols for per-user snapshot filtering.
+
+        Three cases:
+
+        * ``user`` is ``None`` → no auth wired (single-user dev / tests).
+          Return ``None`` so the snapshot passes through unfiltered.
+        * ``user`` is set but the WatchlistStore is not wired → return
+          an empty set so the user sees no per-symbol rows (safer than
+          leaking the full universe).
+        * ``user`` is set and a WatchlistStore is available → return
+          the user's symbols as an upper-cased ``frozenset``.
+        """
+        if user is None:
+            return None
+        wl_store: WatchlistStore | None = getattr(app.state, "watchlist_store", None)
+        if wl_store is None:
+            return frozenset()
+        return frozenset(e.symbol.upper() for e in wl_store.list_for(user.id))
+
+    @app.get("/api/snapshot")
+    async def snapshot(user: OptionalUser) -> dict[str, Any]:
+        """Fetch the next dashboard snapshot, filtered to the caller's watchlist.
+
+        Auth contract:
+
+        * When a UserStore is wired (the production path), this route
+          requires a valid session cookie — anonymous requests get 401.
+        * When auth is disabled at the app level (dev workflow without
+          a UserStore), the snapshot flows through unfiltered.
+
+        Per-user filtering removes rows / alerts / opportunities for
+        symbols outside the caller's watchlist; aggregate fields
+        (pulse, regime, session-store health, events) pass through
+        because they describe the operating environment, not any
+        individual user's positions.
+        """
+        if getattr(app.state, "user_store", None) is not None and user is None:
+            raise HTTPException(status_code=401, detail="Authentication required.")
         snap = await controller.fetch_snapshot()
-        result: dict[str, Any] = jsonable_encoder(snap)
+        filtered = filter_snapshot_for_symbols(snap, _user_allowed_symbols(user))
+        result: dict[str, Any] = jsonable_encoder(filtered)
         return result
 
     @app.get("/api/stream")
-    async def stream(request: Request) -> StreamingResponse:
+    async def stream(
+        request: Request, user: OptionalUser
+    ) -> StreamingResponse:
         """Server-Sent Events stream of dashboard snapshots.
+
+        Same auth contract as ``/api/snapshot`` — when a UserStore is
+        wired the route requires a valid session cookie; without one
+        the response is 401. Each emitted snapshot is filtered down
+        to the user's watchlist symbols (see
+        :func:`filter_snapshot_for_symbols`) so two users on the same
+        server can't read each other's rows.
 
         Wire format::
 
             : connected\\n\\n                # initial flush + heartbeat
             id: <tick>\\ndata: <json>\\n\\n   # per snapshot
             : keepalive\\n\\n                # every ≤15s when idle
-
-        Browsers / EventSource clients reconnect automatically when
-        the connection drops; on reconnect the broker's
-        ``subscribe`` immediately re-seeds the queue with the cached
-        latest snapshot so the client sees current state without
-        waiting up to one full interval.
         """
+        if getattr(app.state, "user_store", None) is not None and user is None:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+
         broker: SnapshotBroker | None = getattr(app.state, "broker", None)
         if broker is None:
             raise HTTPException(
@@ -269,6 +411,14 @@ def create_app(
                     "Pass stream_interval to create_app() to enable."
                 ),
             )
+
+        # Resolve the user's allowed symbols ONCE per subscription so
+        # the SSE generator doesn't re-query the watchlist store on
+        # every tick. A future enhancement would invalidate this on
+        # /api/watchlist mutations from the same session; for v1, a
+        # reconnect (which the EventSource does on watchlist add/remove)
+        # re-resolves naturally.
+        allowed = _user_allowed_symbols(user)
 
         async def event_generator() -> AsyncIterator[bytes]:
             queue = broker.subscribe()
@@ -291,8 +441,9 @@ def create_app(
                         # send a comment to keep the connection warm.
                         yield b": keepalive\n\n"
                         continue
-                    payload = json.dumps(jsonable_encoder(snap))
-                    yield f"id: {snap.tick}\ndata: {payload}\n\n".encode()
+                    filtered = filter_snapshot_for_symbols(snap, allowed)
+                    payload = json.dumps(jsonable_encoder(filtered))
+                    yield f"id: {filtered.tick}\ndata: {payload}\n\n".encode()
             finally:
                 broker.unsubscribe(queue)
 
@@ -354,18 +505,137 @@ def create_app(
         and settings.user_store_path is not None
     ):
         effective_user_store = UserStore(settings.user_store_path)
+
+    # WatchlistStore shares the users.db file when one is configured
+    # (per-user data colocated with accounts). Independent connection;
+    # WAL handles cross-store concurrency. ``None`` when auth itself
+    # is disabled — no users, no watchlists.
+    effective_watchlist_store: WatchlistStore | None = watchlist_store
+    if (
+        effective_watchlist_store is None
+        and effective_user_store is not None
+    ):
+        effective_watchlist_store = WatchlistStore(
+            effective_user_store.db_path
+        )
+
     if effective_user_store is not None:
+        # Closures for the auth post-signup hook and the watchlist
+        # add hook. Both reach into module-scope objects (the
+        # watchlist store, the controller), but staying anonymous
+        # here keeps the wiring local to app.py.
+        seed_symbols = tuple(
+            default_watchlist_symbols
+            if default_watchlist_symbols is not None
+            else settings.default_watchlist_symbols
+        )
+
+        def _seed_user_watchlist(user: User) -> None:
+            """Seed the new user's watchlist with the default symbols.
+
+            Transactional contract (B-14): if the seed fails the user
+            row is deleted before re-raising so signup as a whole
+            either succeeds with a populated watchlist or leaves no
+            trace. The previous best-effort behavior produced an
+            account whose first dashboard view was empty — users
+            reasonably concluded auth was broken.
+
+            Watchlist rows have no FK to ``users(id)`` (see
+            ``watchlist_store.py``), so the rollback explicitly purges
+            any rows the seed managed to write before failing.
+            """
+            if effective_watchlist_store is None or not seed_symbols:
+                return
+            try:
+                effective_watchlist_store.seed_default(user.id, seed_symbols)
+                # Nudge the controller so the first tick after signup
+                # already has rows for the seeded symbols. ``add_symbol``
+                # is idempotent so the typical case is a no-op.
+                for sym in seed_symbols:
+                    controller.add_symbol(sym)
+            except Exception:
+                # Rollback in the reverse order of acquisition: drop
+                # any partially-seeded watchlist rows, then the user.
+                # Each cleanup step is guarded so a secondary failure
+                # in the rollback path still lets the original error
+                # surface to the caller (and the logs).
+                for sym in seed_symbols:
+                    try:
+                        effective_watchlist_store.remove(user.id, sym)
+                    except Exception as inner:
+                        log.warning(
+                            "auth.signup.rollback.watchlist_remove_failed",
+                            user_id=user.id,
+                            symbol=sym,
+                            error=str(inner),
+                        )
+                try:
+                    effective_user_store.delete_user(user.id)
+                except Exception as inner:
+                    log.warning(
+                        "auth.signup.rollback.user_delete_failed",
+                        user_id=user.id,
+                        error=str(inner),
+                    )
+                raise
+
+        # Per-IP rate limiters for the auth write routes. Two separate
+        # buckets, not one shared "auth" budget — the abuse patterns
+        # differ enough that one shared cap can't serve both well:
+        #
+        # * Login: brute-force / credential-stuffing tries dozens of
+        #   passwords against one or many accounts. The right shape
+        #   is a moderate cap in a short window so a forgetful human
+        #   isn't punished. ROADMAP gate: 10 login / IP / 5 min.
+        #
+        # * Signup: account-creation flooding (typically for free-tier
+        #   abuse). Real humans sign up ~once. The right shape is a
+        #   strict cap in a long window. ROADMAP gate: 3 signup / IP
+        #   / hour.
+        login_rate_limiter = InMemoryRateLimiter(
+            max_calls=10, per_seconds=300.0
+        )
+        signup_rate_limiter = InMemoryRateLimiter(
+            max_calls=3, per_seconds=3600.0
+        )
+        app.state.login_rate_limiter = login_rate_limiter
+        app.state.signup_rate_limiter = signup_rate_limiter
+
         register_auth_routes(
             app,
             user_store=effective_user_store,
             session_secret=settings.session_secret_key.get_secret_value(),
             session_ttl_days=settings.session_ttl_days,
             cookie_name=settings.session_cookie_name,
-            # Secure cookies require HTTPS. Off in dev (localhost),
-            # production deployments should flip ``ESTHER_SECURE_COOKIES=1``
-            # — exposed via Settings.app_env once we wire that.
-            secure_cookies=False,
+            # Source: ``Settings.secure_cookies``. Defaults to True;
+            # the model validator refuses False in non-dev. Override
+            # via ``SECURE_COOKIES=false`` only for local HTTP testing.
+            secure_cookies=settings.secure_cookies,
+            post_signup_hook=(
+                _seed_user_watchlist
+                if effective_watchlist_store is not None
+                else None
+            ),
+            login_rate_limit_dep=build_rate_limiter_dep(
+                login_rate_limiter, scope="auth_login"
+            ),
+            signup_rate_limit_dep=build_rate_limiter_dep(
+                signup_rate_limiter, scope="auth_signup"
+            ),
         )
+
+        if effective_watchlist_store is not None:
+
+            def _track_in_controller(sym: str) -> None:
+                # Closure over the bound controller. Idempotent —
+                # add_symbol returns False on duplicate.
+                controller.add_symbol(sym)
+
+            register_watchlist_routes(
+                app,
+                watchlist_store=effective_watchlist_store,
+                on_symbol_added=_track_in_controller,
+            )
 
     # Retry queue: same opt-out shape. ``retry_queue_path=None`` in
     # settings disables persistence; otherwise we wire one up.
@@ -379,6 +649,8 @@ def create_app(
             ),
             max_attempts=settings.retry_queue_max_attempts,
         )
+    # Stash on app.state so /api/readyz can probe it.
+    app.state.retry_queue = effective_retry_queue
 
     # Calibration store: same opt-out shape. Lazy init means
     # constructing the store doesn't touch disk until the analyzer
@@ -412,6 +684,15 @@ def create_app(
             provider_trust=effective_provider_trust,
         )
 
+    # Sector-medians cohort: observes every successful fundamentals
+    # fetch and recomputes the live medians table that ``lookup()``
+    # serves to the valuation ensemble (B-13). One instance per app —
+    # tests can inject their own to assert behavior in isolation.
+    effective_sector_cohort: SectorCohort = (
+        sector_cohort if sector_cohort is not None else SectorCohort()
+    )
+    app.state.sector_cohort = effective_sector_cohort
+
     # Fundamentals routes (Phase 2). Independent of the controller —
     # the fundamentals chain only needs settings + the orchestrator.
     # Tests inject ``fundamentals_service`` to avoid network; production
@@ -428,6 +709,7 @@ def create_app(
         health_store=effective_health_store,
         retry_queue=effective_retry_queue,
         accuracy_store=effective_accuracy_store,
+        sector_cohort=effective_sector_cohort,
     )
 
     # Analyzer routes (Phase 6) — assemble technicals + valuation +
@@ -528,6 +810,7 @@ def create_app(
                     settings,
                     health_store=effective_health_store,
                     retry_queue=effective_retry_queue,
+                    sector_cohort=effective_sector_cohort,
                 )
             try:
                 await svc.fetch(symbol)
@@ -537,7 +820,13 @@ def create_app(
                 }
                 transient = {"rate_limited", "transient"}
                 if observed and observed.issubset(transient):
-                    raise TransientRetryFailure(tuple(exc.errors)) from None
+                    # Forward the server-supplied ``Retry-After`` hint so the
+                    # queue's reschedule honors RFC 6585 on the second
+                    # attempt too — not just on the initial enqueue.
+                    raise TransientRetryFailure(
+                        tuple(exc.errors),
+                        retry_after_seconds=exc.retry_after_seconds,
+                    ) from None
                 raise PermanentRetryFailure(tuple(exc.errors)) from None
 
         worker = RetryWorker(
@@ -579,12 +868,74 @@ def create_app(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ]
+    # Per-IP throttling for the LLM-backed endpoints. Anthropic costs
+    # real money and the prompts are long; bound the worst case at
+    # ~30 calls per IP per 5 minutes across the three surfaces. Active
+    # users won't notice; scripted abuse will.
+    llm_route_limiter = InMemoryRateLimiter(max_calls=30, per_seconds=300.0)
+    app.state.llm_route_limiter = llm_route_limiter
+    install_path_rate_limits(
+        app,
+        rules=[
+            ("/api/research/", "llm", llm_route_limiter),
+            ("/api/analyzer/", "llm", llm_route_limiter),
+            ("/api/compare/", "llm", llm_route_limiter),
+        ],
+    )
+
+    # CSRF gate next. Stays a pass-through unless ``csrf_enabled`` is
+    # flipped on app.state — same opt-out shape as auth, so the dev
+    # workflow that has no UserStore doesn't suddenly require a token.
+    # Enforcement scope: POST/PUT/PATCH/DELETE to /api/* (except
+    # /api/auth/* and /api/health) must echo the esther_csrf cookie
+    # back in an X-CSRF-Token header.
+    app.state.csrf_enabled = effective_user_store is not None
+    install_csrf_gate(app)
+
+    # AuthGate next so CORS (added below) wraps it — that way 401
+    # responses still carry the right CORS headers and the browser
+    # surfaces the rejection cleanly. Pass-through when no UserStore
+    # is wired (the dev workflow that pre-dates accounts).
+    install_auth_gate(app)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=effective_origins,
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["*"],
+        allow_credentials=True,
     )
+
+    # Stash the proxy-trust flag so ``_client_ip`` can consult it
+    # without a circular settings import in the middleware module.
+    # Defaults to False — operators behind a reverse proxy must flip
+    # ``TRUST_PROXY_HEADERS=true`` explicitly.
+    app.state.trust_proxy_headers = settings.trust_proxy_headers
+
+    # Request-log middleware installed after the auth/CSRF/rate-limit
+    # gates so it sits OUTSIDE them in the request flow — that way the
+    # log line captures the final status the client sees, including
+    # rejections from AuthGate (401), CSRF (403), and PathRateLimit
+    # (429). It also binds the request id into structlog contextvars
+    # so every nested log call inside the request inherits the
+    # correlation id automatically.
+    install_request_log(app)
+
+    # TrustedHostMiddleware MUST be installed last so it sits at the
+    # very outermost edge — a wrong Host should fail with 400 before
+    # any other middleware (including the request log) even sees the
+    # request, since serving content for an unexpected hostname is
+    # exactly the cache-poisoning / password-reset-forgery risk we
+    # want to neutralize. The settings model validator already
+    # refuses ``["*"]`` in non-dev so a typo doesn't ship.
+    effective_trusted_hosts = (
+        trusted_hosts if trusted_hosts is not None else settings.trusted_hosts
+    )
+    if effective_trusted_hosts:
+        app.add_middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=effective_trusted_hosts,
+        )
 
     # Static frontend mount — production same-origin path.
     #

@@ -1,0 +1,44 @@
+# Local prod simulation. Brings up the bundled image with the same
+# entrypoint, same APP_ENV=prod posture, and a bind-mounted data
+# volume so SQLite state survives container restarts.
+#
+# Usage:
+#   1. cp .env.example .env            # fill in real values
+#   2. docker compose build
+#   3. docker compose up
+#   4. Open http://localhost:8000/
+#
+# The compose file is deliberately minimal — single service, no
+# reverse proxy, no postgres. The point is to exercise the bundled
+# image against a real .env before shipping to Render / Railway / Fly,
+# not to be a production deployment template.
+
+services:
+  esther:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: esther:local
+    container_name: esther
+    restart: unless-stopped
+    # The image's CMD honors $PORT; we bind to 8000 here to match
+    # the Dockerfile's EXPOSE.
+    ports:
+      - "8000:8000"
+    # .env is read by docker compose AND by pydantic-settings inside
+    # the container. Same file, single source of truth.
+    env_file:
+      - .env
+    # SQLite databases + on-disk caches live under /app/data inside
+    # the image. Bind-mounting ./data persists them across container
+    # restarts and lets you inspect them from the host.
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      # Reuses the same /api/health probe as the Dockerfile HEALTHCHECK
+      # so `docker compose ps` agrees with the in-image health state.
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s

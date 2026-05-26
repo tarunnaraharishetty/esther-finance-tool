@@ -638,9 +638,20 @@ class _CapturingRetryQueue:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[str, ...]]] = []
+        self.last_retry_after: float | None = None
 
-    def enqueue(self, symbol: str, errors: tuple[str, ...]) -> None:
+    def enqueue(
+        self,
+        symbol: str,
+        errors: tuple[str, ...],
+        *,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        # Capture the Retry-After hint too so tests can assert that the
+        # service propagates it from rate-limited providers into the
+        # queue (BUGS.md B-10).
         self.calls.append((symbol.upper(), tuple(errors)))
+        self.last_retry_after = retry_after_seconds
 
 
 @pytest.mark.asyncio
@@ -712,6 +723,185 @@ async def test_no_retry_queue_means_no_enqueue_attempted() -> None:
     svc = FundamentalsService(providers=[fmp], retry_queue=None)
     with pytest.raises(ProviderChainExhausted):
         await svc.fetch("AAPL")
+
+
+@pytest.mark.asyncio
+async def test_chain_exhausted_carries_max_retry_after_hint() -> None:
+    """The largest Retry-After across the chain rides the exception so the
+    worker reschedule honors the server cooldown on the second attempt."""
+    fmp = _FakeProvider(
+        ProviderName.FMP,
+        [ProviderRateLimited(ProviderName.FMP, "429", retry_after_seconds=120.0)],
+    )
+    finnhub = _FakeProvider(
+        ProviderName.FINNHUB,
+        [ProviderRateLimited(ProviderName.FINNHUB, "429", retry_after_seconds=600.0)],
+    )
+    svc = FundamentalsService(providers=[fmp, finnhub], retry_queue=None)
+    with pytest.raises(ProviderChainExhausted) as exc_info:
+        await svc.fetch("AAPL")
+    assert exc_info.value.retry_after_seconds == 600.0
+
+
+@pytest.mark.asyncio
+async def test_chain_exhausted_retry_after_is_none_when_no_hint() -> None:
+    """No provider supplied Retry-After → exception carries None, not 0.0."""
+    fmp = _FakeProvider(
+        ProviderName.FMP, [ProviderTransient(ProviderName.FMP, "boom")]
+    )
+    svc = FundamentalsService(providers=[fmp], retry_queue=None)
+    with pytest.raises(ProviderChainExhausted) as exc_info:
+        await svc.fetch("AAPL")
+    assert exc_info.value.retry_after_seconds is None
+
+
+# ---------------------------------------------------------------------------
+# B-11: sanity rejections feed the accuracy ledger
+# ---------------------------------------------------------------------------
+
+
+class _CapturingAccuracyStore:
+    """Stub that records every batch of AccuracyEvents sunk by the service."""
+
+    def __init__(self) -> None:
+        self.batches: list[tuple[object, ...]] = []
+
+    def record(self, events: object) -> int:
+        materialized = tuple(events)
+        self.batches.append(materialized)
+        return len(materialized)
+
+
+class _BogusProvider:
+    """Provider stub that ships an obviously bogus market_cap.
+
+    Used to drive the sanity path without coupling to the full
+    NormalizedFundamentals shape — only the one field under test is
+    interesting here.
+    """
+
+    def __init__(self, name: ProviderName) -> None:
+        self.name = name
+
+    @property
+    def is_configured(self) -> bool:
+        return True
+
+    async def fetch(self, symbol: str):  # type: ignore[no-untyped-def]
+        from src.intelligence.fundamentals.models import CompanyProfile
+
+        now = datetime.now(UTC)
+        normalized = NormalizedFundamentals(
+            symbol=symbol,
+            fetched_at=now,
+            primary_provider=self.name,
+            contributing_providers=(self.name,),
+            profile=CompanyProfile(symbol=symbol, market_cap=-42.0),
+        )
+        raw = ProviderRawResponse(
+            provider=self.name,
+            symbol=symbol,
+            endpoint="bogus",
+            fetched_at=now,
+            payload={},
+        )
+        return normalized, raw
+
+
+@pytest.mark.asyncio
+async def test_sanity_rejection_emits_accuracy_event() -> None:
+    """A provider that ships a negative market cap should log one
+    self-referential AccuracyEvent with the ``sanity:`` namespace and
+    agreed=False so the trust weight reflects the failure."""
+    store = _CapturingAccuracyStore()
+    svc = FundamentalsService(
+        providers=[_BogusProvider(ProviderName.FMP)], accuracy_store=store
+    )
+    result = await svc.fetch("AAPL")
+    # The bad scalar should have been dropped on the way out.
+    assert result.fundamentals.profile.market_cap is None
+    # Exactly one batch of accuracy events was sunk; it must contain at
+    # least one sanity-namespaced event for this rejection.
+    flat = [event for batch in store.batches for event in batch]
+    sanity = [e for e in flat if e.field.startswith("sanity:")]
+    assert sanity, "expected at least one sanity:* accuracy event"
+    event = next(e for e in sanity if "market_cap" in e.field)
+    assert event.provider is ProviderName.FMP
+    assert event.reference_provider is ProviderName.FMP  # self sentinel
+    assert event.agreed is False
+    assert event.rel_error == 1.0
+    assert event.observed_value == -42.0
+    assert event.reference_value is None
+
+
+@pytest.mark.asyncio
+async def test_clean_provider_emits_no_sanity_events() -> None:
+    """Provider with no bogus values: no sanity events on the ledger."""
+    store = _CapturingAccuracyStore()
+    svc = FundamentalsService(
+        providers=[_ConfiguredProvider(ProviderName.FMP)],
+        accuracy_store=store,
+    )
+    await svc.fetch("AAPL")
+    flat = [event for batch in store.batches for event in batch]
+    assert all(not e.field.startswith("sanity:") for e in flat)
+
+
+# ---------------------------------------------------------------------------
+# B-13: every successful fetch feeds the sector cohort
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_successful_fetch_observes_into_sector_cohort() -> None:
+    """B-13 end-to-end: a successful fetch must reach the cohort so
+    enough observations move ``lookup()`` off the static seed."""
+    from src.intelligence.analyzer.sector_medians import SectorCohort
+
+    cohort = SectorCohort()
+    svc = FundamentalsService(
+        providers=[_ConfiguredProvider(ProviderName.FMP)],
+        sector_cohort=cohort,
+    )
+    await svc.fetch("AAPL")
+    snapshot = cohort.snapshot()
+    assert len(snapshot) == 1
+    assert snapshot[0].symbol == "AAPL"
+
+
+@pytest.mark.asyncio
+async def test_failed_fetch_does_not_pollute_cohort() -> None:
+    """A provider chain exhaustion produces no cohort observation —
+    we only seed the medians from confirmed-healthy data."""
+    from src.intelligence.analyzer.sector_medians import SectorCohort
+
+    cohort = SectorCohort()
+    fmp = _FakeProvider(
+        ProviderName.FMP, [ProviderTransient(ProviderName.FMP, "boom")]
+    )
+    svc = FundamentalsService(providers=[fmp], sector_cohort=cohort)
+    with pytest.raises(ProviderChainExhausted):
+        await svc.fetch("AAPL")
+    assert cohort.snapshot() == []
+
+
+@pytest.mark.asyncio
+async def test_cohort_observe_failure_does_not_break_fetch() -> None:
+    """A misbehaving cohort hook must never break a real fetch — the
+    medians override is a confidence modifier, not a correctness gate."""
+    from src.intelligence.analyzer.sector_medians import SectorCohort
+
+    class _BrokenCohort(SectorCohort):
+        def observe(self, record):  # type: ignore[no-untyped-def, override]
+            raise RuntimeError("simulated cohort failure")
+
+    svc = FundamentalsService(
+        providers=[_ConfiguredProvider(ProviderName.FMP)],
+        sector_cohort=_BrokenCohort(),
+    )
+    # Must not raise.
+    result = await svc.fetch("AAPL")
+    assert result.fundamentals.primary_provider is ProviderName.FMP
 
 
 @pytest.mark.asyncio

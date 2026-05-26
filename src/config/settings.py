@@ -10,10 +10,15 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.data.models import TimeFrame
+
+# Known dev placeholder for ``session_secret_key``. Kept as a module
+# constant so the model validator can reject it for non-dev deployments
+# without duplicating the literal.
+_DEFAULT_DEV_SESSION_SECRET = "esther-dev-session-key-change-in-production"
 
 
 class AppEnv(StrEnum):
@@ -99,14 +104,21 @@ class Settings(BaseSettings):
     fundamentals_cache_ttl_hours: float = 12.0
 
     # ---- Retry queue ----
-    # Durable JSON-on-disk queue for transient fundamentals fetch
+    # Durable SQLite-backed queue for transient fundamentals fetch
     # failures (rate limits, 5xx). A worker drains it on its own
     # cadence so a 30-second blip doesn't strand a symbol until the
     # next user-initiated retry. Set ``RETRY_QUEUE_PATH=`` (empty) to
     # disable persistence entirely — the route 404s and the service
     # skips enqueue. ``retry_queue_worker_enabled`` is off by default
     # so the local dev TUI and tests don't make background API calls.
-    retry_queue_path: Path | None = PROJECT_ROOT / "data" / "retry_queue.json"
+    #
+    # The default suffix moved from ``.json`` to ``.db`` when the
+    # backend switched to SQLite (BUGS.md B-23). Deployments that
+    # pinned ``RETRY_QUEUE_PATH=.../retry_queue.json`` via env var
+    # will need to update the path or rename the file — opening an
+    # existing JSON file with sqlite3 raises a clear "not a database"
+    # error so the misconfiguration fails fast at startup.
+    retry_queue_path: Path | None = PROJECT_ROOT / "data" / "retry_queue.db"
     retry_queue_max_attempts: int = 5
     retry_queue_initial_backoff_seconds: float = 30.0
     retry_queue_max_backoff_seconds: float = 1800.0
@@ -163,9 +175,15 @@ class Settings(BaseSettings):
     # human-readable string — for any deployment you'd flip this in
     # the env (``SESSION_SECRET_KEY=…``). Length isn't enforced;
     # itsdangerous accepts arbitrary bytes.
-    session_secret_key: SecretStr = SecretStr(
-        "esther-dev-session-key-change-in-production"
-    )
+    session_secret_key: SecretStr = SecretStr(_DEFAULT_DEV_SESSION_SECRET)
+    # Mark session cookies ``Secure`` so browsers refuse to send them
+    # over plain HTTP. Default is ``False`` because the dev workflow
+    # uses plain-HTTP localhost and the httpx TestClient won't replay
+    # ``Secure`` cookies over HTTP. The model validator below *requires*
+    # ``True`` outside ``AppEnv.DEV`` — production deployments must set
+    # ``SECURE_COOKIES=true`` (or rely on the env-derived default
+    # implied by app_env != dev → must override).
+    secure_cookies: bool = False
     # Session lifetime. 30 days matches the default browser cookie
     # expectation for "stay logged in" — long enough to feel
     # persistent, short enough to bound exposure on a stolen device.
@@ -173,6 +191,18 @@ class Settings(BaseSettings):
     # Cookie name. Stable across deployments; changing this would
     # invalidate every issued session.
     session_cookie_name: str = "esther_session"
+    # Symbols seeded into a new user's watchlist on signup. Picked to
+    # give a first-run user something to look at without making any
+    # implicit recommendation (these are the most-traded names on the
+    # board, not a model output). Empty list = no seed, user lands on
+    # an empty watchlist.
+    default_watchlist_symbols: list[str] = [
+        "AAPL",
+        "MSFT",
+        "NVDA",
+        "GOOGL",
+        "TSLA",
+    ]
 
     # ---- Analyzer / valuation ----
     # Sector-median multiples (P/E, EV/EBITDA, P/S, PEG) used by the
@@ -254,6 +284,15 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     llm_model: str = "claude-opus-4-7"
     llm_max_tokens: int = 1024
+    # Timeout for every Anthropic ``messages.create`` call. Without
+    # this, a stalled network can hang a request indefinitely (the
+    # SDK default is 10 minutes). 30s is enough headroom for a full
+    # research thesis on a warm cache.
+    llm_timeout_seconds: float = 30.0
+    # Temperature for grounded LLM outputs. 0 keeps repeated calls on
+    # identical inputs effectively deterministic, which lines up with
+    # the "grounded" + "validated" framing in the product.
+    llm_temperature: float = 0.0
 
     # ---- HTTP API ----
     # Origins allowed to hit the API cross-origin. Default is the Vite
@@ -267,6 +306,20 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ]
+    # Hostnames the server is willing to answer for (Host header).
+    # ``["*"]`` accepts any Host (dev default) but is refused outside
+    # ``AppEnv.DEV`` by the model validator — Host-header injection
+    # attacks (cache poisoning, password-reset link forgery) are
+    # neutralized by a tight allow-list. Override via
+    # ``TRUSTED_HOSTS=esther.example.com,api.esther.example.com``.
+    trusted_hosts: list[str] = ["*"]
+    # When True, ``X-Forwarded-For`` is honored for client-IP
+    # resolution (rate limiter key, structured log) AND uvicorn is
+    # launched with ``proxy_headers=True`` so ``X-Forwarded-Proto``
+    # round-trips into ``request.url.scheme``. Default False — outside
+    # a trusted reverse proxy the header is attacker-controlled and a
+    # spoofed XFF would bypass per-IP rate limits.
+    trust_proxy_headers: bool = False
 
     # ---- Paths ----
     project_root: Path = PROJECT_ROOT
@@ -278,6 +331,19 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
+
+    @field_validator("trusted_hosts", mode="before")
+    @classmethod
+    def _split_trusted_hosts(cls, v: object) -> object:
+        """Accept ``TRUSTED_HOSTS=a.com,b.com`` in addition to JSON list."""
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                return v
+            return [piece.strip() for piece in stripped.split(",") if piece.strip()]
+        return v
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -325,6 +391,42 @@ class Settings(BaseSettings):
         """Same opt-out convention as the health store path."""
         if isinstance(v, str) and not v.strip():
             return None
+        return v
+
+    @field_validator("user_store_path", mode="before")
+    @classmethod
+    def _empty_user_store_path_is_none(cls, v: object) -> object:
+        """Same opt-out convention as the health store path.
+
+        Setting ``USER_STORE_PATH=`` (empty) disables auth entirely —
+        the auth gate middleware passes through and ``/api/watchlist``
+        routes don't register. Used by the test suite to keep the
+        non-auth API contract tests focused.
+        """
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @field_validator("default_watchlist_symbols", mode="before")
+    @classmethod
+    def _split_default_watchlist(cls, v: object) -> object:
+        """Accept ``DEFAULT_WATCHLIST_SYMBOLS=AAPL,MSFT`` or a JSON list.
+
+        Same convention as ``cors_origins`` / ``fundamentals_provider_order``
+        — deploy hosts pass env vars as plain strings, comma-separated
+        is the friendlier form.
+        """
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                return v
+            return [
+                piece.strip().upper()
+                for piece in stripped.split(",")
+                if piece.strip()
+            ]
         return v
 
     @field_validator("fundamentals_provider_order", mode="before")
@@ -384,6 +486,50 @@ class Settings(BaseSettings):
     @property
     def is_prod(self) -> bool:
         return self.app_env == AppEnv.PROD
+
+    @property
+    def is_dev(self) -> bool:
+        return self.app_env == AppEnv.DEV
+
+    @model_validator(mode="after")
+    def _enforce_production_safety(self) -> Settings:
+        """Fail fast in non-dev when load-bearing security defaults are still set.
+
+        Two checks today:
+        - The known dev placeholder for ``session_secret_key`` is
+          rejected outside ``AppEnv.DEV``. Otherwise a deployment that
+          forgets to set ``SESSION_SECRET_KEY`` signs cookies with a
+          string committed to the repo — equivalent to no signing.
+        - ``secure_cookies`` is required outside ``AppEnv.DEV``. If
+          you genuinely need plain-HTTP cookies in production, override
+          explicitly via ``SECURE_COOKIES=true`` in dev / staging
+          first, then revisit; we refuse to ship the default.
+        """
+        if self.app_env != AppEnv.DEV:
+            if self.session_secret_key.get_secret_value() == _DEFAULT_DEV_SESSION_SECRET:
+                raise ValueError(
+                    "SESSION_SECRET_KEY must be overridden when APP_ENV is not 'dev'. "
+                    "The committed default is a known string and provides no signing strength."
+                )
+            if not self.secure_cookies:
+                raise ValueError(
+                    "SECURE_COOKIES must be true when APP_ENV is not 'dev'. "
+                    "Set SECURE_COOKIES=false explicitly only for local plain-HTTP testing."
+                )
+            if self.trusted_hosts == ["*"]:
+                raise ValueError(
+                    "TRUSTED_HOSTS must not be '*' when APP_ENV is not 'dev'. "
+                    "Pin the comma-separated hostnames this server should answer "
+                    "for (e.g. 'esther.example.com,api.esther.example.com'); "
+                    "Host-header injection is otherwise unmitigated."
+                )
+            if "*" in self.cors_origins:
+                raise ValueError(
+                    "CORS_ORIGINS must not include '*' when APP_ENV is not 'dev'. "
+                    "FastAPI rejects allow_credentials=True paired with a "
+                    "wildcard origin; pin the exact frontend origin(s) instead."
+                )
+        return self
 
 
 @lru_cache(maxsize=1)

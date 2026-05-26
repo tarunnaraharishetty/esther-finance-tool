@@ -428,10 +428,28 @@ def build_valuation(
 
     # Overall confidence: coverage (how many models fired / 7) × average
     # per-model confidence × an agreement factor (1 - normalized stdev).
+    #
+    # Dispersion divisor: the previous form used ``max(|base|, 1.0)``,
+    # which pinned the denominator at 1.0 for symbols where ``base`` is
+    # near zero (loss-makers, distressed names) and produced numerically
+    # huge dispersion values that propagated NaN/Inf into ``agreement``
+    # and the final confidence. The fix is to floor the divisor against
+    # the *typical* fair value across the surviving estimates — the
+    # median magnitude — so a $0.50 base price is divided by an
+    # appropriate scale, not by 1.0. We also clamp the dispersion (and
+    # therefore the agreement factor) into [0, 1] explicitly so a
+    # pathological input cannot leak past this point.
     coverage = len(estimates) / 7.0
     avg_confidence = float(weights.mean())
-    if len(values) > 1 and base != 0:
-        dispersion = float(np.std(values) / max(abs(base), 1.0))
+    if len(values) > 1:
+        median_magnitude = float(np.median(np.abs(values)))
+        divisor = max(abs(base), median_magnitude, 1.0)
+        raw_dispersion = float(np.std(values) / divisor)
+        # Reject NaN/Inf defensively even after the floor — a downstream
+        # change to inputs shouldn't be able to poison the score.
+        dispersion = (
+            0.0 if not np.isfinite(raw_dispersion) else min(max(raw_dispersion, 0.0), 1.0)
+        )
     else:
         dispersion = 0.0
     agreement = max(0.0, 1.0 - dispersion)

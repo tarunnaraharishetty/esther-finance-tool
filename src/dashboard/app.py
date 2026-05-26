@@ -66,6 +66,7 @@ from src.intelligence.watchlist import (
 from src.persistence.session_store import SessionStoreStatus
 from src.strategy.base import RecommendationTier, SignalAction
 from src.strategy.multi_timeframe import IntradayRead, is_divergent
+from src.utils.bounded import bounded_set
 
 if TYPE_CHECKING:
     from src.dashboard.controller import BaseController
@@ -82,6 +83,14 @@ _ACTION_STYLES = {
     SignalAction.SELL: "bold red",
     SignalAction.HOLD: "yellow",
 }
+
+
+# Maximum entries retained per in-memory brief cache. Mirrors
+# ``BaseController._MAX_BRIEF_CACHE_ENTRIES`` so the TUI's view-side
+# cache evicts on the same cadence as the persisted mirror — without
+# this cap a long-running TUI session bleeds memory even though the
+# JSON snapshot stays bounded (BUGS.md B-16).
+_MAX_BRIEF_CACHE_ENTRIES = 200
 
 
 # MT2 phase 2a — the two values ``DashboardApp.view_timeframe`` can
@@ -2515,10 +2524,20 @@ class DashboardApp(App[None]):
 
         symbol, bucket = cache_key
         if intraday:
-            self._intraday_opp_brief_cache[cache_key] = text
+            bounded_set(
+                self._intraday_opp_brief_cache,
+                cache_key,
+                text,
+                max_entries=_MAX_BRIEF_CACHE_ENTRIES,
+            )
             self.controller.record_intraday_opp_brief(symbol, bucket, text)
         else:
-            self._opp_brief_cache[cache_key] = text
+            bounded_set(
+                self._opp_brief_cache,
+                cache_key,
+                text,
+                max_entries=_MAX_BRIEF_CACHE_ENTRIES,
+            )
             self.controller.record_opp_brief(symbol, bucket, text)
         detail = self.query_one(DetailPanel)
         detail.brief_state = "ready"
@@ -2623,7 +2642,12 @@ class DashboardApp(App[None]):
             detail.refresh()
             return
 
-        self._brief_cache[cache_key] = text
+        bounded_set(
+            self._brief_cache,
+            cache_key,
+            text,
+            max_entries=_MAX_BRIEF_CACHE_ENTRIES,
+        )
         # Mirror to the controller so the brief survives a restart.
         # Cache key is (symbol, action_value) — same shape the
         # controller persists.

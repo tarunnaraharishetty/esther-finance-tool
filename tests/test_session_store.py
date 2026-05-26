@@ -461,6 +461,137 @@ def test_controller_record_briefs_round_trip_across_restart(tmp_path: Path) -> N
     assert ctrl_b.opp_brief_cache == {"AAPL|75": "saved OPP brief text"}
 
 
+# ---------------------------------------------------------------------------
+# B-16: brief-cache bound is enforced + survives the persistence round trip
+# ---------------------------------------------------------------------------
+
+
+def test_controller_record_row_brief_evicts_past_cap(tmp_path: Path) -> None:
+    """The 201st row brief evicts the oldest — bare ``dict[k] = v``
+    growth would balloon the snapshot file over time (BUGS.md B-16)."""
+    from src.dashboard.controller import (
+        _MAX_BRIEF_CACHE_ENTRIES,
+        MockDashboardController,
+    )
+
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=1)
+    cap = _MAX_BRIEF_CACHE_ENTRIES
+    for i in range(cap + 5):
+        ctrl.record_row_brief(f"SYM{i:04d}", "buy", f"brief #{i}")
+    assert len(ctrl.brief_cache) == cap
+    # The 5 oldest must have been evicted (FIFO).
+    for i in range(5):
+        assert f"SYM{i:04d}|buy" not in ctrl.brief_cache
+    # And the 5 newest must still be present.
+    for i in range(cap, cap + 5):
+        assert f"SYM{i:04d}|buy" in ctrl.brief_cache
+
+
+def test_controller_record_opp_brief_evicts_past_cap(tmp_path: Path) -> None:
+    """Same FIFO contract on the OPP brief cache."""
+    from src.dashboard.controller import (
+        _MAX_BRIEF_CACHE_ENTRIES,
+        MockDashboardController,
+    )
+
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=1)
+    cap = _MAX_BRIEF_CACHE_ENTRIES
+    for i in range(cap + 3):
+        ctrl.record_opp_brief(f"SYM{i:04d}", 75, f"opp #{i}")
+    assert len(ctrl.opp_brief_cache) == cap
+    assert "SYM0000|75" not in ctrl.opp_brief_cache
+    assert f"SYM{cap + 2:04d}|75" in ctrl.opp_brief_cache
+
+
+def test_record_brief_reset_of_existing_key_protects_from_eviction(
+    tmp_path: Path,
+) -> None:
+    """Re-recording a brief for the same key refreshes its position so
+    a hot symbol survives FIFO eviction once the cap is reached."""
+    from src.dashboard.controller import (
+        _MAX_BRIEF_CACHE_ENTRIES,
+        MockDashboardController,
+    )
+
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=1)
+    cap = _MAX_BRIEF_CACHE_ENTRIES
+    # Fill to the cap.
+    for i in range(cap):
+        ctrl.record_row_brief(f"SYM{i:04d}", "buy", f"v1 #{i}")
+    assert "SYM0000|buy" in ctrl.brief_cache
+    # Refresh the oldest entry — it should move to the newest slot.
+    ctrl.record_row_brief("SYM0000", "buy", "refreshed")
+    # Add one more symbol; under bare FIFO that would evict SYM0000,
+    # but the refresh protected it — SYM0001 leaves instead.
+    ctrl.record_row_brief("NEWSYM", "buy", "newest")
+    assert ctrl.brief_cache["SYM0000|buy"] == "refreshed"
+    assert "SYM0001|buy" not in ctrl.brief_cache
+    assert ctrl.brief_cache["NEWSYM|buy"] == "newest"
+
+
+def test_hydrate_trims_oversized_snapshot_to_cap(tmp_path: Path) -> None:
+    """A snapshot file written before B-16's cap (or by a misbehaving
+    fork) can carry thousands of entries. The controller trims on
+    hydrate so the next save is bounded again — file size self-heals
+    even without any new brief activity."""
+    from src.dashboard.controller import (
+        _MAX_BRIEF_CACHE_ENTRIES,
+        MockDashboardController,
+    )
+
+    state_path = tmp_path / "session.json"
+    cap = _MAX_BRIEF_CACHE_ENTRIES
+    # Build a synthetic oversized snapshot directly.
+    huge_brief = {f"SYM{i:05d}|buy": f"brief #{i}" for i in range(cap * 3)}
+    huge_opp = {f"SYM{i:05d}|75": f"opp #{i}" for i in range(cap * 2)}
+    bloated = SessionSnapshot(
+        saved_at=datetime.now(UTC),
+        brief_cache=huge_brief,
+        opp_brief_cache=huge_opp,
+    )
+    SessionStore(state_path).save(bloated)
+
+    ctrl = MockDashboardController(
+        watchlist=["AAPL"], seed=1, session_store=SessionStore(state_path)
+    )
+    # Hydrate is invoked from the controller's constructor when a
+    # store + a previous snapshot are both present.
+    assert len(ctrl.brief_cache) == cap
+    assert len(ctrl.opp_brief_cache) == cap
+    # FIFO trim retains the *newest* entries — last cap of huge_brief.
+    assert f"SYM{cap * 3 - 1:05d}|buy" in ctrl.brief_cache
+    assert "SYM00000|buy" not in ctrl.brief_cache
+
+
+def test_brief_cache_round_trip_preserves_cap_through_save_load(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: a capped cache saves and reloads at the same size —
+    no growth introduced by the persistence layer itself."""
+    from src.dashboard.controller import (
+        _MAX_BRIEF_CACHE_ENTRIES,
+        MockDashboardController,
+    )
+
+    state_path = tmp_path / "session.json"
+    cap = _MAX_BRIEF_CACHE_ENTRIES
+    ctrl_a = MockDashboardController(
+        watchlist=["AAPL"], seed=1, session_store=SessionStore(state_path)
+    )
+    for i in range(cap + 10):
+        ctrl_a.record_row_brief(f"SYM{i:04d}", "buy", f"brief #{i}")
+    ctrl_a._persist_if_enabled()
+
+    loaded = SessionStore(state_path).load()
+    assert loaded is not None
+    assert len(loaded.brief_cache) == cap
+    # Hydrate into a fresh controller — same size on the other side.
+    ctrl_b = MockDashboardController(
+        watchlist=["AAPL"], seed=1, session_store=SessionStore(state_path)
+    )
+    assert len(ctrl_b.brief_cache) == cap
+
+
 def test_intraday_signal_history_records_when_row_has_intraday() -> None:
     """Phase 2a: the controller's intraday_signal_history records
     from row.intraday whenever the row carries one. Rows without an

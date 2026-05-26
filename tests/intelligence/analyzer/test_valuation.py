@@ -400,3 +400,107 @@ def test_to_dict_is_json_safe() -> None:
     assert "estimates" in restored
     assert "weighted_ai_fair_value" in restored
     assert "confidence_score" in restored
+
+
+# ---------------------------------------------------------------------------
+# B-12 regression: dispersion clamp + finite confidence on pathological inputs
+# ---------------------------------------------------------------------------
+
+
+def test_unprofitable_company_ensemble_confidence_is_finite_and_bounded() -> None:
+    """A loss-maker with only fallback estimators surviving must still
+    yield a finite, [0, 100]-bounded confidence — never NaN/Inf."""
+    import math
+
+    ensemble = build_valuation(_unprofitable_biotech())
+    assert ensemble.confidence_score == ensemble.confidence_score  # NaN check
+    assert math.isfinite(ensemble.confidence_score)
+    assert 0.0 <= ensemble.confidence_score <= 100.0
+
+
+def _near_zero_base_with_outlier_fixture() -> NormalizedFundamentals:
+    """Force the ``base ≈ 0`` regime that historically poisoned dispersion.
+
+    Two estimators survive: P/S (revenue 100 / shares 100_000 / sector
+    PS 2.5 → ~0.0025) and analyst target (1000.0). Median (= base case)
+    sits between them; without the divisor floor + dispersion clamp the
+    old code would compute a huge ``std/base`` ratio and propagate NaN
+    via the agreement factor.
+    """
+    return NormalizedFundamentals(
+        symbol="EDGE",
+        fetched_at=datetime.now(UTC),
+        primary_provider=ProviderName.FMP,
+        contributing_providers=(ProviderName.FMP,),
+        profile=CompanyProfile(
+            symbol="EDGE",
+            sector="Communication Services",
+            shares_outstanding=100_000.0,
+        ),
+        income_statements=(
+            _income(
+                2024,
+                revenue=100.0,
+                net_income=-50.0,
+                eps_diluted=-0.0005,
+                shares_diluted=100_000.0,
+            ),
+        ),
+        balance_sheets=(_balance(2024, shares=100_000.0),),
+        cash_flows=(_cashflow(2024, fcf=-50.0),),
+        key_ratios=KeyRatios(),
+        analyst_targets=AnalystTargets(
+            target_mean=1000.0, number_of_analysts=4
+        ),
+    )
+
+
+def test_dispersion_clamp_holds_when_base_near_zero() -> None:
+    """A tiny base case alongside a huge outlier must not poison confidence.
+
+    Before B-12's fix, ``std / max(|base|, 1.0)`` produced dispersion ≫ 1
+    and the agreement factor went negative, eventually surfacing as NaN
+    in the ensemble confidence. The current implementation floors the
+    divisor against the median magnitude AND clamps dispersion into
+    [0, 1] — this test pins that invariant against future drift.
+    """
+    import math
+
+    ensemble = build_valuation(_near_zero_base_with_outlier_fixture())
+    # Confidence is finite + in the documented range.
+    assert math.isfinite(ensemble.confidence_score)
+    assert 0.0 <= ensemble.confidence_score <= 100.0
+    # The bear / base / bull percentiles are real numbers (or None when
+    # no estimator survived) — never NaN.
+    for value in (
+        ensemble.bear_case,
+        ensemble.base_case,
+        ensemble.bull_case,
+        ensemble.weighted_ai_fair_value,
+    ):
+        if value is not None:
+            assert math.isfinite(value)
+
+
+def test_single_surviving_estimator_yields_zero_dispersion() -> None:
+    """When only one method survives, dispersion is defined as 0 and
+    agreement collapses to 1 — confidence is then coverage × avg_conf."""
+    import math
+
+    # Build a fixture where only the analyst target estimator can fire:
+    # no statements, no profile multiples, just a target_mean.
+    only_target = NormalizedFundamentals(
+        symbol="LONE",
+        fetched_at=datetime.now(UTC),
+        primary_provider=ProviderName.FMP,
+        contributing_providers=(ProviderName.FMP,),
+        profile=CompanyProfile(symbol="LONE", sector="Industrials"),
+        analyst_targets=AnalystTargets(
+            target_mean=42.0, number_of_analysts=8
+        ),
+    )
+    ensemble = build_valuation(only_target)
+    assert len(ensemble.estimates) == 1
+    assert math.isfinite(ensemble.confidence_score)
+    assert ensemble.confidence_score > 0.0
+    assert ensemble.confidence_score <= 100.0

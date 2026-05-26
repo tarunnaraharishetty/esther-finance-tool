@@ -9,6 +9,8 @@ provider focused on its endpoint URLs + response shape.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -22,6 +24,43 @@ from src.intelligence.fundamentals.base import (
 from src.intelligence.fundamentals.models import ProviderName
 
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse an HTTP ``Retry-After`` header value into seconds.
+
+    RFC 7231 allows two forms: a non-negative integer (delta-seconds) or
+    an HTTP-date (absolute deadline). Returns ``None`` when the value
+    is missing, malformed, or in the past. We cap at 24h so a hostile
+    or buggy upstream can't strand a symbol for weeks.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    # Try delta-seconds first — by far the common form.
+    try:
+        delta = float(stripped)
+    except ValueError:
+        delta = None
+    if delta is not None:
+        if delta < 0:
+            return None
+        return min(delta, 24 * 3600.0)
+    # Fall back to HTTP-date.
+    try:
+        deadline = parsedate_to_datetime(stripped)
+    except (TypeError, ValueError):
+        return None
+    if deadline is None:
+        return None
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=UTC)
+    delta = (deadline - datetime.now(UTC)).total_seconds()
+    if delta <= 0:
+        return None
+    return min(delta, 24 * 3600.0)
 
 
 async def get_json(
@@ -53,7 +92,12 @@ async def get_json(
 
         status = response.status_code
         if status == 429:
-            raise ProviderRateLimited(provider, "rate limit hit (HTTP 429)")
+            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+            raise ProviderRateLimited(
+                provider,
+                "rate limit hit (HTTP 429)",
+                retry_after_seconds=retry_after,
+            )
         if status in (401, 403):
             raise ProviderUnavailable(provider, f"auth failure (HTTP {status})")
         if status == 404:

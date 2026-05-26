@@ -18,7 +18,6 @@ claims" as a positive trust signal.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,30 +28,20 @@ from src.intelligence.comparison_narrative import (
     NarrativeSection,
     replace_section,
 )
+from src.intelligence.text_grounding import SENTENCE_SPLIT, TOKEN_PATTERN
 from src.utils.logging import get_logger
 
 log = get_logger(__name__)
 
 
-# Same token regex as research_validator, intentionally duplicated
-# here so the comparison surface owns its own surface-form rules
-# without coupling to the thesis validator's internals.
-_TOKEN_PATTERN = re.compile(
-    r"""
-    (?:
-        \$(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?[KMBT]?
-      | -?\d{1,3}(?:\.\d+)?%
-      | \d+(?:\.\d+)?[xX]
-      | \bQ[1-4](?:\s*\d{2,4})?\b
-      | \b20\d{2}\b
-      | \b\d+\.\d+\b
-      | \b\d{6,}\b
-    )
-    """,
-    re.VERBOSE,
-)
-
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"“])")
+# Token regex + sentence splitter live in
+# :mod:`src.intelligence.text_grounding` — the single source of truth
+# for numeric-token surface forms across every grounded-AI validator
+# (closes BUGS.md B-19). Underscore aliases kept so any external
+# reader that grabbed the private name still resolves to the same
+# compiled object.
+_TOKEN_PATTERN = TOKEN_PATTERN
+_SENTENCE_SPLIT = SENTENCE_SPLIT
 
 
 @dataclass(frozen=True)
@@ -323,7 +312,7 @@ def _token_provenance(
     if not text:
         return {}
     out: dict[str, str] = {}
-    for match in _TOKEN_PATTERN.finditer(text):
+    for match in TOKEN_PATTERN.finditer(text):
         token = match.group(0)
         if token in out:
             continue
@@ -430,7 +419,7 @@ def _scrub_text(
 
 
 def _split_sentences(text: str) -> list[str]:
-    parts = _SENTENCE_SPLIT.split(text.strip())
+    parts = SENTENCE_SPLIT.split(text.strip())
     return [p for p in parts if p.strip()]
 
 
@@ -438,7 +427,7 @@ def _unsupported_tokens(
     text: str, corpus: str, allowance: frozenset[str]
 ) -> tuple[str, ...]:
     out: list[str] = []
-    for match in _TOKEN_PATTERN.finditer(text):
+    for match in TOKEN_PATTERN.finditer(text):
         token = match.group(0)
         lowered = token.lower()
         if lowered in allowance:

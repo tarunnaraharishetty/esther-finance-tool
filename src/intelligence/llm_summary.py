@@ -16,7 +16,16 @@ from typing import TYPE_CHECKING
 import anthropic
 
 from src.config import Settings, get_settings
-from src.intelligence.grounding import GROUNDING_RULES_PER_SYMBOL
+from src.intelligence.grounding import (
+    GROUNDING_RULES_PER_SYMBOL,
+    sanitize_prompt_value,
+    sanitize_symbol,
+)
+from src.intelligence.text_grounding import (
+    build_corpus,
+    build_default_allowance,
+    validate_prose,
+)
 from src.strategy.base import SignalAction
 from src.utils.logging import get_logger
 
@@ -413,6 +422,8 @@ class LLMSummarizer:
             output_config={"effort": "low"},
             cache_control={"type": "ephemeral"},
             messages=[{"role": "user", "content": user_message}],
+            temperature=self.settings.llm_temperature,
+            timeout=self.settings.llm_timeout_seconds,
         )
         text = "".join(b.text for b in response.content if b.type == "text").strip()
         log.info(
@@ -423,7 +434,51 @@ class LLMSummarizer:
             cache_read=getattr(response.usage, "cache_read_input_tokens", 0),
             cache_write=getattr(response.usage, "cache_creation_input_tokens", 0),
         )
-        return text
+        # Post-hoc grounding pass: drop any sentence whose numeric tokens
+        # are not in the input corpus. Mirrors the research-thesis and
+        # compare-narrative validators so all three LLM surfaces apply
+        # the same "no unsupported numbers" contract. Drops are logged
+        # rather than raised — a brief with one fabricated number still
+        # has useful sentences worth surfacing.
+        validated, dropped = validate_prose(
+            text,
+            corpus=_build_summary_corpus(explanation, headlines),
+            allowance=build_default_allowance(symbol=explanation.symbol),
+            where="llm_summary",
+        )
+        if dropped:
+            log.warning(
+                "llm.summarize.dropped_claims",
+                symbol=explanation.symbol,
+                drop_count=len(dropped),
+                tokens=[t for c in dropped for t in c.unsupported_tokens],
+            )
+        return validated
+
+
+def _build_summary_corpus(
+    explanation: Explanation, headlines: list[str] | None
+) -> str:
+    """Assemble the substring corpus for validating a per-symbol brief.
+
+    Includes every numeric scalar the prompt exposed to the model:
+    confidence, combined score, every contributor score, and the
+    headline strings verbatim. The corpus is lowercased once via
+    :func:`build_corpus` so the validator's substring match is
+    case-insensitive.
+    """
+    parts: list[str] = [
+        f"{explanation.confidence:.2f}",
+        f"{explanation.combined_score:+.2f}",
+        explanation.symbol,
+    ]
+    for c in explanation.contributors:
+        parts.append(f"{c.score:+.2f}")
+        parts.append(c.note)
+        parts.append(c.name)
+    if headlines:
+        parts.extend(headlines)
+    return build_corpus(*parts)
 
 
 def _build_user_message(
@@ -432,10 +487,13 @@ def _build_user_message(
     """Render the structured Explanation as plain text for the user turn.
 
     Format kept stable so future-us can A/B against alternative wordings
-    without surprising the model.
+    without surprising the model. External strings (symbol, headlines)
+    are sanitized via :func:`sanitize_prompt_value` so a crafted
+    headline cannot inject control characters or unbalanced quotes.
     """
+    safe_symbol = sanitize_symbol(explanation.symbol)
     lines: list[str] = [
-        f"Symbol: {explanation.symbol}",
+        f"Symbol: {safe_symbol}",
         (
             f"Recommendation: {explanation.action.value.upper()} "
             f"(confidence: {explanation.confidence_label}, {explanation.confidence:.2f}; "
@@ -454,7 +512,7 @@ def _build_user_message(
         lines.append("")
         lines.append("Recent headlines:")
         for i, headline in enumerate(headlines[:8], start=1):
-            lines.append(f'{i}. "{headline}"')
+            lines.append(f'{i}. "{sanitize_prompt_value(headline)}"')
 
     if explanation.action == SignalAction.HOLD:
         lines.append("")
