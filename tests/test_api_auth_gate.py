@@ -110,6 +110,27 @@ def test_readyz_returns_200_with_dependency_status(
     assert body["status"] == "ok"
     # User store is wired by _build_client; verify the probe ran.
     assert body["checks"]["user_store"] == "ok"
+    # WatchlistStore probe also wired by _build_client — was missing
+    # from the previous readyz so a schema break on the watchlist side
+    # could hide behind a healthy users probe.
+    assert body["checks"]["watchlist_store"] == "ok"
+
+
+def test_livez_alias_returns_same_payload_as_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/api/livez`` exists as a k8s-convention alias for ``/api/health``.
+
+    Kept as a separate route (rather than 301-redirecting) so a
+    liveness probe never depends on the client following a redirect —
+    some probe configurations treat 3xx as failure. Same payload.
+    """
+    monkeypatch.chdir(tmp_path)
+    client, _ = _build_client(tmp_path, watchlist=["AAPL"])
+    livez = client.get("/api/livez")
+    health = client.get("/api/health")
+    assert livez.status_code == 200
+    assert livez.json() == health.json()
 
 
 def test_auth_routes_remain_reachable_anonymously(

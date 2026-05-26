@@ -61,11 +61,13 @@ log = get_logger(__name__)
 # Routes that must remain reachable without auth, no matter what.
 # - ``/api/health``: liveness probe — load balancers and uptime
 #   monitors hit this anonymously.
+# - ``/api/livez``: k8s-convention alias for /api/health.
 # - ``/api/readyz``: readiness probe — same operator-tool callers as
 #   /api/health, never carries cookies.
 # - ``/api/auth/*``: login / signup / me / logout endpoints themselves.
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/api/health",
+    "/api/livez",
     "/api/readyz",
     "/api/auth/",
 )
@@ -260,13 +262,14 @@ _CSRF_STATE_CHANGING_METHODS: frozenset[str] = frozenset(
 
 # Path prefixes exempt from CSRF enforcement. ``/api/auth/*`` is the
 # bootstrap surface — a logged-out client has no CSRF cookie yet.
-# ``/api/health`` and ``/api/readyz`` are probe endpoints that never
-# mutate state. The CSRF middleware also short-circuits on GET/HEAD
-# methods, so these prefixes are belt-and-braces against a future
-# POST to a health route.
+# ``/api/health``, ``/api/livez``, and ``/api/readyz`` are probe
+# endpoints that never mutate state. The CSRF middleware also
+# short-circuits on GET/HEAD methods, so these prefixes are
+# belt-and-braces against a future POST to a health route.
 _CSRF_EXEMPT_PREFIXES: tuple[str, ...] = (
     "/api/auth/",
     "/api/health",
+    "/api/livez",
     "/api/readyz",
 )
 

@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
@@ -118,6 +119,7 @@ def create_app(
     *,
     stream_interval: float | None = None,
     cors_origins: list[str] | None = None,
+    trusted_hosts: list[str] | None = None,
     frontend_dir: Path | None = None,
     fundamentals_service: Any = None,
     fundamentals_cache_dir: Path | None = None,
@@ -248,6 +250,18 @@ def create_app(
         """
         return {"status": "ok", "watchlist_size": len(controller.watchlist)}
 
+    @app.get("/api/livez")
+    async def livez() -> dict[str, Any]:
+        """K8s-convention alias for ``/api/health``.
+
+        Kept as a separate route (rather than 301-redirecting) so a
+        liveness probe never relies on the client following a
+        redirect — some prober configurations treat 3xx as failure.
+        Same payload; both routes stay public for cluster operators
+        who follow the livez/readyz convention.
+        """
+        return {"status": "ok", "watchlist_size": len(controller.watchlist)}
+
     @app.get("/api/readyz")
     async def readyz() -> dict[str, Any]:
         """Readiness probe — distinguish "wired" from "ready to serve."
@@ -295,6 +309,24 @@ def create_app(
                 checks["retry_queue"] = f"error: {type(exc).__name__}"
         else:
             checks["retry_queue"] = "disabled"
+
+        # Watchlist store shares the file with UserStore by default
+        # but has its own table + migrations trail — probe it
+        # independently so a schema break on the watchlist side
+        # doesn't hide behind a healthy users probe.
+        wl: WatchlistStore | None = getattr(app.state, "watchlist_store", None)
+        if wl is not None:
+            try:
+                # ``list_for(0)`` returns ``[]`` because no real user
+                # has id 0 — but it exercises the table and the
+                # ordering index. Cheap regression probe.
+                wl.list_for(0)
+                checks["watchlist_store"] = "ok"
+            except Exception as exc:
+                ok = False
+                checks["watchlist_store"] = f"error: {type(exc).__name__}"
+        else:
+            checks["watchlist_store"] = "disabled"
 
         body: dict[str, Any] = {
             "status": "ok" if ok else "degraded",
@@ -880,13 +912,30 @@ def create_app(
     # ``TRUST_PROXY_HEADERS=true`` explicitly.
     app.state.trust_proxy_headers = settings.trust_proxy_headers
 
-    # Request-log middleware MUST be installed last so it ends up as
-    # the outermost layer — that way the log line captures the final
-    # status the client sees, including rejections from AuthGate
-    # (401), CSRF (403), and PathRateLimit (429). It also binds the
-    # request id into structlog contextvars so every nested log call
-    # inside the request inherits the correlation id automatically.
+    # Request-log middleware installed after the auth/CSRF/rate-limit
+    # gates so it sits OUTSIDE them in the request flow — that way the
+    # log line captures the final status the client sees, including
+    # rejections from AuthGate (401), CSRF (403), and PathRateLimit
+    # (429). It also binds the request id into structlog contextvars
+    # so every nested log call inside the request inherits the
+    # correlation id automatically.
     install_request_log(app)
+
+    # TrustedHostMiddleware MUST be installed last so it sits at the
+    # very outermost edge — a wrong Host should fail with 400 before
+    # any other middleware (including the request log) even sees the
+    # request, since serving content for an unexpected hostname is
+    # exactly the cache-poisoning / password-reset-forgery risk we
+    # want to neutralize. The settings model validator already
+    # refuses ``["*"]`` in non-dev so a typo doesn't ship.
+    effective_trusted_hosts = (
+        trusted_hosts if trusted_hosts is not None else settings.trusted_hosts
+    )
+    if effective_trusted_hosts:
+        app.add_middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=effective_trusted_hosts,
+        )
 
     # Static frontend mount — production same-origin path.
     #
