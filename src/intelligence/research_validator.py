@@ -36,7 +36,6 @@ What we deliberately don't drop
 
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -49,6 +48,7 @@ from src.intelligence.research_thesis import (
     ResearchThesis,
     ThesisSection,
 )
+from src.intelligence.text_grounding import SENTENCE_SPLIT, TOKEN_PATTERN
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -57,39 +57,14 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Token regex set
-# ---------------------------------------------------------------------------
-#
-# Each pattern extracts a numeric token *with* its delimiter so the
-# substring check operates on the same surface form the corpus uses.
-# A bare ``87.4`` in prose must match ``87.4`` in the corpus — the
-# regex captures decimals, percents, currency suffixes verbatim.
-
-# Numbers with one of: %, $, x suffix, decimal, year, Q[1-4]. Order
-# matters for the alternation: percentages must beat bare decimals so
-# "87.4%" lands as one token, not two.
-_TOKEN_PATTERN = re.compile(
-    r"""
-    (?:
-        # Currency: comma-grouped ($1,250,000.00) OR contiguous ($250000000).
-        \$(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?[KMBT]?
-      | -?\d{1,3}(?:\.\d+)?%                         # 73%, -2.5%, 100%
-      | \d+(?:\.\d+)?[xX]                            # 12.5x, 3X
-      | \bQ[1-4](?:\s*\d{2,4})?\b                    # Q1, Q3 2025
-      | \b20\d{2}\b                                  # 2024, 2026
-      | \b\d+\.\d+\b                                 # 87.4 (PE, scores)
-      | \b\d{6,}\b                                   # large integers (revenue $)
-    )
-    """,
-    re.VERBOSE,
-)
-
-
-# Sentences end with ``. `` / ``? `` / ``! `` / newline. We keep punctuation
-# attached so reconstruction preserves the original tone — the validator
-# isn't a rewriter.
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"“])")
+# Token regex + sentence splitter live in
+# :mod:`src.intelligence.text_grounding` — the single source of truth
+# for numeric-token surface forms across every grounded-AI validator
+# (closes BUGS.md B-19). The two underscore-prefixed aliases below let
+# existing tests that imported ``_TOKEN_PATTERN`` keep working without
+# churn while pointing at the canonical compiled object.
+_TOKEN_PATTERN = TOKEN_PATTERN
+_SENTENCE_SPLIT = SENTENCE_SPLIT
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +386,7 @@ def _token_provenance(
     if not text:
         return {}
     out: dict[str, str] = {}
-    for match in _TOKEN_PATTERN.finditer(text):
+    for match in TOKEN_PATTERN.finditer(text):
         token = match.group(0)
         if token in out:
             continue  # First occurrence in text wins for UI stability.
@@ -662,7 +637,7 @@ def _unsupported_tokens(
     ``allowance`` or substring-matches the lowercase corpus.
     """
     out: list[str] = []
-    for match in _TOKEN_PATTERN.finditer(text):
+    for match in TOKEN_PATTERN.finditer(text):
         token = match.group(0)
         lowered = token.lower()
         if lowered in allowance:
@@ -680,7 +655,7 @@ def _split_sentences(text: str) -> list[str]:
     letter or quote — catches "First. Second." but not "0.73 is the
     confidence" or "Q4 2024" mid-stream.
     """
-    parts = _SENTENCE_SPLIT.split(text.strip())
+    parts = SENTENCE_SPLIT.split(text.strip())
     return [p for p in parts if p.strip()]
 
 

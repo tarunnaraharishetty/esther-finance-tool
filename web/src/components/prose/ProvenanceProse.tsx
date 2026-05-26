@@ -68,15 +68,21 @@ type Segment =
   | { kind: "token"; text: string; source: string };
 
 /**
- * Mirror of the backend validators' `_TOKEN_PATTERN` (kept in sync
- * manually across `research_validator.py` and
- * `comparison_narrative_validator.py`). Splits the body into
- * alternating plain-text + numeric-token segments so the renderer
- * can wrap tokens individually.
+ * Mirror of the canonical backend regex
+ * `src/intelligence/text_grounding.py:TOKEN_PATTERN`, which is the
+ * single source of truth for both `research_validator` and
+ * `comparison_narrative_validator` (B-19).
  *
- * If a backend's regex evolves, update this one too — the contract
- * is "the validators' numeric tokens are the provenance keys" and
- * the frontend must match the same surface forms.
+ * Sync is enforced by `tests/test_token_re_cross_language_sync.py` —
+ * the test reads this literal, compiles it via Python `re`, and
+ * asserts identical match lists against the Python pattern across
+ * a full-coverage fixture. Any edit here that diverges from the
+ * Python source fails CI loudly rather than silently breaking the
+ * provenance graph (tokens emitted by the server stop rendering
+ * tooltips, or vice versa).
+ *
+ * If you add a new alternation branch here, add the matching branch
+ * in Python AND extend the fixture in the sync test.
  */
 const TOKEN_RE =
   /(\$(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?[KMBT]?|-?\d{1,3}(?:\.\d+)?%|\d+(?:\.\d+)?[xX]|\bQ[1-4](?:\s*\d{2,4})?\b|\b20\d{2}\b|\b\d+\.\d+\b|\b\d{6,}\b)/g;

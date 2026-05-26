@@ -1,11 +1,11 @@
-/** Mock AI-summary text generator.
+/** Deterministic auto-summary generator (NOT an LLM).
  *
  * Templated language that reads natural while staying grounded in
  * what the snapshot actually says. No forecasts, no invented facts —
- * everything mirrors fields already on `DashboardSnapshot`. Phase 4
- * polish enriches the phrasing along three axes (sentiment, regime,
- * conviction) so the headline reads differently across tape states
- * rather than repeating the same skeleton.
+ * everything mirrors fields already on `DashboardSnapshot`. The
+ * `Heuristic` badge in `AiSummary` and `AiPage` surfaces this
+ * contract to the user so the "AI" framing is not mistaken for
+ * model output.
  */
 
 import type {

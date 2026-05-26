@@ -24,9 +24,18 @@ from typing import TYPE_CHECKING
 import anthropic
 
 from src.config import Settings, get_settings
-from src.intelligence.grounding import GROUNDING_RULES_WATCHLIST
+from src.intelligence.grounding import (
+    GROUNDING_RULES_WATCHLIST,
+    sanitize_prompt_value,
+    sanitize_symbol,
+)
 from src.intelligence.rankings import Rankings
 from src.intelligence.rankings import compute as compute_rankings
+from src.intelligence.text_grounding import (
+    build_corpus,
+    build_default_allowance,
+    validate_prose,
+)
 from src.strategy.base import SignalAction
 from src.utils.logging import get_logger
 
@@ -475,6 +484,8 @@ class LLMRecapGenerator:
             output_config={"effort": "low"},
             cache_control={"type": "ephemeral"},
             messages=[{"role": "user", "content": user_message}],
+            temperature=self.settings.llm_temperature,
+            timeout=self.settings.llm_timeout_seconds,
         )
         text = "".join(b.text for b in response.content if b.type == "text").strip()
         log.info(
@@ -484,7 +495,98 @@ class LLMRecapGenerator:
             cache_read=getattr(response.usage, "cache_read_input_tokens", 0),
             cache_write=getattr(response.usage, "cache_creation_input_tokens", 0),
         )
-        return text
+        # Post-hoc grounding pass — drop any sentence whose numeric tokens
+        # are not in the input corpus. Mirrors LLMSummarizer + the compare
+        # narrative validator so every LLM surface applies the same
+        # "no unsupported numbers" contract. Drops are logged, not raised:
+        # a recap with one fabricated number still has useful sentences.
+        validated, dropped = validate_prose(
+            text,
+            corpus=_build_recap_corpus(context),
+            allowance=_build_recap_allowance(context),
+            where="llm_recap",
+        )
+        if dropped:
+            log.warning(
+                "llm.recap.dropped_claims",
+                tick=context.tick,
+                drop_count=len(dropped),
+                tokens=[t for c in dropped for t in c.unsupported_tokens],
+            )
+        return validated
+
+
+def _build_recap_corpus(ctx: RecapContext) -> str:
+    """Assemble the substring corpus for validating a watchlist recap.
+
+    Includes every numeric scalar the prompt exposed to the model:
+    ranking section scores in every surface form the few-shot examples
+    use (signed two-decimal, plain two-decimal, int), flip prior-tick
+    counts, alert counts, headlines verbatim, regime + pattern labels.
+    """
+    parts: list[str] = []
+    # Tick number — appears as "Tick: N" in the prompt; recap rarely
+    # references it but include for completeness.
+    parts.append(str(ctx.tick))
+    # Action mix counts (small ints — also covered by allowance).
+    for action, count in ctx.action_mix.items():
+        parts.append(str(count))
+        parts.append(action.value)
+    # Ranking entries — every score in the three numeric surface forms
+    # the few-shot examples use so the validator does not over-drop on
+    # rendering choice.
+    rankings = ctx.rankings
+    for entries in (
+        rankings.strongest_momentum,
+        rankings.strongest_sentiment,
+        rankings.highest_confidence,
+        rankings.biggest_reversals,
+        rankings.unusual_movers,
+        rankings.most_volatile,
+    ):
+        for sym, score in entries:
+            parts.append(sym)
+            parts.append(f"{score:+.2f}")
+            parts.append(f"{score:.2f}")
+            parts.append(f"{score:.1f}")
+            parts.append(str(int(score)))
+    # Recent flips — symbol + prior-tick count.
+    for sym, _prior, _current, ticks in ctx.recent_flips:
+        parts.append(sym)
+        parts.append(str(ticks))
+    # Headlines verbatim — numeric tokens embedded in headlines (e.g.
+    # "beats estimates by 8%") become grounded via this entry.
+    for sym, headlines in ctx.headlines_by_symbol.items():
+        parts.append(sym)
+        parts.extend(headlines)
+    # Alert counts (small ints — also covered by allowance).
+    for sev, count in ctx.alert_counts.items():
+        parts.append(sev)
+        parts.append(str(count))
+    # Regime + patterns surfaced verbatim.
+    parts.append(ctx.regime)
+    parts.extend(ctx.patterns)
+    # Watchlist symbols.
+    parts.extend(ctx.watchlist)
+    return build_corpus(*parts)
+
+
+def _build_recap_allowance(ctx: RecapContext) -> frozenset[str]:
+    """Tokens the validator always treats as supported for recaps.
+
+    Default allowance (small integers, common percentage forms) plus
+    every watchlist symbol lowercased — a recap is allowed to name
+    any symbol on the watchlist without needing a dedicated corpus
+    entry. The "symbol" arg of :func:`build_default_allowance` is set
+    to the first watchlist symbol; the rest land in ``extra``.
+    """
+    if not ctx.watchlist:
+        return build_default_allowance(symbol="")
+    head, *rest = ctx.watchlist
+    return build_default_allowance(
+        symbol=head,
+        extra=tuple(sym.lower() for sym in rest),
+    )
 
 
 def _build_recap_user_message(ctx: RecapContext) -> str:
@@ -496,7 +598,10 @@ def _build_recap_user_message(ctx: RecapContext) -> str:
     lines: list[str] = []
     lines.append(f"Tick: {ctx.tick}")
     if ctx.watchlist:
-        lines.append(f"Watchlist: {', '.join(ctx.watchlist)}")
+        safe_watchlist = [
+            sanitize_symbol(sym) for sym in ctx.watchlist
+        ]
+        lines.append(f"Watchlist: {', '.join(safe_watchlist)}")
     lines.append(
         f"Action mix: "
         f"{ctx.action_mix.get(SignalAction.BUY, 0)} BUY, "
@@ -523,8 +628,9 @@ def _build_recap_user_message(ctx: RecapContext) -> str:
         lines.append("Recent action flips (most-recent-significant first):")
         for sym, prior, current, ticks in ctx.recent_flips:
             tick_word = "tick" if ticks == 1 else "ticks"
+            safe_sym = sanitize_symbol(sym)
             lines.append(
-                f"  {sym}: was {prior.value.upper()} for {ticks} {tick_word}, "
+                f"  {safe_sym}: was {prior.value.upper()} for {ticks} {tick_word}, "
                 f"now {current.value.upper()}"
             )
 
@@ -532,8 +638,9 @@ def _build_recap_user_message(ctx: RecapContext) -> str:
         lines.append("")
         lines.append("Recent headlines (verbatim):")
         for sym, headlines in ctx.headlines_by_symbol.items():
+            safe_sym = sanitize_symbol(sym)
             for h in headlines:
-                lines.append(f'  {sym}: "{h}"')
+                lines.append(f'  {safe_sym}: "{sanitize_prompt_value(h)}"')
 
     if ctx.alert_counts:
         lines.append("")
@@ -556,13 +663,14 @@ def _build_recap_user_message(ctx: RecapContext) -> str:
 
 
 def _format_entry(symbol: str, score: float, fmt: str) -> str:
+    safe = sanitize_symbol(symbol)
     if fmt == "signed":
-        return f"{symbol} {score:+.2f}"
+        return f"{safe} {score:+.2f}"
     if fmt == "plain":
-        return f"{symbol} {score:.2f}"
+        return f"{safe} {score:.2f}"
     if fmt == "int":
-        return f"{symbol} {int(score)}"
-    return f"{symbol} {score}"
+        return f"{safe} {int(score)}"
+    return f"{safe} {score}"
 
 
 __all__ = ["LLMRecapGenerator", "RecapContext"]

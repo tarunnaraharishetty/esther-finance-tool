@@ -9,11 +9,14 @@ interface Props {
 }
 
 /**
- * Hero AI summary card. Aurora-drifting mesh background, gradient
- * brand mark, typewriter reveal on headline + paragraph, soft
- * pulsing live dot, breadth chips, top-pick highlights as clickable
- * tracking-wide pills. Phase 4 swaps the templated text for a real
- * streamed LLM response.
+ * Hero auto-briefing card.
+ *
+ * The text is a *deterministic template* rendered client-side from
+ * fields already present in :class:`DashboardSnapshot`. It is **not**
+ * an LLM response and does not introduce facts beyond what the rest
+ * of the dashboard shows. The "Heuristic" badge in the header makes
+ * the contract visible to the user; the LLM-streamed version is
+ * tracked in `ROADMAP.md` Phase 3.
  */
 export function AiSummary({ snapshot }: Props) {
   const summary = generateMarketSummary(snapshot);
@@ -57,18 +60,16 @@ export function AiSummary({ snapshot }: Props) {
             />
           </div>
           <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-            AI Briefing
+            Auto Briefing
           </span>
           <span className="text-muted-foreground/40">·</span>
-          <span
-            className={
-              paragraph.done
-                ? "font-mono text-[10px] uppercase tracking-wider text-bull"
-                : "font-mono text-[10px] uppercase tracking-wider text-primary"
-            }
+          <Badge
+            variant="outline"
+            className="font-mono text-[9px] uppercase tracking-wider"
+            title="Templated prose rendered from on-screen snapshot fields. Not LLM-generated."
           >
-            {paragraph.done ? "Live" : "Streaming"}
-          </span>
+            Heuristic
+          </Badge>
           {conviction && (
             <Badge variant="outline" className="ml-auto">
               {conviction}

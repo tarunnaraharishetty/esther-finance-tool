@@ -24,7 +24,11 @@ from xml.etree import ElementTree as ET
 import anthropic
 
 from src.config import Settings, get_settings
-from src.intelligence.grounding import GROUNDING_RULES_PER_SYMBOL
+from src.intelligence.grounding import (
+    GROUNDING_RULES_PER_SYMBOL,
+    sanitize_prompt_value,
+    sanitize_symbol,
+)
 from src.intelligence.research_thesis import (
     BullBearArgument,
     Catalyst,
@@ -366,6 +370,8 @@ class LLMThesisGenerator:
             max_tokens=_MAX_TOKENS,
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
+            temperature=self.settings.llm_temperature,
+            timeout=self.settings.llm_timeout_seconds,
         )
         text = "".join(b.text for b in response.content if b.type == "text").strip()
         log.info(
@@ -391,8 +397,9 @@ def _build_user_message(payload: ResearchInput) -> str:
     surprising the cache key downstream.
     """
     row = payload.row
+    safe_symbol = sanitize_symbol(row.symbol)
     lines: list[str] = [
-        f"Symbol: {row.symbol}",
+        f"Symbol: {safe_symbol}",
         (
             f"AI engine read: {row.action.value.upper()} "
             f"(confidence {row.confidence:.2f}, composite {row.combined_score:+.2f})"
@@ -413,7 +420,7 @@ def _build_user_message(payload: ResearchInput) -> str:
         lines.append("")
         lines.append("Recent headlines:")
         for i, h in enumerate(payload.headlines[:8], start=1):
-            lines.append(f'{i}. "{h}"')
+            lines.append(f'{i}. "{sanitize_prompt_value(h)}"')
     else:
         lines.append("")
         lines.append("Recent headlines: none in the current window.")

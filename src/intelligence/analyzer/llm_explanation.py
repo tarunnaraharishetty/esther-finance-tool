@@ -99,6 +99,8 @@ class LLMExplanationGenerator:
             max_tokens=_MAX_TOKENS,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
+            temperature=self.settings.llm_temperature,
+            timeout=self.settings.llm_timeout_seconds,
         )
         text = "".join(b.text for b in response.content if b.type == "text").strip()
         log.info(

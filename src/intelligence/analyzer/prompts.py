@@ -25,6 +25,7 @@ from src.intelligence.analyzer.explanation import (
     CITATION_TAGS,
     AnalyzerInputs,
 )
+from src.intelligence.grounding import sanitize_prompt_value, sanitize_symbol
 
 PROMPT_VERSION = "analyzer-explain-v1"
 
@@ -81,7 +82,10 @@ def build_user_message(inputs: AnalyzerInputs) -> str:
         allowed_block = ", ".join(f"[{t}]" for t in allowed)
 
     sections: list[str] = [
-        f"SYMBOL: {inputs.symbol}",
+        # Strict ticker-shape validation (BUGS.md B-9). Malformed
+        # symbols become "UNKNOWN" + a logged warning rather than
+        # flowing verbatim into the LLM system prompt.
+        f"SYMBOL: {sanitize_symbol(inputs.symbol)}",
         f"ALLOWED CITATIONS: {allowed_block}",
         "",
         "DATA:",
@@ -194,9 +198,15 @@ def _render_news(inputs: AnalyzerInputs) -> str:
     if inputs.top_headlines:
         lines.append("- top_headlines:")
         for h in inputs.top_headlines[:5]:
-            # Escape bracket characters so a headline can't accidentally
-            # look like a citation tag inside the DATA block.
-            safe = h.replace("[", "(").replace("]", ")")
+            # Two layers (B-9):
+            # * sanitize_prompt_value strips control chars, caps length,
+            #   and XML-escapes — defeats injection via embedded newlines
+            #   or markup.
+            # * the bracket replacement keeps a headline from
+            #   accidentally looking like a citation tag inside the DATA
+            #   block (analyzer-specific concern).
+            sanitized = sanitize_prompt_value(h)
+            safe = sanitized.replace("[", "(").replace("]", ")")
             lines.append(f"    * {safe!r}")
     return "\n".join(lines)
 

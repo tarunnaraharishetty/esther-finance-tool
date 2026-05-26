@@ -146,7 +146,11 @@ class PrioritizerConfig:
 # Defaults applied when no config is provided. Conservative — don't drop
 # real transitions, do debounce noisy threshold/sentiment rules.
 _DEFAULT_COOLDOWNS = {
-    "action_changed": 0,
+    # Action changes are rare and material, but we want a minimum
+    # debounce so an edge-case BUY → HOLD → BUY same-minute flap can't
+    # fire two alerts. 60s is short enough that a real new flip lands
+    # quickly, long enough that intra-tick churn is squashed.
+    "action_changed": 60,
     "confidence_threshold": 300,
     "sentiment_shift": 600,
     # Tier changes can oscillate around the promotion gate when one

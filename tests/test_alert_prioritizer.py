@@ -478,8 +478,62 @@ def test_default_config_debounces_confidence_threshold() -> None:
     cfg = default_config()
     assert cfg.cooldowns["confidence_threshold"] == 300
     assert cfg.cooldowns["sentiment_shift"] == 600
-    # action_changed must NOT be debounced — real flips are information.
-    assert cfg.cooldowns["action_changed"] == 0
+    # action_changed gets a short 60s debounce: enough to squash a
+    # same-minute BUY → HOLD → BUY flap, short enough that a real new
+    # flip still lands quickly. See BUGS.md B-22.
+    assert cfg.cooldowns["action_changed"] == 60
+
+
+def test_default_config_debounces_tier_and_opportunity_rules() -> None:
+    """Tier and opportunity-entry rules can oscillate around their
+    promotion thresholds; the BUGS.md B-22 contract requires every
+    rule cited there to ship with a non-zero default cooldown."""
+    cfg = default_config()
+    assert cfg.cooldowns["tier_changed"] == 300
+    assert cfg.cooldowns["opportunity_entry"] == 600
+
+
+def test_every_default_rule_has_a_nonzero_default_cooldown() -> None:
+    """Invariant pin: any rule returned by the default factories must
+    have a non-zero default cooldown. Adding a new default rule without
+    one trips this test rather than slipping a noisy alert into prod
+    (B-22)."""
+    from src.intelligence.alerts import _default_rules, _default_snapshot_rules
+
+    cfg = default_config()
+    every_rule = [
+        *(r.name for r in _default_rules()),
+        *(r.name for r in _default_snapshot_rules()),
+    ]
+    missing = [name for name in every_rule if cfg.cooldowns.get(name, 0) <= 0]
+    assert missing == [], (
+        f"default rules without a non-zero cooldown: {missing} — every "
+        f"default rule must ship with a debounce window per BUGS.md B-22"
+    )
+
+
+def test_tier_changed_with_default_cooldown_suppresses_oscillation() -> None:
+    """Behavioural pin: a tier oscillating within the cooldown window
+    only emits one alert, not one per oscillation. Tier transitions are
+    coarse-grained so the rule itself has no hysteresis — the cooldown
+    is the only defence against a quality driver hovering near a
+    promotion gate."""
+    prio = AlertPrioritizer()  # uses default_config
+    state = AlertState()
+    # Three tier_changed firings inside the 300s default window.
+    first = _alert(rule="tier_changed", when=_ts(0))
+    second = _alert(rule="tier_changed", when=_ts(60))
+    third = _alert(rule="tier_changed", when=_ts(120))
+    kept_first = prio.prioritize([first], state)
+    state.record(kept_first)
+    kept_second = prio.prioritize([second], state, now=_ts(60))
+    state.record(kept_second)
+    kept_third = prio.prioritize([third], state, now=_ts(120))
+    state.record(kept_third)
+    # Only the first firing survived; the cooldown debounced the rest.
+    assert [a.fired_at for a in kept_first] == [_ts(0)]
+    assert kept_second == []
+    assert kept_third == []
 
 
 # ---------------------------------------------------------------------------

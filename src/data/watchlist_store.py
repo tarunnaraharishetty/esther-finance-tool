@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from src.data.migrations import Migration, run_migrations
 from src.utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -44,7 +45,10 @@ log = get_logger(__name__)
 # under PRAGMA foreign_keys=ON, so we keep the cross-table integrity
 # at the application layer (the future delete-account flow will
 # explicitly purge watchlists for the user before removing the row).
-_SCHEMA = """
+# v1 — initial watchlists table. Same idempotent shape as before,
+# wrapped in a Migration so future column / index additions follow the
+# versioned trail in :mod:`src.data.migrations`.
+_V1_SCHEMA = """
 CREATE TABLE IF NOT EXISTS watchlists (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -56,6 +60,16 @@ CREATE TABLE IF NOT EXISTS watchlists (
 CREATE INDEX IF NOT EXISTS idx_watchlists_user
     ON watchlists(user_id, sort_order, id);
 """
+
+
+def _apply_v1(conn: sqlite3.Connection) -> None:
+    conn.executescript(_V1_SCHEMA)
+
+
+_MIGRATIONS = [
+    Migration(version=1, name="watchlists_init", apply=_apply_v1),
+]
+_MIGRATION_NAMESPACE = "watchlist_store"
 
 
 @dataclass(frozen=True)
@@ -112,7 +126,11 @@ class WatchlistStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
-        conn.executescript(_SCHEMA)
+        # Versioned migrations — see src/data/migrations.py. v1 is the
+        # historical CREATE TABLE IF NOT EXISTS block; future changes
+        # append a v2 Migration here. Namespace separates this store's
+        # version trail from UserStore when both share ``users.db``.
+        run_migrations(conn, _MIGRATIONS, namespace=_MIGRATION_NAMESPACE)
         self._conn = conn
         return conn
 

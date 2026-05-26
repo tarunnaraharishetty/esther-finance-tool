@@ -362,3 +362,44 @@ def test_system_prompt_contains_grounding_rules() -> None:
     assert "do not predict" in system.lower()
     # Recap-specific: the LLM must NOT bring up symbols outside the watchlist.
     assert "ONLY the symbols in the data" in system
+
+
+# ---------------------------------------------------------------------------
+# Post-hoc validator — drop unsupported numeric claims (B-8 symmetry)
+# ---------------------------------------------------------------------------
+
+
+def test_recap_keeps_grounded_sentences() -> None:
+    """Sentences whose numerics all trace to the corpus survive the dropper."""
+    client = _mock_anthropic_client(
+        "The watchlist is leaning bullish: 1 BUY, 0 HOLD, 0 SELL."
+    )
+    gen = LLMRecapGenerator(client=client)
+    snap = _snap([_row("AAPL", action=SignalAction.BUY)])
+    text = gen.generate(RecapContext.from_snapshot(snap))
+    # Single-digit counts live in the default allowance — sentence survives.
+    assert "1 BUY" in text
+
+
+def test_recap_drops_sentence_with_fabricated_number() -> None:
+    """A sentence whose numeric token is absent from the corpus is dropped."""
+    client = _mock_anthropic_client(
+        "The watchlist is leaning bullish: 1 BUY, 0 HOLD, 0 SELL. "
+        "Revenue grew 47.3% across the index, the broadest in years."
+    )
+    gen = LLMRecapGenerator(client=client)
+    snap = _snap([_row("AAPL", action=SignalAction.BUY)])
+    text = gen.generate(RecapContext.from_snapshot(snap))
+    # 47.3% is not present anywhere in the recap corpus → dropped.
+    assert "47.3%" not in text
+    # Allowed first sentence survives.
+    assert "1 BUY" in text
+
+
+def test_recap_passes_through_when_no_numbers() -> None:
+    """Purely qualitative recap text bypasses the dropper untouched."""
+    text = "The watchlist mix is balanced and unremarkable."
+    client = _mock_anthropic_client(text)
+    gen = LLMRecapGenerator(client=client)
+    snap = _snap([_row("AAPL")])
+    assert gen.generate(RecapContext.from_snapshot(snap)) == text

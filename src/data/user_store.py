@@ -35,6 +35,7 @@ from pathlib import Path
 
 import bcrypt
 
+from src.data.migrations import Migration, run_migrations
 from src.utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -50,7 +51,11 @@ _BCRYPT_ROUNDS = 12
 _SESSION_TOKEN_BYTES = 32
 
 
-_SCHEMA = """
+# v1 — initial users + sessions tables. Lifted verbatim from the
+# pre-migration inline schema so existing databases re-apply cleanly
+# (CREATE TABLE IF NOT EXISTS is idempotent). When future column /
+# index changes land, append a v2 ``Migration`` below; do not edit v1.
+_V1_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -70,6 +75,16 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 """
+
+
+def _apply_v1(conn: sqlite3.Connection) -> None:
+    conn.executescript(_V1_SCHEMA)
+
+
+_MIGRATIONS = [
+    Migration(version=1, name="users_sessions_init", apply=_apply_v1),
+]
+_MIGRATION_NAMESPACE = "user_store"
 
 
 class EmailAlreadyRegistered(ValueError):
@@ -157,7 +172,12 @@ class UserStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
-        conn.executescript(_SCHEMA)
+        # Versioned migrations. v1 is the historical CREATE TABLE IF
+        # NOT EXISTS block — applies cleanly to brand-new files and is
+        # a no-op for files created before the migration runner existed
+        # (the _schema_migrations row will be recorded on first run,
+        # and subsequent connects skip it). See src/data/migrations.py.
+        run_migrations(conn, _MIGRATIONS, namespace=_MIGRATION_NAMESPACE)
         self._conn = conn
         return conn
 
@@ -235,6 +255,28 @@ class UserStore:
         if row is None:
             return None
         return _row_to_user(row)
+
+    def delete_user(self, user_id: int) -> bool:
+        """Remove ``user_id`` and (via ON DELETE CASCADE) their sessions.
+
+        Returns True iff a row was deleted; False when no such user
+        exists (idempotent — safe to call from a rollback path that
+        races with another deletion). Used by the signup-seed atomicity
+        path (B-14): if the post-signup hook fails after the user is
+        created, this restores the "user account does not exist" state
+        so the caller can retry signup cleanly.
+
+        Watchlist rows live in :class:`WatchlistStore` (separate
+        connection, same DB file) and intentionally have no FK to
+        ``users(id)`` — see the comment in ``watchlist_store.py``.
+        The caller must purge those explicitly when needed; the only
+        site that does this today is the signup-seed rollback, which
+        owns the WatchlistStore handle directly.
+        """
+        with self._lock:
+            conn = self._connect()
+            cur = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            return cur.rowcount > 0
 
     def verify_login(self, email: str, password: str) -> User:
         """Return the user if email+password match. Else :class:`InvalidCredentials`.

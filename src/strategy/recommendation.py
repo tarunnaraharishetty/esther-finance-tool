@@ -299,9 +299,14 @@ class RecommendationEngine:
         ordered = ordered[: self.max_news_articles]
         analyzer = self.sentiment_analyzer or SentimentAnalyzer()
         weights = self.news_quality_weights or NewsQualityWeights()
+        # B-15: batched inference. The previous per-article loop ran
+        # FinBERT once per article — at 500 symbols × 20 articles that
+        # was 10k serial forward passes per refresh. ``score_articles``
+        # runs ceil(N / _MAX_BATCH_SIZE) passes; same outputs, same
+        # order, dramatically fewer passes.
+        scores: list[SentimentScore] = analyzer.score_articles(ordered)
         scored: list[tuple[float, float]] = []
-        for article in ordered:
-            score: SentimentScore = analyzer.score_article(article)
+        for article, score in zip(ordered, scores, strict=True):
             weight = quality_weight(article, now, weights)
             scored.append((score.signed, weight))
         return scored

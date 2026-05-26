@@ -50,17 +50,24 @@ from src.intelligence.fundamentals.reconciliation import (
     ReconciliationWarning,
     reconcile,
 )
+from src.intelligence.fundamentals.sanity import sanitize_normalized
 from src.intelligence.fundamentals.sec_edgar import SecEdgarProvider
 from src.intelligence.fundamentals.yahoo_fallback import YahooFallbackProvider
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    # Avoid circular import: health_store.py imports ProviderHealth from
-    # this package's models. The service only needs HealthStore as a
-    # type annotation — actual instances are duck-typed via record().
+    # Two deferral reasons stacked here, both runtime-cycle avoidance:
+    # * health_store.py imports ProviderHealth from this package's
+    #   models, so the service only takes HealthStore as a type
+    #   annotation and duck-types instances via record().
+    # * SectorCohort transitively imports NormalizedFundamentals from
+    #   THIS package's models — loading service.py via
+    #   fundamentals/__init__.py would trip a circular import. Same
+    #   duck-type pattern; runtime only calls ``cohort.observe(...)``.
     from src.data.accuracy_store import AccuracyStore
     from src.data.health_store import HealthStore
     from src.data.retry_queue import RetryQueue
+    from src.intelligence.analyzer.sector_medians import SectorCohort
 
 log = get_logger(__name__)
 
@@ -219,6 +226,7 @@ class FundamentalsService:
         retry_queue: RetryQueue | None = None,
         accuracy_store: AccuracyStore | None = None,
         provider_trust: ProviderTrust | None = None,
+        sector_cohort: SectorCohort | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._client = client
@@ -226,6 +234,7 @@ class FundamentalsService:
         self._health_store = health_store
         self._retry_queue = retry_queue
         self._accuracy_store = accuracy_store
+        self._sector_cohort = sector_cohort
         # When the caller didn't pass an explicit trust computer, build
         # one from whatever stores we have. The result is cheap to
         # construct and gracefully no-ops when both stores are None
@@ -247,12 +256,14 @@ class FundamentalsService:
         health_store: HealthStore | None = None,
         retry_queue: RetryQueue | None = None,
         accuracy_store: AccuracyStore | None = None,
+        sector_cohort: SectorCohort | None = None,
     ) -> FundamentalsService:
         return cls(
             settings=settings,
             health_store=health_store,
             retry_queue=retry_queue,
             accuracy_store=accuracy_store,
+            sector_cohort=sector_cohort,
         )
 
     def _sink_health(self, rows: list[ProviderHealth]) -> None:
@@ -272,6 +283,26 @@ class FundamentalsService:
                 "health_store.record.failed",
                 error=str(exc),
                 row_count=len(rows),
+            )
+
+    def _sink_cohort(self, record: NormalizedFundamentals) -> None:
+        """Feed ``record`` into the sector-medians cohort, if wired.
+
+        Best-effort: a failure here only affects the next analyzer's
+        view of computed sector medians (the static seed remains as a
+        fallback). It must never break a fundamentals fetch. Closes
+        B-13 — without this hook the entire computed-medians pipeline
+        sits dormant and lookup() always serves the static TOML.
+        """
+        if self._sector_cohort is None:
+            return
+        try:
+            self._sector_cohort.observe(record)
+        except Exception as exc:
+            log.warning(
+                "sector_cohort.observe_failed",
+                symbol=record.symbol,
+                error=str(exc),
             )
 
     def _sink_accuracy(self, events: tuple[AccuracyEvent, ...]) -> None:
@@ -413,6 +444,11 @@ class FundamentalsService:
         sym = symbol.upper()
         health: list[ProviderHealth] = []
         chain_errors: list[str] = []
+        # Maximum ``Retry-After`` value any rate-limited provider asked
+        # us to wait. Honoured when the symbol lands in the retry queue
+        # so a 5-minute server-side cooldown isn't ignored by our
+        # default 30-second backoff.
+        max_retry_after_seconds: float = 0.0
 
         for index, provider in enumerate(self._providers):
             if not provider.is_configured:
@@ -438,10 +474,13 @@ class FundamentalsService:
                     )
                 )
                 chain_errors.append(f"{provider.name.value}: rate-limited")
+                if exc.retry_after_seconds and exc.retry_after_seconds > max_retry_after_seconds:
+                    max_retry_after_seconds = exc.retry_after_seconds
                 log.warning(
                     "fundamentals.provider.rate_limited",
                     provider=provider.name.value,
                     symbol=sym,
+                    retry_after_seconds=exc.retry_after_seconds,
                 )
                 continue
             except ProviderNotFound as exc:
@@ -510,6 +549,21 @@ class FundamentalsService:
             attempted = tuple(h.provider for h in health if h.status != _STATUS_SKIPPED)
             normalized = replace(normalized, contributing_providers=attempted)
 
+            # Sanity-bound provider numbers before the analyzer sees them.
+            # Bad scalars (negative market cap, EPS > 5000, P/E > 10000,
+            # inverted analyst high/low) become None and a warning is
+            # attached to the record — same "missing data" path every
+            # downstream model already handles, instead of a poisoned
+            # input flipping a recommendation.
+            normalized, sanitized_rejections = sanitize_normalized(normalized)
+            if sanitized_rejections:
+                log.warning(
+                    "fundamentals.sanity.rejected",
+                    provider=provider.name.value,
+                    symbol=sym,
+                    rejected_fields=[field for field, _ in sanitized_rejections],
+                )
+
             fetched_at = datetime.now(UTC)
             raw_as_of, policy_key = _resolve_as_of(normalized, fetched_at)
             as_of = _ensure_utc(raw_as_of)
@@ -522,6 +576,17 @@ class FundamentalsService:
             divergences, recon_warnings, accuracy_events = await self._maybe_reconcile(
                 sym, index, normalized
             )
+            # Sanity rejections become self-comparison accuracy events so
+            # a provider that consistently ships bogus values degrades
+            # its trust weight — the same feedback loop that punishes
+            # cross-provider divergences. Sentinel shape:
+            # ``reference_provider = provider`` (self), ``rel_error = 1.0``,
+            # ``agreed = False``, ``field`` namespaced with a ``sanity:``
+            # prefix so the cross-provider aggregations stay distinct.
+            sanity_events = _rejections_to_accuracy_events(
+                provider.name, sym, sanitized_rejections, fetched_at
+            )
+            accuracy_events = accuracy_events + sanity_events
             confidence_after_divergences = _confidence_after_divergences(
                 base_confidence, divergences
             )
@@ -548,6 +613,11 @@ class FundamentalsService:
             # best-effort: a sink failure must not break the fetch.
             self._sink_health(health)
             self._sink_accuracy(accuracy_events)
+            # Feed the sector-medians cohort so the next analyzer call
+            # sees live multiples for any sector that's reached the
+            # cohort floor (B-13). Best-effort — a refresh failure must
+            # not break the fetch.
+            self._sink_cohort(normalized)
 
             return FundamentalsResult(
                 envelope=envelope,
@@ -566,16 +636,28 @@ class FundamentalsService:
         # symbol is a retry candidate — a 30-second blip shouldn't
         # strand it until the next user click. Permanent failures
         # (no API key, etc.) won't resolve themselves and don't queue.
-        self._maybe_enqueue_for_retry(sym, health, chain_errors)
+        self._maybe_enqueue_for_retry(
+            sym, health, chain_errors, retry_after_seconds=max_retry_after_seconds
+        )
         # Raise an aggregate error so callers can decide whether to
         # 503, cache-fallback, or render a "no data" badge in the UI.
-        raise ProviderChainExhausted(sym, tuple(health), tuple(chain_errors))
+        # The retry-after hint travels on the exception so a downstream
+        # worker scheduling a reschedule can honor the server cooldown
+        # rather than fall back to default exponential backoff.
+        raise ProviderChainExhausted(
+            sym,
+            tuple(health),
+            tuple(chain_errors),
+            retry_after_seconds=max_retry_after_seconds or None,
+        )
 
     def _maybe_enqueue_for_retry(
         self,
         symbol: str,
         health: list[ProviderHealth],
         chain_errors: list[str],
+        *,
+        retry_after_seconds: float = 0.0,
     ) -> None:
         """Enqueue ``symbol`` when the chain's observed failures are
         all transient or rate-limited.
@@ -586,6 +668,11 @@ class FundamentalsService:
         * Any chain failure was non-transient — wouldn't recover on retry.
         * No actual failure rows (defensive; should never fire on the
           chain-exhausted path).
+
+        ``retry_after_seconds`` is the maximum ``Retry-After`` value any
+        rate-limited provider returned. Passed through so the queue can
+        delay the first attempt accordingly instead of letting the
+        worker hit the same upstream before its cooldown ends.
         """
         if self._retry_queue is None:
             return
@@ -597,7 +684,11 @@ class FundamentalsService:
         if not observed_statuses.issubset(_TRANSIENT_STATUSES):
             return
         try:
-            self._retry_queue.enqueue(symbol, tuple(chain_errors))
+            self._retry_queue.enqueue(
+                symbol,
+                tuple(chain_errors),
+                retry_after_seconds=retry_after_seconds or None,
+            )
         except Exception as exc:
             # Enqueue is best-effort: the caller is about to raise
             # ProviderChainExhausted regardless, and we'd rather they
@@ -610,13 +701,24 @@ class FundamentalsService:
 
 
 class ProviderChainExhausted(RuntimeError):
-    """Every provider in the chain failed or was unconfigured."""
+    """Every provider in the chain failed or was unconfigured.
+
+    ``retry_after_seconds`` is the maximum ``Retry-After`` hint any
+    rate-limited provider returned during this fetch (parsed by
+    :func:`src.intelligence.fundamentals.http._parse_retry_after`).
+    The retry worker forwards this to ``RetryQueue.record_failure`` so
+    a server-supplied cooldown isn't undercut by our default backoff
+    on the second attempt — RFC 6585 honored end-to-end, not just on
+    the first enqueue.
+    """
 
     def __init__(
         self,
         symbol: str,
         health: tuple[ProviderHealth, ...],
         errors: tuple[str, ...],
+        *,
+        retry_after_seconds: float | None = None,
     ) -> None:
         joined = "; ".join(errors) if errors else "no providers configured"
         super().__init__(
@@ -625,6 +727,43 @@ class ProviderChainExhausted(RuntimeError):
         self.symbol = symbol
         self.health = health
         self.errors = errors
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _rejections_to_accuracy_events(
+    provider: ProviderName,
+    symbol: str,
+    rejections: list[tuple[str, float]],
+    observed_at: datetime,
+) -> tuple[AccuracyEvent, ...]:
+    """Turn :func:`sanitize_normalized` rejections into ledger events.
+
+    Each rejection becomes one synthetic :class:`AccuracyEvent` with the
+    ``provider`` as its own reference, ``agreed=False``, ``rel_error=1.0``,
+    and a ``sanity:<field>`` namespace on the ``field`` column so the
+    rows are filterable from cross-provider reconciliation events while
+    still contributing to ``overall_accuracy`` aggregations.
+
+    Empty input → empty tuple; the orchestrator's accuracy sink no-ops
+    on empty input.
+    """
+    if not rejections:
+        return ()
+    return tuple(
+        AccuracyEvent(
+            provider=provider,
+            reference_provider=provider,
+            symbol=symbol,
+            field=f"sanity:{field}",
+            observed_value=value,
+            reference_value=None,
+            rel_error=1.0,
+            agreed=False,
+            fiscal_date=None,
+            observed_at=observed_at,
+        )
+        for field, value in rejections
+    )
 
 
 def _confidence_after_divergences(

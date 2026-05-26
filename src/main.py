@@ -283,6 +283,14 @@ def recommend(
             def score_article(self, article: object) -> SentimentScore:
                 return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
 
+            def score_texts(self, texts):  # type: ignore[no-untyped-def]
+                # B-15 override — bypass the batched FinBERT base impl
+                # since this mock's __init__ skips the settings setup.
+                return [SentimentScore(SentimentLabel.NEUTRAL, 0.0) for _ in texts]
+
+            def score_articles(self, articles):  # type: ignore[no-untyped-def]
+                return [SentimentScore(SentimentLabel.NEUTRAL, 0.0) for _ in articles]
+
         engine.sentiment_analyzer = _Neutral()
 
     from src.strategy.recommendation import TradingRecommendation
@@ -403,6 +411,14 @@ def summarize(symbol: str, lookback_days: int, news_hours: int, no_sentiment: bo
 
             def score_article(self, article: object) -> SentimentScore:
                 return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+            def score_texts(self, texts):  # type: ignore[no-untyped-def]
+                # B-15 override — bypass the batched FinBERT base impl
+                # since this mock's __init__ skips the settings setup.
+                return [SentimentScore(SentimentLabel.NEUTRAL, 0.0) for _ in texts]
+
+            def score_articles(self, articles):  # type: ignore[no-untyped-def]
+                return [SentimentScore(SentimentLabel.NEUTRAL, 0.0) for _ in articles]
 
         engine.sentiment_analyzer = _Neutral()
 
@@ -533,6 +549,14 @@ def recap(
 
             def score_article(self, article: object) -> SentimentScore:
                 return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+            def score_texts(self, texts):  # type: ignore[no-untyped-def]
+                # B-15 override — bypass the batched FinBERT base impl
+                # since this mock's __init__ skips the settings setup.
+                return [SentimentScore(SentimentLabel.NEUTRAL, 0.0) for _ in texts]
+
+            def score_articles(self, articles):  # type: ignore[no-untyped-def]
+                return [SentimentScore(SentimentLabel.NEUTRAL, 0.0) for _ in articles]
 
         engine.sentiment_analyzer = _Neutral()
 
@@ -1326,6 +1350,14 @@ def _build_controller(
 
             def score_article(self, article: object) -> SentimentScore:
                 return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+            def score_texts(self, texts):  # type: ignore[no-untyped-def]
+                # B-15 override — bypass the batched FinBERT base impl
+                # since this mock's __init__ skips the settings setup.
+                return [SentimentScore(SentimentLabel.NEUTRAL, 0.0) for _ in texts]
+
+            def score_articles(self, articles):  # type: ignore[no-untyped-def]
+                return [SentimentScore(SentimentLabel.NEUTRAL, 0.0) for _ in articles]
 
         engine.sentiment_analyzer = _Neutral()
     return DashboardController(

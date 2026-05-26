@@ -36,7 +36,19 @@ class AlpacaClient:
         self._settings = settings or get_settings()
         self.bucket = AlpacaClient._DEFAULT_BUCKET
         if not self._settings.is_paper_trading:
-            log.warning("alpaca.live_endpoint_in_use", url=self._settings.alpaca_base_url)
+            # Defence in depth: Esther's `safety` contract (see CLAUDE.md)
+            # bans order submission and pins data ingestion to the paper
+            # endpoint. Refusing in the client constructor means future
+            # code paths (background workers, REPL exploration) can't
+            # silently start hitting live by setting ``ALPACA_BASE_URL``.
+            # If genuinely needed for an integration test, instantiate
+            # the underlying alpaca-py clients directly.
+            raise RuntimeError(
+                "ALPACA_BASE_URL points at the live endpoint "
+                f"({self._settings.alpaca_base_url!r}). Esther refuses to "
+                "instantiate AlpacaClient against a live URL — only the paper "
+                "endpoint (paper-api.alpaca.markets) is supported."
+            )
 
     @cached_property
     def trading(self) -> TradingClient:

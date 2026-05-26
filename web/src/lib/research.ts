@@ -2,13 +2,16 @@
  * Research-thesis API client + React hook.
  *
  * Mirrors the dataclass shape in `src/intelligence/research_thesis.py`
- * one-to-one — keep them in sync. No passthrough escape hatches so
- * a backend schema drift fails at `tsc --strict` time instead of
- * mid-render.
+ * one-to-one — keep them in sync. Runtime validation via zod (B-18)
+ * means a backend schema drift surfaces as a clean error banner
+ * naming the offending field rather than crashing mid-render with
+ * ``Cannot read properties of undefined``.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { z } from "zod";
 
+import { validateJson } from "@/lib/_validate";
 import type { TrustScore } from "@/lib/trust";
 
 export type Rating =
@@ -120,6 +123,144 @@ export interface ResearchThesis {
   trust_score: TrustScore;
 }
 
+
+// ---------------------------------------------------------------------------
+// Zod schemas — runtime mirrors of the interfaces above (B-18).
+// ---------------------------------------------------------------------------
+//
+// Keep these schemas in lockstep with the interfaces above AND with the
+// pydantic dataclasses in `src/intelligence/research_thesis.py`. The
+// frontend tests in `research.test.ts` (and any vitest covering this
+// hook) drive a sample API response through ``ResearchThesisSchema``;
+// a backend dataclass that drops or renames a field fails the schema
+// parse with a single-line message naming the offending path.
+//
+// ``ProvenanceMap`` is a free-form ``Record<string, string>`` so the
+// schema is ``z.record(z.string(), z.string())`` rather than a fixed
+// object — the keys are token strings the validator emitted, not a
+// stable enum.
+
+const RatingSchema = z.enum([
+  "strong_buy",
+  "buy",
+  "hold",
+  "sell",
+  "strong_sell",
+]);
+
+const ProvenanceMapSchema = z.record(z.string(), z.string());
+
+const ThesisSectionSchema = z.object({
+  title: z.string(),
+  body: z.string(),
+  bullets: z.array(z.string()),
+  provenance: ProvenanceMapSchema,
+});
+
+const BullBearArgumentSchema = z.object({
+  label: z.string(),
+  weight: z.number(),
+  detail: z.string(),
+  provenance: ProvenanceMapSchema,
+});
+
+const CatalystSchema = z.object({
+  label: z.string(),
+  when: z.string(),
+  impact: z.enum(["bullish", "bearish", "uncertain"]),
+  detail: z.string(),
+  provenance: ProvenanceMapSchema,
+});
+
+const OutlookEntrySchema = z.object({
+  horizon: z.enum(["short", "medium", "long"]),
+  bias: z.enum(["bullish", "bearish", "neutral"]),
+  confidence: z.number(),
+  detail: z.string(),
+  provenance: ProvenanceMapSchema,
+});
+
+const MetricEntrySchema = z.object({
+  label: z.string(),
+  value: z.string(),
+  delta: z.string().nullable(),
+  tone: z.enum(["bull", "bear", "warn"]).nullable(),
+  provenance: ProvenanceMapSchema,
+});
+
+const DroppedClaimSchema = z.object({
+  section: z.string(),
+  sentence: z.string(),
+  unsupported_tokens: z.array(z.string()),
+});
+
+const ValidationReportSchema = z.object({
+  drop_count: z.number(),
+  dropped_claims: z.array(DroppedClaimSchema),
+});
+
+// Trust score lives in `@/lib/trust` as a TS interface. We mirror its
+// wire shape inline so this module doesn't depend on a TrustScore
+// schema export — the moment that lib grows its own zod schema, this
+// can be swapped for `TrustScoreSchema` directly.
+const TrustComponentStatusSchema = z.enum([
+  "ok",
+  "warn",
+  "missing",
+  "n/a",
+]);
+
+const TrustComponentSchema = z.object({
+  name: z.string(),
+  weight: z.number(),
+  value: z.number().nullable(),
+  contribution: z.number().nullable(),
+  status: TrustComponentStatusSchema,
+  detail: z.string(),
+});
+
+const TrustScoreSchema = z.object({
+  score: z.number(),
+  grade: z.enum(["A+", "A", "B", "C", "D", "F"]),
+  components: z.array(TrustComponentSchema),
+});
+
+export const ResearchThesisSchema = z.object({
+  symbol: z.string(),
+  generated_at: z.string(),
+  model: z.string(),
+  rating: RatingSchema,
+  confidence: z.number(),
+  tagline: z.string(),
+  company_overview: ThesisSectionSchema,
+  bull_thesis: z.array(BullBearArgumentSchema),
+  bear_thesis: z.array(BullBearArgumentSchema),
+  technical_analysis: ThesisSectionSchema,
+  fundamental_analysis: ThesisSectionSchema,
+  metrics: z.array(MetricEntrySchema),
+  sentiment_news: ThesisSectionSchema,
+  catalysts: z.array(CatalystSchema),
+  risk_assessment: ThesisSectionSchema,
+  outlook: z.array(OutlookEntrySchema),
+  explainability: ThesisSectionSchema,
+  data_sources: z.array(z.string()),
+  disclaimers: z.array(z.string()),
+  cache: z.enum(["hit", "miss"]),
+  cache_age_seconds: z.number(),
+  mode: z.enum(["llm", "template"]),
+  warning: z.string().optional(),
+  validation: ValidationReportSchema,
+  trust_score: TrustScoreSchema,
+});
+
+// Sanity-check the schema and the hand-written interface agree at
+// compile time. If the interface adds a field the schema must too —
+// the assignment fails the typecheck otherwise. Cheap insurance
+// against the schema and the interface drifting independently.
+type _SchemaMatchesInterface = z.infer<typeof ResearchThesisSchema> extends ResearchThesis ? true : false;
+const _researchSchemaCheck: _SchemaMatchesInterface = true;
+void _researchSchemaCheck;
+
 interface UseResearchThesis {
   thesis: ResearchThesis | null;
   loading: boolean;
@@ -160,7 +301,11 @@ export function useResearchThesis(symbol: string | null): UseResearchThesis {
           }
           throw new Error(`${res.status} ${detail}`);
         }
-        const data = (await res.json()) as ResearchThesis;
+        // Runtime schema validation (B-18). A backend dataclass drift
+        // surfaces as a one-line error naming the offending field
+        // instead of crashing mid-render. The compile-time assertion
+        // above guarantees the schema + interface agree.
+        const data = await validateJson(res, ResearchThesisSchema, "research");
         if (reqRef.current === reqId) {
           setThesis(data);
         }

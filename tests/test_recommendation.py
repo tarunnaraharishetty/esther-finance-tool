@@ -100,6 +100,15 @@ class FakeSentimentAnalyzer(SentimentAnalyzer):
     def score_article(self, article: NewsArticle) -> SentimentScore:  # type: ignore[override]
         return self.score_text(article.headline)
 
+    def score_texts(self, texts):  # type: ignore[no-untyped-def, override]
+        # B-15 override: bypass the batched-pipeline base impl. This
+        # stub's __init__ skips settings setup, so loading FinBERT
+        # would crash.
+        return [self.score_text(t) for t in texts]
+
+    def score_articles(self, articles):  # type: ignore[no-untyped-def, override]
+        return [self.score_article(a) for a in articles]
+
 
 # ---------------------------------------------------------------------------
 # Model
@@ -233,6 +242,15 @@ class HeadlineKeyedAnalyzer(SentimentAnalyzer):
             if key in article.headline:
                 return score
         return SentimentScore(SentimentLabel.NEUTRAL, 0.0)
+
+    def score_texts(self, texts):  # type: ignore[no-untyped-def, override]
+        return [self.score_text(t) for t in texts]
+
+    def score_articles(self, articles):  # type: ignore[no-untyped-def, override]
+        # B-15 override: preserve per-article keyword mapping. The
+        # batched base would compose-and-batch through ``score_texts``,
+        # losing the headline-keyword routing this stub depends on.
+        return [self.score_article(a) for a in articles]
 
 
 def test_quality_weighting_tilts_aggregate_toward_high_quality_article() -> None:

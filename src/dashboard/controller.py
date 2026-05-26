@@ -14,6 +14,7 @@ import asyncio
 import math
 import random
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -56,6 +57,12 @@ from src.sentiment.analyzer import SentimentAnalyzer, SentimentLabel, SentimentS
 from src.strategy.base import SignalAction
 from src.strategy.multi_timeframe import IntradayRead
 from src.strategy.recommendation import RecommendationEngine
+from src.utils.bounded import bounded_set, bounded_trim
+
+# Cap on entries in each brief cache (row / OPP / intraday-OPP). 200
+# is well above any reasonable trader's per-session footprint and
+# bounds the persisted JSON snapshot to a few hundred KB.
+_MAX_BRIEF_CACHE_ENTRIES = 200
 
 # ---------------------------------------------------------------------------
 # Base controller
@@ -379,6 +386,17 @@ class BaseController(ABC):
         # Phase 2c follow-up — older snapshots populate this as ``{}``
         # via the pydantic default.
         self.intraday_opp_brief_cache = dict(snapshot.intraday_opp_brief_cache)
+        # Trim any already-bloated cache down to the current cap on
+        # hydrate (BUGS.md B-16). Older snapshots written before the
+        # bound was added could have thousands of entries; one pass
+        # here normalizes the state before the controller starts
+        # writing new ones.
+        for cache in (
+            self.brief_cache,
+            self.opp_brief_cache,
+            self.intraday_opp_brief_cache,
+        ):
+            bounded_trim(cache, max_entries=_MAX_BRIEF_CACHE_ENTRIES)
         self.events.info(
             f"session restored from {self.session_store.path.name} (tick {snapshot.tick})"
         )
@@ -427,9 +445,13 @@ class BaseController(ABC):
         successful row-brief generation. The text is opaque to the
         controller — it's just dict storage that the next
         ``_persist_if_enabled`` will serialize.
+
+        Bounded at ``_MAX_BRIEF_CACHE_ENTRIES`` via FIFO eviction so
+        long-running sessions don't grow the persisted snapshot
+        without limit (see ``BUGS.md`` B-16).
         """
         key = f"{symbol}{self._BRIEF_KEY_DELIM}{action}"
-        self.brief_cache[key] = text
+        bounded_set(self.brief_cache, key, text, max_entries=_MAX_BRIEF_CACHE_ENTRIES)
 
     def record_opp_brief(self, symbol: str, composite_bucket: int, text: str) -> None:
         """Persist an OPP brief into the controller-owned mirror.
@@ -439,7 +461,9 @@ class BaseController(ABC):
         side stay aligned.
         """
         key = f"{symbol}{self._BRIEF_KEY_DELIM}{composite_bucket}"
-        self.opp_brief_cache[key] = text
+        bounded_set(
+            self.opp_brief_cache, key, text, max_entries=_MAX_BRIEF_CACHE_ENTRIES
+        )
 
     def record_intraday_opp_brief(self, symbol: str, composite_bucket: int, text: str) -> None:
         """Persist an intraday-OPP brief into the dedicated mirror.
@@ -449,7 +473,12 @@ class BaseController(ABC):
         so daily and intraday briefs on the same symbol coexist.
         """
         key = f"{symbol}{self._BRIEF_KEY_DELIM}{composite_bucket}"
-        self.intraday_opp_brief_cache[key] = text
+        bounded_set(
+            self.intraday_opp_brief_cache,
+            key,
+            text,
+            max_entries=_MAX_BRIEF_CACHE_ENTRIES,
+        )
 
     def prune_briefs_for_symbol(self, symbol: str) -> None:
         """Drop every cached brief whose key starts with ``symbol|``.
@@ -666,6 +695,17 @@ class _NeutralAnalyzer(SentimentAnalyzer):
     def score_article(self, _a: NewsArticle) -> SentimentScore:
         return self.score_text("")
 
+    def score_texts(self, texts: Sequence[str]) -> list[SentimentScore]:
+        # B-15 override: bypass the batched-pipeline base impl so this
+        # mock never loads FinBERT (its __init__ skips the settings
+        # setup the base relies on).
+        return [self.score_text(t) for t in texts]
+
+    def score_articles(
+        self, articles: Sequence[NewsArticle]
+    ) -> list[SentimentScore]:
+        return [self.score_article(a) for a in articles]
+
 
 class _RandomSentiment(SentimentAnalyzer):
     """Random positive/negative — for the mock dashboard to show variation."""
@@ -683,6 +723,17 @@ class _RandomSentiment(SentimentAnalyzer):
 
     def score_article(self, article: NewsArticle) -> SentimentScore:
         return self.score_text(article.headline)
+
+    def score_texts(self, texts: Sequence[str]) -> list[SentimentScore]:
+        # B-15 override: keep per-text RNG semantics (each input gets
+        # its own roll) instead of routing through the batched
+        # FinBERT path the base class assumes.
+        return [self.score_text(t) for t in texts]
+
+    def score_articles(
+        self, articles: Sequence[NewsArticle]
+    ) -> list[SentimentScore]:
+        return [self.score_article(a) for a in articles]
 
 
 class MockDashboardController(BaseController):

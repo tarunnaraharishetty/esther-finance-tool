@@ -91,9 +91,19 @@ class ActionChangedRule:
 
 @dataclass
 class ConfidenceThresholdRule:
-    """Fires when confidence crosses ``threshold`` (in either direction)."""
+    """Fires when confidence crosses ``threshold`` with at least ``band`` magnitude.
+
+    The ``band`` parameter is a hysteresis device: the up-crossing only
+    fires when ``current >= threshold + band`` (and the previous tick
+    was below ``threshold``); the down-crossing requires
+    ``current <= threshold - band``. Without this band, a confidence
+    that wiggles by 0.005 across 0.60 would fire every tick that hopped
+    the boundary — the cooldown filter would then mute most of them but
+    the alert log would still show flapping intent.
+    """
 
     threshold: float = 0.6
+    band: float = 0.02
     severity: str = "info"
     name: str = "confidence_threshold"
 
@@ -104,8 +114,15 @@ class ConfidenceThresholdRule:
     ) -> Alert | None:
         if previous is None or current.error or previous.error:
             return None
-        crossed_up = previous.confidence < self.threshold <= current.confidence
-        crossed_down = current.confidence < self.threshold <= previous.confidence
+        # Up-crossing: previous below threshold, current ≥ threshold+band.
+        up_floor = self.threshold + self.band
+        # Down-crossing: previous at or above threshold, current ≤ threshold-band.
+        down_ceil = self.threshold - self.band
+        crossed_up = previous.confidence < self.threshold <= current.confidence and current.confidence >= up_floor
+        crossed_down = (
+            current.confidence < self.threshold <= previous.confidence
+            and current.confidence <= down_ceil
+        )
         if not (crossed_up or crossed_down):
             return None
         direction = "↑" if crossed_up else "↓"
