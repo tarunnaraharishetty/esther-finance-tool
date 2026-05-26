@@ -996,9 +996,27 @@ def serve(
         )
     console.print("[dim]Ctrl+C to stop.[/dim]")
     # log_level=warning keeps uvicorn's per-request access logs out of
-    # the terminal — Esther's own structlog setup handles request
-    # observability if needed.
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    # the terminal — Esther's own structlog request-log middleware
+    # handles request observability (method/path/status/duration_ms/
+    # user_id/request_id) without duplicating uvicorn's noisier
+    # default.
+    #
+    # ``proxy_headers`` + ``forwarded_allow_ips``: when the operator
+    # has flipped ``TRUST_PROXY_HEADERS=true`` (server is behind a
+    # trusted reverse proxy), let uvicorn translate
+    # ``X-Forwarded-Proto`` into ``request.url.scheme`` so HTTPS
+    # detection works correctly. ``forwarded_allow_ips="*"`` is
+    # appropriate because the operator already vouched for the
+    # proxy via the trust flag — uvicorn's IP allow-list is a
+    # second defensive layer, not the primary one.
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="warning",
+        proxy_headers=settings.trust_proxy_headers,
+        forwarded_allow_ips="*" if settings.trust_proxy_headers else None,
+    )
 
 
 # -----------------------------------------------------------------------------

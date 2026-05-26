@@ -114,6 +114,40 @@ mypy src                        # strict type-check
 cd web && npm run typecheck && npm test
 ```
 
+## Deploying
+
+Esther ships as a single bundled image (Dockerfile is multi-stage:
+Node builds `web/dist/`, Python runtime serves it alongside the API).
+
+```bash
+docker compose build
+docker compose up               # local prod simulation, port 8000
+```
+
+Before pushing to a real host (Render / Railway / Fly / Cloud Run),
+fill `.env` with at minimum:
+
+| Variable | Required when | Notes |
+|---|---|---|
+| `APP_ENV` | always | Set to `prod`. Triggers the safety validator. |
+| `SESSION_SECRET_KEY` | `APP_ENV=prod` | ≥32 random bytes. Validator refuses the dev placeholder. |
+| `SECURE_COOKIES` | `APP_ENV=prod` | Must be `true`. Validator refuses `false` in prod. |
+| `TRUSTED_HOSTS` | `APP_ENV=prod` | Comma-list of hostnames; validator refuses `*` in prod. |
+| `CORS_ORIGINS` | If frontend is on a different origin | Validator refuses `*` in prod (breaks credentialed CORS). |
+| `TRUST_PROXY_HEADERS` | Behind a reverse proxy | `true` if the host terminates TLS for you. |
+| `ALPACA_API_KEY` / `ALPACA_API_SECRET` | always | Paper-trading keys. |
+| `ANTHROPIC_API_KEY` | For LLM surfaces | Unset falls back to deterministic templates. |
+
+The model validator in `src/config/settings.py` rejects unsafe
+defaults at startup — a misconfigured prod deploy fails fast with a
+human-readable error instead of silently serving with weak signing
+or wildcard hosts.
+
+For persistent storage under Docker, bind-mount the host's `./data`
+to `/app/data` (the compose file already does this). SQLite databases
+for users, sessions, watchlists, provider health, accuracy ledger,
+and retry queue all live there.
+
 ## Layout
 
 ```
