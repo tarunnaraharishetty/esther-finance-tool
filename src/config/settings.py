@@ -306,6 +306,20 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ]
+    # Hostnames the server is willing to answer for (Host header).
+    # ``["*"]`` accepts any Host (dev default) but is refused outside
+    # ``AppEnv.DEV`` by the model validator — Host-header injection
+    # attacks (cache poisoning, password-reset link forgery) are
+    # neutralized by a tight allow-list. Override via
+    # ``TRUSTED_HOSTS=esther.example.com,api.esther.example.com``.
+    trusted_hosts: list[str] = ["*"]
+    # When True, ``X-Forwarded-For`` is honored for client-IP
+    # resolution (rate limiter key, structured log) AND uvicorn is
+    # launched with ``proxy_headers=True`` so ``X-Forwarded-Proto``
+    # round-trips into ``request.url.scheme``. Default False — outside
+    # a trusted reverse proxy the header is attacker-controlled and a
+    # spoofed XFF would bypass per-IP rate limits.
+    trust_proxy_headers: bool = False
 
     # ---- Paths ----
     project_root: Path = PROJECT_ROOT
@@ -317,6 +331,19 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
+
+    @field_validator("trusted_hosts", mode="before")
+    @classmethod
+    def _split_trusted_hosts(cls, v: object) -> object:
+        """Accept ``TRUSTED_HOSTS=a.com,b.com`` in addition to JSON list."""
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                return v
+            return [piece.strip() for piece in stripped.split(",") if piece.strip()]
+        return v
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -488,6 +515,19 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "SECURE_COOKIES must be true when APP_ENV is not 'dev'. "
                     "Set SECURE_COOKIES=false explicitly only for local plain-HTTP testing."
+                )
+            if self.trusted_hosts == ["*"]:
+                raise ValueError(
+                    "TRUSTED_HOSTS must not be '*' when APP_ENV is not 'dev'. "
+                    "Pin the comma-separated hostnames this server should answer "
+                    "for (e.g. 'esther.example.com,api.esther.example.com'); "
+                    "Host-header injection is otherwise unmitigated."
+                )
+            if "*" in self.cors_origins:
+                raise ValueError(
+                    "CORS_ORIGINS must not include '*' when APP_ENV is not 'dev'. "
+                    "FastAPI rejects allow_credentials=True paired with a "
+                    "wildcard origin; pin the exact frontend origin(s) instead."
                 )
         return self
 
