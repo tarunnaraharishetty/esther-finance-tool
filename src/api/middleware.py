@@ -41,10 +41,12 @@ from __future__ import annotations
 
 import secrets
 import time
+import uuid
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from threading import Lock
 
+import structlog
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
@@ -167,13 +169,18 @@ def _client_ip(request: Request) -> str:
     """Best-effort client identifier for rate-limit keying.
 
     Order of preference:
-    - ``X-Forwarded-For`` first hop (when behind a trusted reverse proxy);
+    - ``X-Forwarded-For`` first hop, **only when** the app was started
+      with ``trust_proxy_headers=True`` (operator has confirmed a
+      trusted reverse proxy in front). Outside that, XFF is
+      attacker-controlled and a spoofed value would bypass per-IP
+      rate limits — fall straight through to the peer address.
     - ``request.client.host`` (uvicorn-resolved peer address);
     - ``unknown`` fallback so a missing peer doesn't crash the limiter.
     """
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
+    if getattr(request.app.state, "trust_proxy_headers", False):
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            return xff.split(",")[0].strip()
     if request.client is not None:
         return request.client.host
     return "unknown"
@@ -395,13 +402,128 @@ def install_path_rate_limits(
     app.add_middleware(PathRateLimitMiddleware, rules=rules)  # type: ignore[attr-defined]
 
 
+# ---------------------------------------------------------------------------
+# Request log + request_id
+# ---------------------------------------------------------------------------
+
+
+# Header the middleware echoes the assigned request id back in. Clients
+# can also send one in (correlation across a multi-hop request); when
+# present we honor it instead of minting a new one, so a frontend trace
+# id propagates end-to-end through the API.
+_REQUEST_ID_HEADER = "x-request-id"
+
+# Paths that the request-log middleware skips entirely. Health probes
+# fire every few seconds from load balancers / uptime monitors and
+# would otherwise drown the log with no signal. The actual route
+# implementations still log at INFO when state changes — this is
+# strictly the per-request observability layer.
+_REQUEST_LOG_SKIP_PREFIXES: tuple[str, ...] = (
+    "/api/health",
+    "/api/livez",
+    "/api/readyz",
+)
+
+
+class RequestLogMiddleware(BaseHTTPMiddleware):
+    """One structured log line per HTTP request, plus a request id.
+
+    Wires three things:
+
+    * Assigns / honors an ``X-Request-ID`` header. A client-supplied
+      id round-trips end-to-end (frontend trace, multi-hop debug); an
+      absent one is minted as a uuid4 hex.
+    * Binds ``request_id`` (and ``method`` / ``path``) into structlog's
+      ``contextvars`` so EVERY nested log call inside the request
+      inherits the correlation id without manual plumbing.
+    * Emits one ``http.request`` log line at the end with status +
+      duration + caller identity. Logs even when downstream middleware
+      rejects the request (auth gate 401, CSRF 403, rate limit 429) —
+      this middleware is installed last so it wraps the outermost
+      response path.
+
+    Deliberately does NOT log query strings, request bodies, or
+    cookies — none of those are needed for routine observability and
+    all of them risk leaking secrets into the log sink.
+    """
+
+    def __init__(self, app: ASGIApp, *, logger_name: str = "esther.http") -> None:
+        super().__init__(app)
+        self._log = get_logger(logger_name)
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        # Honor an inbound request id; mint one otherwise. uuid4().hex
+        # is 32 chars — short enough to fit comfortably in any log
+        # aggregator's field width.
+        inbound = request.headers.get(_REQUEST_ID_HEADER)
+        request_id = (
+            inbound.strip() if inbound and inbound.strip() else uuid.uuid4().hex
+        )
+        path = request.url.path
+        method = request.method.upper()
+
+        # contextvars-bound id propagates into every nested structlog
+        # call within this request, including the route handlers, the
+        # store layer, and downstream middleware that already exist.
+        # ``clear_contextvars`` after the response avoids cross-request
+        # bleed inside a single worker.
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(
+            request_id=request_id, method=method, path=path
+        )
+
+        start = time.perf_counter()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers[_REQUEST_ID_HEADER] = request_id
+            return response
+        finally:
+            duration_ms = (time.perf_counter() - start) * 1000.0
+            # Skip the noisy probe routes after the duration is
+            # measured — we still want to echo the request id header
+            # if a probe set one (uptime monitors sometimes do).
+            if not any(path.startswith(p) for p in _REQUEST_LOG_SKIP_PREFIXES):
+                user = getattr(request.state, "current_user", None)
+                user_id = getattr(user, "id", None)
+                self._log.info(
+                    "http.request",
+                    method=method,
+                    path=path,
+                    status=status_code,
+                    duration_ms=round(duration_ms, 2),
+                    client_ip=_client_ip(request),
+                    user_id=user_id,
+                    request_id=request_id,
+                )
+            structlog.contextvars.clear_contextvars()
+
+
+def install_request_log(app: ASGIApp) -> None:
+    """Attach :class:`RequestLogMiddleware` to ``app``.
+
+    Caller is responsible for installing this LAST so it wraps the
+    other middleware (auth gate, CSRF, rate-limit) — that way the log
+    line captures the final status the client sees, including
+    rejections from those gates.
+    """
+    app.add_middleware(RequestLogMiddleware)  # type: ignore[attr-defined]
+
+
 __all__ = [
     "AuthGateMiddleware",
     "CSRFMiddleware",
     "InMemoryRateLimiter",
     "PathRateLimitMiddleware",
+    "RequestLogMiddleware",
     "build_rate_limiter_dep",
     "install_auth_gate",
     "install_csrf_gate",
     "install_path_rate_limits",
+    "install_request_log",
 ]

@@ -64,6 +64,7 @@ from src.api.middleware import (
     install_auth_gate,
     install_csrf_gate,
     install_path_rate_limits,
+    install_request_log,
 )
 from src.api.movement import register_movement_routes
 from src.api.research import register_research_routes
@@ -872,6 +873,20 @@ def create_app(
         allow_headers=["*"],
         allow_credentials=True,
     )
+
+    # Stash the proxy-trust flag so ``_client_ip`` can consult it
+    # without a circular settings import in the middleware module.
+    # Defaults to False — operators behind a reverse proxy must flip
+    # ``TRUST_PROXY_HEADERS=true`` explicitly.
+    app.state.trust_proxy_headers = settings.trust_proxy_headers
+
+    # Request-log middleware MUST be installed last so it ends up as
+    # the outermost layer — that way the log line captures the final
+    # status the client sees, including rejections from AuthGate
+    # (401), CSRF (403), and PathRateLimit (429). It also binds the
+    # request id into structlog contextvars so every nested log call
+    # inside the request inherits the correlation id automatically.
+    install_request_log(app)
 
     # Static frontend mount — production same-origin path.
     #
