@@ -770,9 +770,39 @@ class MockDashboardController(BaseController):
         self._np_rng = np.random.default_rng(seed)
         # Per-symbol drift/noise — gives BUYs/SELLs different reasons across rows.
         self._sym_profiles = {
-            s: {"drift": rng.uniform(-0.005, 0.015), "noise": rng.uniform(0.008, 0.02)}
-            for s in watchlist
+            s: self._mint_profile() for s in watchlist
         }
+
+    def _mint_profile(self) -> dict[str, float]:
+        """Draw a new (drift, noise) profile from the seeded RNG.
+
+        Lifted from the constructor so ``add_symbol`` can lazy-init a
+        profile for symbols added at runtime (per-user signup seed,
+        manual add via /api/watchlist/symbols). Without this, the next
+        ``_mock_row`` call after a runtime add raised KeyError and the
+        whole snapshot request returned 500.
+        """
+        return {
+            "drift": self._rng.uniform(-0.005, 0.015),
+            "noise": self._rng.uniform(0.008, 0.02),
+        }
+
+    def add_symbol(self, symbol: str) -> bool:
+        """Override of :meth:`BaseController.add_symbol` that also
+        materializes a synthetic profile for the new symbol.
+
+        Without this override, any symbol added at runtime (signup
+        watchlist seed, /api/watchlist/symbols POST) was absent from
+        ``_sym_profiles`` and ``_mock_row`` KeyError'd on the next
+        snapshot tick — turning a working SSE stream into a tight
+        500-loop. The override lazy-mints the profile so the runtime
+        add path matches the constructor's contract.
+        """
+        added = super().add_symbol(symbol)
+        if added:
+            sym = symbol.strip().upper()
+            self._sym_profiles[sym] = self._mint_profile()
+        return added
 
     async def fetch_bars(self, symbol: str) -> pd.DataFrame | None:
         """Synthesize a deterministic OHLCV window for ``symbol``.

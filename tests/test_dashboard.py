@@ -219,6 +219,20 @@ def test_controller_add_symbol_rejects_empty_input() -> None:
     assert ctrl.watchlist == ["AAPL"]
 
 
+async def test_mock_controller_snapshot_after_runtime_add_does_not_raise() -> None:
+    """Regression: a symbol added after construction (per-user signup
+    seed, /api/watchlist/symbols POST, manual TUI add) must materialize
+    a synthetic profile so the next ``fetch_snapshot`` doesn't
+    KeyError. Previously, ``add_symbol`` appended to ``watchlist`` but
+    left ``_sym_profiles`` untouched — the snapshot route then 500'd
+    in production smoke testing.
+    """
+    ctrl = MockDashboardController(watchlist=["AAPL"], seed=7)
+    assert ctrl.add_symbol("GOOGL") is True
+    snap = await ctrl.fetch_snapshot()
+    assert {r.symbol for r in snap.rows} == {"AAPL", "GOOGL"}
+
+
 def test_controller_remove_symbol_drops_present_symbol() -> None:
     ctrl = MockDashboardController(watchlist=["AAPL", "MSFT"], seed=7)
     assert ctrl.remove_symbol("MSFT") is True
