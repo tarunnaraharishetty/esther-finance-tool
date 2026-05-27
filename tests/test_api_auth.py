@@ -180,6 +180,7 @@ def test_me_returns_user_after_login(
         "email",
         "created_at",
         "last_login_at",
+        "email_verified",
     }
 
 
