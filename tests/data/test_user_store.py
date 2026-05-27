@@ -255,3 +255,158 @@ def test_delete_user_cascades_sessions(tmp_path: Path) -> None:
     store.delete_user(user.id)
     assert store.lookup_session(session.token) is None
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# Password reset tokens (migration v2)
+# ---------------------------------------------------------------------------
+
+
+def test_create_and_consume_password_reset_token_round_trips(
+    tmp_path: Path,
+) -> None:
+    """Happy path: a freshly minted token resolves back to the
+    bound user, and the returned User round-trips by id + email."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    token = store.create_password_reset_token(user.id, timedelta(hours=1))
+    assert isinstance(token, str)
+    assert len(token) >= 40  # secrets.token_urlsafe(32) → 43-char string
+    resolved = store.consume_password_reset_token(token)
+    assert resolved is not None
+    assert resolved.id == user.id
+    assert resolved.email == "a@b.com"
+    store.close()
+
+
+def test_password_reset_token_is_single_use(tmp_path: Path) -> None:
+    """Critical invariant: the same token cannot be redeemed twice.
+
+    Without this, an attacker who intercepts the reset email could
+    redeem it after the legitimate user. The UPDATE ... WHERE
+    used_at IS NULL guard turns the second redeem into a no-op.
+    """
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    token = store.create_password_reset_token(user.id, timedelta(hours=1))
+    assert store.consume_password_reset_token(token) is not None
+    # Replay: same token, second attempt — must return None.
+    assert store.consume_password_reset_token(token) is None
+    store.close()
+
+
+def test_password_reset_token_rejects_expired(tmp_path: Path) -> None:
+    """An expired token must fail closed — the expiry filter is in
+    the consume UPDATE clause."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    # Mint a token with a 1ms TTL, wait 50ms — well past expiry.
+    token = store.create_password_reset_token(
+        user.id, timedelta(milliseconds=1)
+    )
+    time.sleep(0.05)
+    assert store.consume_password_reset_token(token) is None
+    store.close()
+
+
+def test_password_reset_token_rejects_unknown(tmp_path: Path) -> None:
+    """A token never minted by us cannot be redeemed."""
+    store = UserStore(tmp_path / "users.db")
+    store.create_user("a@b.com", "longenough")  # force schema init
+    assert store.consume_password_reset_token("not-a-real-token") is None
+    assert store.consume_password_reset_token("") is None
+    store.close()
+
+
+def test_create_password_reset_token_rejects_non_positive_ttl(
+    tmp_path: Path,
+) -> None:
+    """Zero or negative TTL would let a malicious caller mint a
+    pre-expired token — defense in depth on the route's input
+    validation."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    with pytest.raises(ValueError, match="ttl must be positive"):
+        store.create_password_reset_token(user.id, timedelta(0))
+    store.close()
+
+
+def test_update_password_replaces_hash(tmp_path: Path) -> None:
+    """After update_password, the old password fails verify_login and
+    the new one succeeds — proves the hash actually rotated."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "oldpassword1")
+    assert store.update_password(user.id, "newpassword1") is True
+    with pytest.raises(InvalidCredentials):
+        store.verify_login("a@b.com", "oldpassword1")
+    assert store.verify_login("a@b.com", "newpassword1").id == user.id
+    store.close()
+
+
+def test_update_password_unknown_user_returns_false(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    store.create_user("a@b.com", "longenough")
+    assert store.update_password(99_999, "newpassword1") is False
+    store.close()
+
+
+def test_update_password_rejects_empty(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    with pytest.raises(ValueError, match="password must not be empty"):
+        store.update_password(user.id, "")
+    store.close()
+
+
+def test_revoke_all_sessions_invalidates_every_token(tmp_path: Path) -> None:
+    """The reset-confirm path calls this so any cookie the attacker
+    held becomes useless the moment the password changes."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    s1 = store.create_session(user.id, timedelta(days=1))
+    s2 = store.create_session(user.id, timedelta(days=1))
+    assert store.revoke_all_sessions_for_user(user.id) == 2
+    assert store.lookup_session(s1.token) is None
+    assert store.lookup_session(s2.token) is None
+    store.close()
+
+
+def test_revoke_all_sessions_does_not_affect_other_users(
+    tmp_path: Path,
+) -> None:
+    """Per-user scope: revoking on user A must not touch user B's
+    in-flight sessions."""
+    store = UserStore(tmp_path / "users.db")
+    a = store.create_user("a@b.com", "longenough")
+    b = store.create_user("b@c.com", "longenough")
+    sa = store.create_session(a.id, timedelta(days=1))
+    sb = store.create_session(b.id, timedelta(days=1))
+    assert store.revoke_all_sessions_for_user(a.id) == 1
+    assert store.lookup_session(sa.token) is None
+    assert store.lookup_session(sb.token) is not None
+    store.close()
+
+
+def test_prune_expired_password_reset_tokens(tmp_path: Path) -> None:
+    """Periodic-sweep helper — same shape as prune_expired_sessions."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    expired = store.create_password_reset_token(user.id, timedelta(milliseconds=1))
+    live = store.create_password_reset_token(user.id, timedelta(hours=1))
+    time.sleep(0.05)
+    assert store.prune_expired_password_reset_tokens() == 1
+    # Expired token gone; live one still resolves.
+    assert store.consume_password_reset_token(expired) is None
+    assert store.consume_password_reset_token(live) is not None
+    store.close()
+
+
+def test_password_reset_tokens_cascade_on_user_delete(tmp_path: Path) -> None:
+    """FK ON DELETE CASCADE — deleting a user must wipe their pending
+    reset tokens too (consistent with sessions cascade)."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    token = store.create_password_reset_token(user.id, timedelta(hours=1))
+    store.delete_user(user.id)
+    assert store.consume_password_reset_token(token) is None
+    store.close()
