@@ -148,6 +148,35 @@ to `/app/data` (the compose file already does this). SQLite databases
 for users, sessions, watchlists, provider health, accuracy ledger,
 and retry queue all live there.
 
+### Deploying to Render
+
+`render.yaml` is a Blueprint — Render reads it directly so the
+manual steps shrink to:
+
+1. **Connect the repo.** Render dashboard → **New** → **Blueprint** →
+   connect this GitHub repo. Render parses `render.yaml` and
+   proposes one web service + a 1GB persistent disk.
+2. **Fill in the secret env vars.** Render prompts for every variable
+   declared `sync: false`:
+   - `ALPACA_API_KEY` / `ALPACA_API_SECRET` (required)
+   - `ANTHROPIC_API_KEY` (optional; unset = template fallback)
+   - `FMP_API_KEY` / `FINNHUB_API_KEY` / `ALPHAVANTAGE_API_KEY` (all optional)
+   - `SEC_EDGAR_USER_AGENT` (optional; format: `"App Name contact@you.com"`)
+3. **Deploy.** Render builds the multi-stage Dockerfile, mounts the
+   disk at `/app/data`, and starts the service. The model validator
+   refuses to boot if any prod-safety setting is wrong — `SESSION_SECRET_KEY`,
+   `SECURE_COOKIES`, `TRUSTED_HOSTS`, `CORS_ORIGINS` are all wired
+   correctly in `render.yaml` so the first deploy passes.
+4. **Open the URL.** Render assigns `<service-name>.onrender.com`.
+   Sign up an account; the dashboard streams over SSE same as local.
+
+Notes: `TRUSTED_HOSTS` auto-resolves to the assigned Render hostname
+via `fromService.property: host` — if you later attach a custom
+domain, edit `TRUSTED_HOSTS` in the dashboard to include both,
+comma-separated. Render terminates TLS at its load balancer, so
+`TRUST_PROXY_HEADERS=true` is set so `request.url.scheme` reflects
+HTTPS correctly.
+
 ## Layout
 
 ```
