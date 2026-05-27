@@ -9,6 +9,7 @@ import type { NavKey } from "@/components/layout/Sidebar";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
+import { VerifyEmailPage } from "@/pages/VerifyEmailPage";
 import { WatchlistPage } from "@/pages/WatchlistPage";
 import { MoversPage } from "@/pages/MoversPage";
 import { NewsPage } from "@/pages/NewsPage";
@@ -38,16 +39,36 @@ export default function App() {
   // "logged out" to "logged in" without the loader would briefly
   // flash the LoginPage on every refresh.
   const session = useSession();
-  // Password-reset routing: the emailed link points at
-  // ``/reset-password?token=…``. We don't run a full router for one
-  // page — capture the token at mount, clear it from the URL once
-  // we've consumed it so a back-navigation doesn't replay the form.
-  const [resetToken, setResetToken] = useState<string | null>(() => {
+  // Single-page routing for the two emailed-link flows:
+  //   /reset-password?token=…   → ResetPasswordPage
+  //   /verify-email?token=…     → VerifyEmailPage
+  // We don't run a full router for two pages — capture both the
+  // pathname + token at mount, clear from the URL once consumed so
+  // a back-navigation doesn't replay the form against a stale token.
+  const [emailToken, setEmailToken] = useState<{
+    kind: "reset" | "verify";
+    token: string;
+  } | null>(() => {
     if (typeof window === "undefined") return null;
     const params = new URLSearchParams(window.location.search);
-    return params.get("token");
+    const tok = params.get("token");
+    if (!tok) return null;
+    const path = window.location.pathname;
+    if (path.startsWith("/reset-password")) return { kind: "reset", token: tok };
+    if (path.startsWith("/verify-email")) return { kind: "verify", token: tok };
+    // Path doesn't match either flow — treat as a stale link and
+    // fall through to the normal app (the routes above all carry
+    // the ``?token=`` query string AND the matching path).
+    return null;
   });
   const [resetFlash, setResetFlash] = useState<string | null>(null);
+
+  const clearEmailToken = (): void => {
+    setEmailToken(null);
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", "/");
+    }
+  };
   const watchlist = useUserWatchlist(session.user !== null);
   const { snapshot, status, isStale, msSinceLastEvent } = useSnapshotStream();
   const [activeSymbol, setActiveSymbol] = useState<string | null>(null);
@@ -142,26 +163,34 @@ export default function App() {
       </div>
     );
   }
+  // Email-verification redemption is reachable whether the user is
+  // logged in or not — the emailed link works in any session state.
+  // ``onSuccess`` clears the token from the URL and refreshes the
+  // session so the verified flag round-trips into the banner state.
+  if (emailToken !== null && emailToken.kind === "verify") {
+    return (
+      <VerifyEmailPage
+        token={emailToken.token}
+        onSuccess={() => {
+          clearEmailToken();
+          void session.refresh();
+        }}
+      />
+    );
+  }
+
   if (session.user === null) {
-    // Reset flow: URL has ?token=… and we're logged out — route to
-    // the redemption form. Once it succeeds we clear the token,
-    // flip on a flash banner, and fall through to the LoginPage.
-    if (resetToken !== null) {
+    // Reset flow: URL has /reset-password?token=… and we're logged
+    // out — route to the redemption form. Once it succeeds we clear
+    // the token, flip on a flash banner, and fall through to the
+    // LoginPage.
+    if (emailToken !== null && emailToken.kind === "reset") {
       return (
         <ResetPasswordPage
-          token={resetToken}
+          token={emailToken.token}
           onSuccess={() => {
-            setResetToken(null);
+            clearEmailToken();
             setResetFlash("Password updated. Please log in.");
-            // Strip the token query string so a back-navigation
-            // doesn't replay the form against a now-consumed token.
-            if (typeof window !== "undefined") {
-              window.history.replaceState(
-                null,
-                "",
-                window.location.pathname,
-              );
-            }
           }}
         />
       );
@@ -188,6 +217,14 @@ export default function App() {
         onOpenPalette={() => setPaletteOpen(true)}
         authUser={session.user}
         onLogout={session.logout}
+        onAccountDeleted={async () => {
+          // Server cleared the cookies on the response; refresh the
+          // session so /me resolves to null and the LoginPage takes
+          // over. setResetFlash surfaces a one-time banner so the
+          // user knows the delete completed.
+          await session.refresh();
+          setResetFlash("Your account has been deleted.");
+        }}
         navCounts={{
           watchlist: displayedSnapshot?.rows.length ?? 0,
           news: displayedSnapshot

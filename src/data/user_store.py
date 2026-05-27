@@ -1,13 +1,17 @@
 """Persistent user accounts + session token store.
 
 SQLite-backed, lazy-init, mirrors the established :class:`HealthStore`
-pattern. Three tables:
+pattern. Four tables:
 
-* ``users`` — email + bcrypt-hashed password + audit timestamps.
+* ``users`` — email + bcrypt-hashed password + ``email_verified`` flag
+  + audit timestamps.
 * ``sessions`` — opaque session tokens with TTL, foreign-keyed to a
   user via ``user_id``.
 * ``password_reset_tokens`` — single-use reset tokens with TTL. Marked
   ``used_at`` on first redeem so a replay attempt fails closed.
+* ``email_verification_tokens`` — single-use verification tokens with
+  TTL. Same shape as password reset tokens; consume flips the user's
+  ``email_verified`` bit and marks the token used in one transaction.
 
 Sessions are random 32-byte tokens stored verbatim — they live in
 HTTP-only cookies signed with the app's session secret. The
@@ -108,9 +112,38 @@ def _apply_v2(conn: sqlite3.Connection) -> None:
     conn.executescript(_V2_SCHEMA)
 
 
+# v3 — email verification. Adds a boolean ``email_verified`` column
+# to ``users`` (default 0 for the "verified" semantic; existing rows
+# default to unverified so the post-deploy banner appears for every
+# pre-migration account, which is the safer fail-shut default) and a
+# new ``email_verification_tokens`` table that mirrors the
+# password-reset structure (single-use, TTL, FK cascade).
+_V3_SCHEMA = """
+ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_email_verification_user
+    ON email_verification_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_email_verification_expires
+    ON email_verification_tokens(expires_at);
+"""
+
+
+def _apply_v3(conn: sqlite3.Connection) -> None:
+    conn.executescript(_V3_SCHEMA)
+
+
 _MIGRATIONS = [
     Migration(version=1, name="users_sessions_init", apply=_apply_v1),
     Migration(version=2, name="password_reset_tokens", apply=_apply_v2),
+    Migration(version=3, name="email_verification", apply=_apply_v3),
 ]
 _MIGRATION_NAMESPACE = "user_store"
 
@@ -133,8 +166,9 @@ class User:
     email: str
     created_at: datetime
     last_login_at: datetime | None
+    email_verified: bool = False
 
-    def to_wire(self) -> dict[str, str | int | None]:
+    def to_wire(self) -> dict[str, str | int | bool | None]:
         """JSON-safe shape for ``/api/auth/me`` etc. No password hash."""
         return {
             "id": self.id,
@@ -145,6 +179,7 @@ class User:
                 if self.last_login_at is not None
                 else None
             ),
+            "email_verified": self.email_verified,
         }
 
 
@@ -262,7 +297,8 @@ class UserStore:
     def get_user_by_id(self, user_id: int) -> User | None:
         conn = self._connect()
         cur = conn.execute(
-            "SELECT id, email, created_at, last_login_at FROM users WHERE id = ?",
+            "SELECT id, email, created_at, last_login_at, email_verified "
+            "FROM users WHERE id = ?",
             (user_id,),
         )
         row = cur.fetchone()
@@ -276,7 +312,8 @@ class UserStore:
             return None
         conn = self._connect()
         cur = conn.execute(
-            "SELECT id, email, created_at, last_login_at FROM users WHERE email = ?",
+            "SELECT id, email, created_at, last_login_at, email_verified "
+            "FROM users WHERE email = ?",
             (email_norm,),
         )
         row = cur.fetchone()
@@ -317,8 +354,8 @@ class UserStore:
         email_norm = _normalize_email(email)
         conn = self._connect()
         cur = conn.execute(
-            "SELECT id, email, password_hash, created_at, last_login_at "
-            "FROM users WHERE email = ?",
+            "SELECT id, email, password_hash, created_at, last_login_at, "
+            "email_verified FROM users WHERE email = ?",
             (email_norm,),
         )
         row = cur.fetchone()
@@ -352,6 +389,7 @@ class UserStore:
             email=row[1],
             created_at=_parse_iso(row[3]),
             last_login_at=now,
+            email_verified=bool(row[5]),
         )
 
     # ----- session CRUD -----------------------------------------------
@@ -394,7 +432,8 @@ class UserStore:
         cur = conn.execute(
             """
             SELECT s.user_id, s.expires_at,
-                   u.id, u.email, u.created_at, u.last_login_at
+                   u.id, u.email, u.created_at, u.last_login_at,
+                   u.email_verified
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token = ?
@@ -424,6 +463,7 @@ class UserStore:
             email=row[3],
             created_at=_parse_iso(row[4]),
             last_login_at=_parse_iso(row[5]) if row[5] is not None else None,
+            email_verified=bool(row[6]),
         )
 
     def revoke_session(self, token: str) -> bool:
@@ -580,6 +620,128 @@ class UserStore:
             )
             return int(cur.rowcount or 0)
 
+    def verify_password(self, user_id: int, password: str) -> bool:
+        """Constant-time-ish password check for a known user_id.
+
+        Distinct from :meth:`verify_login` because the caller already
+        knows which user they're checking (account-delete confirmation,
+        future "change password while logged in" flow). Returns False
+        for missing user / wrong password — never raises so the route
+        can collapse both into one generic "wrong password" response
+        and not leak existence.
+        """
+        if not password:
+            return False
+        conn = self._connect()
+        cur = conn.execute(
+            "SELECT password_hash FROM users WHERE id = ?", (user_id,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            # Burn an equivalent bcrypt op so timing doesn't
+            # distinguish missing-id from wrong-password.
+            bcrypt.checkpw(password.encode("utf-8"), _DUMMY_HASH)
+            return False
+        return bool(
+            bcrypt.checkpw(password.encode("utf-8"), row[0].encode("utf-8"))
+        )
+
+    # ----- email verification -----------------------------------------
+
+    def create_email_verification_token(
+        self, user_id: int, ttl: timedelta
+    ) -> str:
+        """Mint a single-use verification token bound to ``user_id``.
+
+        Same shape as :meth:`create_password_reset_token`. The caller
+        embeds the token in the emailed URL; consumption flips the
+        user's ``email_verified`` bit + marks the token used in one
+        atomic UPDATE.
+
+        Idempotent at the "user has many pending tokens" level: minting
+        a fresh token doesn't invalidate previous ones. They all
+        remain redeemable until expired/used — useful when a user
+        re-requests a verification email and the old one was already
+        delivered but unread. Once any one is redeemed the user is
+        verified; the others become harmless because the consume path
+        is a no-op when ``email_verified`` is already True.
+        """
+        if ttl <= timedelta(0):
+            raise ValueError(f"ttl must be positive, got {ttl!r}")
+        token = secrets.token_urlsafe(_SESSION_TOKEN_BYTES)
+        now = datetime.now(UTC)
+        expires_at = now + ttl
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                """
+                INSERT INTO email_verification_tokens
+                    (token, user_id, created_at, expires_at, used_at)
+                VALUES (?, ?, ?, ?, NULL)
+                """,
+                (token, user_id, now.isoformat(), expires_at.isoformat()),
+            )
+        return token
+
+    def consume_email_verification_token(self, token: str) -> User | None:
+        """Validate, mark used, flip ``email_verified=True``.
+
+        Atomic via a single transaction over two UPDATEs:
+
+        1. Mark the token used IFF unused + not expired.
+        2. If step 1 affected a row, flip ``email_verified`` on the
+           bound user.
+
+        Returns the verified :class:`User` on success, ``None`` for
+        any invalid token state (unknown / expired / replayed). Idempotent
+        on already-verified users — the second UPDATE is a no-op write
+        of ``email_verified=1`` when the user was already verified.
+        """
+        if not token:
+            return None
+        now = datetime.now(UTC)
+        now_iso = now.isoformat()
+        with self._lock:
+            conn = self._connect()
+            conn.execute("BEGIN")
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE email_verification_tokens
+                    SET used_at = ?
+                    WHERE token = ?
+                      AND used_at IS NULL
+                      AND expires_at > ?
+                    RETURNING user_id
+                    """,
+                    (now_iso, token, now_iso),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    conn.execute("ROLLBACK")
+                    return None
+                user_id = int(row[0])
+                conn.execute(
+                    "UPDATE users SET email_verified = 1 WHERE id = ?",
+                    (user_id,),
+                )
+                conn.execute("COMMIT")
+            except sqlite3.Error:
+                conn.execute("ROLLBACK")
+                raise
+        return self.get_user_by_id(user_id)
+
+    def prune_expired_email_verification_tokens(self) -> int:
+        """Sweep helper — symmetric with the other prune methods."""
+        now = datetime.now(UTC).isoformat()
+        with self._lock:
+            conn = self._connect()
+            cur = conn.execute(
+                "DELETE FROM email_verification_tokens WHERE expires_at <= ?",
+                (now,),
+            )
+            return int(cur.rowcount or 0)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -599,12 +761,13 @@ def _normalize_email(email: str) -> str:
     return (email or "").strip().lower()
 
 
-def _row_to_user(row: tuple[int, str, str, str | None]) -> User:
+def _row_to_user(row: tuple[int, str, str, str | None, int]) -> User:
     return User(
         id=int(row[0]),
         email=row[1],
         created_at=_parse_iso(row[2]),
         last_login_at=_parse_iso(row[3]) if row[3] is not None else None,
+        email_verified=bool(row[4]),
     )
 
 

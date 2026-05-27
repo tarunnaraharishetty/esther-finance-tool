@@ -9,6 +9,7 @@ function makeUser(over: Partial<AuthUser> = {}): AuthUser {
     email: "trader@example.com",
     created_at: "2026-05-23T00:00:00+00:00",
     last_login_at: "2026-05-24T13:00:00+00:00",
+    email_verified: true,
     ...over,
   };
 }

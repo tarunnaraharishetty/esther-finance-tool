@@ -615,35 +615,75 @@ def create_app(
         pwreset_confirm_rate_limiter = InMemoryRateLimiter(
             max_calls=20, per_seconds=300.0
         )
+        # Verification re-request: same shape as password-reset
+        # request (real users hit it rarely, scripted spam hits hard).
+        # 5 / IP / hour. Confirm has no rate limit — the token's
+        # 256-bit entropy makes brute force infeasible, and a logged-
+        # in user clicking a stale verification link from yesterday
+        # shouldn't get throttled.
+        verify_request_rate_limiter = InMemoryRateLimiter(
+            max_calls=5, per_seconds=3600.0
+        )
         app.state.login_rate_limiter = login_rate_limiter
         app.state.signup_rate_limiter = signup_rate_limiter
         app.state.pwreset_request_rate_limiter = pwreset_request_rate_limiter
         app.state.pwreset_confirm_rate_limiter = pwreset_confirm_rate_limiter
+        app.state.verify_request_rate_limiter = verify_request_rate_limiter
 
-        # Emailer for the password-reset request route. When
-        # ``SMTP_HOST`` is configured we wire the real transport;
-        # otherwise the auth route falls back to its own
-        # LogPasswordResetEmailer default and reset links land in the
-        # structured log.
+        # Emailers for the transactional surfaces. When ``SMTP_HOST``
+        # is configured we wire the real transport; otherwise both
+        # surfaces fall back to their LogEmailer defaults and the
+        # links land in the structured log so the operator can
+        # relay manually.
+        from src.api.email_verification_emailer import (
+            EmailVerificationEmailer,
+            SmtpEmailVerificationEmailer,
+        )
         from src.api.password_reset_emailer import (
             PasswordResetEmailer,
             SmtpPasswordResetEmailer,
         )
 
         pw_emailer: PasswordResetEmailer | None = None
+        verify_emailer: EmailVerificationEmailer | None = None
         if settings.smtp_host:
+            smtp_pw = (
+                settings.smtp_password.get_secret_value()
+                if settings.smtp_password is not None
+                else ""
+            )
             pw_emailer = SmtpPasswordResetEmailer(
                 host=settings.smtp_host,
                 port=settings.smtp_port,
                 username=settings.smtp_username,
-                password=(
-                    settings.smtp_password.get_secret_value()
-                    if settings.smtp_password is not None
-                    else ""
-                ),
+                password=smtp_pw,
                 sender=settings.smtp_sender,
                 timeout_seconds=settings.smtp_timeout_seconds,
             )
+            verify_emailer = SmtpEmailVerificationEmailer(
+                host=settings.smtp_host,
+                port=settings.smtp_port,
+                username=settings.smtp_username,
+                password=smtp_pw,
+                sender=settings.smtp_sender,
+                timeout_seconds=settings.smtp_timeout_seconds,
+            )
+
+        def _purge_user_data(user_id: int) -> None:
+            """Cross-store purge for ``DELETE /api/auth/account``.
+
+            WatchlistStore lives in the same SQLite file as UserStore
+            but has no FK back to ``users(id)`` (deliberate — the two
+            stores' tables materialize independently and an FK on a
+            not-yet-existing parent table races at INSERT). So the
+            user-row CASCADE doesn't wipe watchlists; we do it
+            explicitly here, before the user row goes. The hook runs
+            in the account-delete route's transaction sequence:
+            failure here aborts the delete with 503 (route logs +
+            re-raises).
+            """
+            if effective_watchlist_store is not None:
+                effective_watchlist_store.delete_all_for(user_id)
 
         register_auth_routes(
             app,
@@ -675,6 +715,18 @@ def create_app(
             password_reset_confirm_rate_limit_dep=build_rate_limiter_dep(
                 pwreset_confirm_rate_limiter, scope="auth_pwreset_confirm"
             ),
+            email_verification_emailer=verify_emailer,
+            email_verification_ttl=timedelta(
+                hours=settings.email_verification_ttl_hours
+            ),
+            # Reuse the password-reset base URL for the verification
+            # link host — they share the same frontend origin in every
+            # deployment shape we support.
+            email_verification_base_url=settings.password_reset_base_url,
+            email_verification_request_rate_limit_dep=build_rate_limiter_dep(
+                verify_request_rate_limiter, scope="auth_verify_request"
+            ),
+            on_account_deleted=_purge_user_data,
         )
 
         if effective_watchlist_store is not None:

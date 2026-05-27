@@ -219,7 +219,13 @@ def test_user_to_wire_omits_password_hash(tmp_path: Path) -> None:
     wire = user.to_wire()
     assert "password" not in wire
     assert "password_hash" not in wire
-    assert set(wire.keys()) == {"id", "email", "created_at", "last_login_at"}
+    assert set(wire.keys()) == {
+        "id",
+        "email",
+        "created_at",
+        "last_login_at",
+        "email_verified",
+    }
     store.close()
 
 
@@ -409,4 +415,154 @@ def test_password_reset_tokens_cascade_on_user_delete(tmp_path: Path) -> None:
     token = store.create_password_reset_token(user.id, timedelta(hours=1))
     store.delete_user(user.id)
     assert store.consume_password_reset_token(token) is None
+    store.close()
+
+
+# ---------------------------------------------------------------------------
+# verify_password — re-auth for account delete + future password change
+# ---------------------------------------------------------------------------
+
+
+def test_verify_password_accepts_correct_password(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    assert store.verify_password(user.id, "longenough") is True
+    store.close()
+
+
+def test_verify_password_rejects_wrong_password(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    assert store.verify_password(user.id, "different5") is False
+    store.close()
+
+
+def test_verify_password_rejects_unknown_user(tmp_path: Path) -> None:
+    """Missing user_id collapses to ``False`` (not an exception) so the
+    route can render one generic 'wrong password' branch and not
+    leak whether the id existed."""
+    store = UserStore(tmp_path / "users.db")
+    store.create_user("a@b.com", "longenough")  # force schema init
+    assert store.verify_password(99_999, "longenough") is False
+    store.close()
+
+
+def test_verify_password_rejects_empty(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    assert store.verify_password(user.id, "") is False
+    store.close()
+
+
+# ---------------------------------------------------------------------------
+# Email verification tokens (migration v3)
+# ---------------------------------------------------------------------------
+
+
+def test_new_user_starts_unverified(tmp_path: Path) -> None:
+    """email_verified is the new ``False``-by-default column. Pre-
+    deploy accounts also land here on migrate; the banner appears
+    until they redeem a verification token."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    assert user.email_verified is False
+    # Round-trips via every read path.
+    assert store.get_user_by_id(user.id).email_verified is False  # type: ignore[union-attr]
+    assert store.get_user_by_email("a@b.com").email_verified is False  # type: ignore[union-attr]
+    assert store.verify_login("a@b.com", "longenough").email_verified is False
+    store.close()
+
+
+def test_consume_email_verification_token_flips_verified_bit(
+    tmp_path: Path,
+) -> None:
+    """Happy path: mint a token, consume, user is now verified."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    token = store.create_email_verification_token(user.id, timedelta(hours=24))
+    verified = store.consume_email_verification_token(token)
+    assert verified is not None
+    assert verified.email_verified is True
+    # The flag persists — re-reading the user from any path shows it.
+    assert store.get_user_by_id(user.id).email_verified is True  # type: ignore[union-attr]
+    store.close()
+
+
+def test_email_verification_token_is_single_use(tmp_path: Path) -> None:
+    """Same shape as the password-reset replay test — the second
+    redeem of the same token must return None even though the user
+    is already verified."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    token = store.create_email_verification_token(user.id, timedelta(hours=24))
+    assert store.consume_email_verification_token(token) is not None
+    assert store.consume_email_verification_token(token) is None
+    store.close()
+
+
+def test_email_verification_token_rejects_expired(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    token = store.create_email_verification_token(
+        user.id, timedelta(milliseconds=1)
+    )
+    time.sleep(0.05)
+    assert store.consume_email_verification_token(token) is None
+    # Failed redeem must NOT flip the verified bit.
+    assert store.get_user_by_id(user.id).email_verified is False  # type: ignore[union-attr]
+    store.close()
+
+
+def test_email_verification_token_rejects_unknown(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    store.create_user("a@b.com", "longenough")
+    assert store.consume_email_verification_token("not-real") is None
+    assert store.consume_email_verification_token("") is None
+    store.close()
+
+
+def test_multiple_pending_verification_tokens_first_one_wins(
+    tmp_path: Path,
+) -> None:
+    """Re-requesting a verification email doesn't invalidate the
+    previous one — both remain redeemable. Whichever is redeemed
+    first verifies the user; redeeming the second is a no-op (the
+    user is already verified, the token's ``used_at`` gets set but
+    nothing else changes)."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    t1 = store.create_email_verification_token(user.id, timedelta(hours=24))
+    t2 = store.create_email_verification_token(user.id, timedelta(hours=24))
+    # First redeem verifies.
+    assert store.consume_email_verification_token(t1) is not None
+    # Second still works (idempotent — already verified, no-op flip).
+    verified = store.consume_email_verification_token(t2)
+    assert verified is not None
+    assert verified.email_verified is True
+    store.close()
+
+
+def test_email_verification_tokens_cascade_on_user_delete(
+    tmp_path: Path,
+) -> None:
+    """FK ON DELETE CASCADE — wipe pending verification tokens too."""
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    token = store.create_email_verification_token(user.id, timedelta(hours=24))
+    store.delete_user(user.id)
+    assert store.consume_email_verification_token(token) is None
+    store.close()
+
+
+def test_prune_expired_email_verification_tokens(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    user = store.create_user("a@b.com", "longenough")
+    expired = store.create_email_verification_token(
+        user.id, timedelta(milliseconds=1)
+    )
+    live = store.create_email_verification_token(user.id, timedelta(hours=1))
+    time.sleep(0.05)
+    assert store.prune_expired_email_verification_tokens() == 1
+    assert store.consume_email_verification_token(expired) is None
+    assert store.consume_email_verification_token(live) is not None
     store.close()

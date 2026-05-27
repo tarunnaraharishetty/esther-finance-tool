@@ -236,6 +236,23 @@ class WatchlistStore:
             )
             return cur.rowcount > 0
 
+    def delete_all_for(self, user_id: int) -> int:
+        """Drop every watchlist row for ``user_id``. Returns count.
+
+        Called from the account-delete cross-store purge hook in
+        ``app.py``. WatchlistStore deliberately has no FK back to
+        ``users(id)`` (the two stores' tables materialize
+        independently and an FK on a not-yet-existing parent table
+        races at INSERT), so the user-row CASCADE doesn't wipe
+        watchlists — this method does.
+        """
+        with self._lock:
+            conn = self._connect()
+            cur = conn.execute(
+                "DELETE FROM watchlists WHERE user_id = ?", (user_id,)
+            )
+            return int(cur.rowcount or 0)
+
     def seed_default(
         self, user_id: int, symbols: Iterable[str]
     ) -> list[WatchlistEntry]:

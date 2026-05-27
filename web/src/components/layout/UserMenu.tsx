@@ -1,11 +1,16 @@
 import { useState } from "react";
-import { LogOut, User as UserIcon } from "lucide-react";
+import { LogOut, Trash2, User as UserIcon } from "lucide-react";
 import { type AuthUser, displayName } from "@/lib/auth";
 import { cn } from "@/lib/utils";
+
+import { DeleteAccountDialog } from "./DeleteAccountDialog";
 
 interface Props {
   user: AuthUser;
   onLogout: () => Promise<void>;
+  /** Called after the account is hard-deleted. App.tsx flips the
+   *  session back to anonymous so the LoginPage takes over. */
+  onAccountDeleted?: () => Promise<void> | void;
 }
 
 /**
@@ -17,9 +22,10 @@ interface Props {
  * button — minimal account chrome appropriate to a v1 that doesn't
  * yet have a profile page.
  */
-export function UserMenu({ user, onLogout }: Props) {
+export function UserMenu({ user, onLogout, onAccountDeleted }: Props) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const handleLogout = async (): Promise<void> => {
     if (busy) return;
@@ -29,6 +35,14 @@ export function UserMenu({ user, onLogout }: Props) {
     } finally {
       setBusy(false);
       setOpen(false);
+    }
+  };
+
+  const handleDeleteSuccess = async (): Promise<void> => {
+    setDeleteOpen(false);
+    setOpen(false);
+    if (onAccountDeleted) {
+      await onAccountDeleted();
     }
   };
 
@@ -92,8 +106,27 @@ export function UserMenu({ user, onLogout }: Props) {
               <LogOut className="h-3.5 w-3.5" />
               {busy ? "Logging out…" : "Log out"}
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                setDeleteOpen(true);
+              }}
+              data-testid="user-menu-delete-account"
+              className="flex w-full items-center gap-2 border-t border-border/40 px-3 py-2 text-left text-sm text-bear transition-colors hover:bg-bear/10"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete account
+            </button>
           </div>
         </>
+      )}
+      {deleteOpen && (
+        <DeleteAccountDialog
+          email={user.email}
+          onClose={() => setDeleteOpen(false)}
+          onSuccess={() => void handleDeleteSuccess()}
+        />
       )}
     </div>
   );
