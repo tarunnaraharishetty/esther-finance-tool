@@ -42,6 +42,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -579,27 +580,70 @@ def create_app(
                     )
                 raise
 
-        # Per-IP rate limiters for the auth write routes. Two separate
-        # buckets, not one shared "auth" budget — the abuse patterns
-        # differ enough that one shared cap can't serve both well:
+        # Per-IP rate limiters for the auth write routes. Four
+        # separate buckets, not one shared "auth" budget — the abuse
+        # patterns differ enough that one shared cap can't serve
+        # them all well:
         #
         # * Login: brute-force / credential-stuffing tries dozens of
         #   passwords against one or many accounts. The right shape
         #   is a moderate cap in a short window so a forgetful human
-        #   isn't punished. ROADMAP gate: 10 login / IP / 5 min.
+        #   isn't punished. 10 login / IP / 5 min.
         #
         # * Signup: account-creation flooding (typically for free-tier
         #   abuse). Real humans sign up ~once. The right shape is a
-        #   strict cap in a long window. ROADMAP gate: 3 signup / IP
-        #   / hour.
+        #   strict cap in a long window. 3 signup / IP / hour.
+        #
+        # * Password-reset request: similar shape to signup — real
+        #   users hit it rarely, scripted abuse hits hard. Slightly
+        #   higher headroom than signup (a forgetful user might miss
+        #   the email and retry) but still tight. 5 / IP / hour.
+        #
+        # * Password-reset confirm: protects against brute-forcing the
+        #   token in the URL. The 256-bit entropy makes this
+        #   infeasible anyway, but a cap forces a noticeably slow
+        #   attempt rate. 20 / IP / 5 min.
         login_rate_limiter = InMemoryRateLimiter(
             max_calls=10, per_seconds=300.0
         )
         signup_rate_limiter = InMemoryRateLimiter(
             max_calls=3, per_seconds=3600.0
         )
+        pwreset_request_rate_limiter = InMemoryRateLimiter(
+            max_calls=5, per_seconds=3600.0
+        )
+        pwreset_confirm_rate_limiter = InMemoryRateLimiter(
+            max_calls=20, per_seconds=300.0
+        )
         app.state.login_rate_limiter = login_rate_limiter
         app.state.signup_rate_limiter = signup_rate_limiter
+        app.state.pwreset_request_rate_limiter = pwreset_request_rate_limiter
+        app.state.pwreset_confirm_rate_limiter = pwreset_confirm_rate_limiter
+
+        # Emailer for the password-reset request route. When
+        # ``SMTP_HOST`` is configured we wire the real transport;
+        # otherwise the auth route falls back to its own
+        # LogPasswordResetEmailer default and reset links land in the
+        # structured log.
+        from src.api.password_reset_emailer import (
+            PasswordResetEmailer,
+            SmtpPasswordResetEmailer,
+        )
+
+        pw_emailer: PasswordResetEmailer | None = None
+        if settings.smtp_host:
+            pw_emailer = SmtpPasswordResetEmailer(
+                host=settings.smtp_host,
+                port=settings.smtp_port,
+                username=settings.smtp_username,
+                password=(
+                    settings.smtp_password.get_secret_value()
+                    if settings.smtp_password is not None
+                    else ""
+                ),
+                sender=settings.smtp_sender,
+                timeout_seconds=settings.smtp_timeout_seconds,
+            )
 
         register_auth_routes(
             app,
@@ -621,6 +665,15 @@ def create_app(
             ),
             signup_rate_limit_dep=build_rate_limiter_dep(
                 signup_rate_limiter, scope="auth_signup"
+            ),
+            password_reset_emailer=pw_emailer,
+            password_reset_ttl=timedelta(hours=settings.password_reset_ttl_hours),
+            password_reset_base_url=settings.password_reset_base_url,
+            password_reset_request_rate_limit_dep=build_rate_limiter_dep(
+                pwreset_request_rate_limiter, scope="auth_pwreset_request"
+            ),
+            password_reset_confirm_rate_limit_dep=build_rate_limiter_dep(
+                pwreset_confirm_rate_limiter, scope="auth_pwreset_confirm"
             ),
         )
 

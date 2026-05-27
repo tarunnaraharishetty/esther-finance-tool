@@ -131,4 +131,73 @@ describe("LoginPage", () => {
     fireEvent.click(screen.getByTestId("mode-signup"));
     expect(screen.queryByTestId("login-error")).toBeNull();
   });
+
+  // ---- Password reset (forgot) mode --------------------------------
+
+  it("exposes a 'Forgot password?' link only on the login tab", () => {
+    render(<LoginPage onLogin={vi.fn()} onSignup={vi.fn()} />);
+    expect(screen.queryByTestId("forgot-link")).not.toBeNull();
+    fireEvent.click(screen.getByTestId("mode-signup"));
+    expect(screen.queryByTestId("forgot-link")).toBeNull();
+  });
+
+  it("switches to forgot mode and hides the password field", () => {
+    render(<LoginPage onLogin={vi.fn()} onSignup={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("forgot-link"));
+    expect(screen.getByTestId("login-page").getAttribute("data-mode")).toBe(
+      "forgot",
+    );
+    // The mode toggle is replaced by a back-link.
+    expect(screen.queryByTestId("password-input")).toBeNull();
+    expect(screen.queryByTestId("back-to-login")).not.toBeNull();
+    expect(screen.getByTestId("submit-button")).toHaveTextContent(
+      /Send reset link/i,
+    );
+  });
+
+  it("POSTs the email + renders the uniform success message", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          message: "If that email is registered, a reset link is on its way.",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<LoginPage onLogin={vi.fn()} onSignup={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("forgot-link"));
+    fireEvent.change(screen.getByTestId("email-input"), {
+      target: { value: "anyone@example.com" },
+    });
+    fireEvent.click(screen.getByTestId("submit-button"));
+
+    const success = await screen.findByTestId("forgot-success");
+    expect(success).toHaveTextContent(/reset link is on its way/i);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/auth/password-reset/request",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "same-origin",
+        body: JSON.stringify({ email: "anyone@example.com" }),
+      }),
+    );
+
+    vi.unstubAllGlobals();
+  });
+
+  it("renders a flash banner when passed flashMessage", () => {
+    render(
+      <LoginPage
+        onLogin={vi.fn()}
+        onSignup={vi.fn()}
+        flashMessage="Password updated. Please log in."
+      />,
+    );
+    expect(screen.getByTestId("login-flash")).toHaveTextContent(
+      /Password updated\. Please log in\./,
+    );
+  });
 });

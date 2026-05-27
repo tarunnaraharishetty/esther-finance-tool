@@ -1,11 +1,13 @@
 """Persistent user accounts + session token store.
 
 SQLite-backed, lazy-init, mirrors the established :class:`HealthStore`
-pattern. Two tables:
+pattern. Three tables:
 
 * ``users`` — email + bcrypt-hashed password + audit timestamps.
 * ``sessions`` — opaque session tokens with TTL, foreign-keyed to a
   user via ``user_id``.
+* ``password_reset_tokens`` — single-use reset tokens with TTL. Marked
+  ``used_at`` on first redeem so a replay attempt fails closed.
 
 Sessions are random 32-byte tokens stored verbatim — they live in
 HTTP-only cookies signed with the app's session secret. The
@@ -81,8 +83,34 @@ def _apply_v1(conn: sqlite3.Connection) -> None:
     conn.executescript(_V1_SCHEMA)
 
 
+# v2 — password_reset_tokens. Single-use, TTL-bounded. ``used_at`` is
+# NULL until the token is consumed; once set, the same token cannot
+# be redeemed again (consume_password_reset_token enforces). Indexes
+# cover the two access patterns: lookup by token (PK), and the
+# expiry-prune sweep (expires_at).
+_V2_SCHEMA = """
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_password_reset_user
+    ON password_reset_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_password_reset_expires
+    ON password_reset_tokens(expires_at);
+"""
+
+
+def _apply_v2(conn: sqlite3.Connection) -> None:
+    conn.executescript(_V2_SCHEMA)
+
+
 _MIGRATIONS = [
     Migration(version=1, name="users_sessions_init", apply=_apply_v1),
+    Migration(version=2, name="password_reset_tokens", apply=_apply_v2),
 ]
 _MIGRATION_NAMESPACE = "user_store"
 
@@ -420,6 +448,135 @@ class UserStore:
             conn = self._connect()
             cur = conn.execute(
                 "DELETE FROM sessions WHERE expires_at <= ?", (now,)
+            )
+            return int(cur.rowcount or 0)
+
+    # ----- password reset --------------------------------------------
+
+    def create_password_reset_token(
+        self, user_id: int, ttl: timedelta
+    ) -> str:
+        """Mint a single-use reset token bound to ``user_id``.
+
+        Token is `secrets.token_urlsafe(32)` — same entropy as session
+        tokens, URL-safe so it travels cleanly in a reset link query
+        string. Caller (the API route) embeds the raw token in the
+        emailed URL; subsequent verification goes through
+        :meth:`consume_password_reset_token`.
+
+        The caller is responsible for the "if email exists" branching
+        — this method assumes the user_id is valid. The route uses
+        :meth:`get_user_by_email` first and silently no-ops on
+        unknown emails so the response can't be used for enumeration.
+        """
+        if ttl <= timedelta(0):
+            raise ValueError(f"ttl must be positive, got {ttl!r}")
+        token = secrets.token_urlsafe(_SESSION_TOKEN_BYTES)
+        now = datetime.now(UTC)
+        expires_at = now + ttl
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                """
+                INSERT INTO password_reset_tokens
+                    (token, user_id, created_at, expires_at, used_at)
+                VALUES (?, ?, ?, ?, NULL)
+                """,
+                (token, user_id, now.isoformat(), expires_at.isoformat()),
+            )
+        return token
+
+    def consume_password_reset_token(self, token: str) -> User | None:
+        """Validate + atomically mark a reset token used.
+
+        Returns the bound :class:`User` if the token is valid (exists,
+        unused, not yet expired); ``None`` otherwise.
+
+        The state machine is one-way: a token transitions from
+        ``unused → used`` exactly once. The UPDATE ... WHERE used_at
+        IS NULL guard handles the (theoretical) concurrent-redeem
+        race — the second caller sees zero affected rows and gets
+        ``None``. SQLite's per-write lock makes this functionally
+        atomic on our deployment shape.
+
+        Caller follows up with :meth:`update_password` +
+        :meth:`revoke_all_sessions_for_user`. We keep those as
+        separate methods so the route can sequence them in the right
+        order (consume → update → revoke) and log between steps.
+        """
+        if not token:
+            return None
+        now = datetime.now(UTC)
+        now_iso = now.isoformat()
+        with self._lock:
+            conn = self._connect()
+            cur = conn.execute(
+                """
+                UPDATE password_reset_tokens
+                SET used_at = ?
+                WHERE token = ?
+                  AND used_at IS NULL
+                  AND expires_at > ?
+                RETURNING user_id
+                """,
+                (now_iso, token, now_iso),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return self.get_user_by_id(int(row[0]))
+
+    def update_password(self, user_id: int, new_password: str) -> bool:
+        """Re-hash + persist a new password for ``user_id``.
+
+        Returns True iff a row was updated. bcrypt cost factor matches
+        :meth:`create_user` so the per-user upgrade story is uniform.
+        The caller should immediately follow with
+        :meth:`revoke_all_sessions_for_user` so any in-flight session
+        on a now-stolen cookie is invalidated.
+        """
+        if not new_password:
+            raise ValueError("password must not be empty")
+        hashed = bcrypt.hashpw(
+            new_password.encode("utf-8"),
+            bcrypt.gensalt(rounds=_BCRYPT_ROUNDS),
+        )
+        with self._lock:
+            conn = self._connect()
+            cur = conn.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (hashed.decode("utf-8"), user_id),
+            )
+            return cur.rowcount > 0
+
+    def revoke_all_sessions_for_user(self, user_id: int) -> int:
+        """Delete every session row for ``user_id``. Returns count.
+
+        Called from the password-reset confirm path so an attacker
+        who held an old session cookie loses access the moment the
+        password changes — defense in depth on top of the cookie
+        signing + DB lookup gate.
+        """
+        with self._lock:
+            conn = self._connect()
+            cur = conn.execute(
+                "DELETE FROM sessions WHERE user_id = ?", (user_id,)
+            )
+            return int(cur.rowcount or 0)
+
+    def prune_expired_password_reset_tokens(self) -> int:
+        """Drop every reset token whose ``expires_at`` is in the past.
+
+        Symmetric with :meth:`prune_expired_sessions`. Not on the hot
+        path — a periodic sweep is enough; consume already filters
+        expired tokens out of the success path.
+        """
+        now = datetime.now(UTC).isoformat()
+        with self._lock:
+            conn = self._connect()
+            cur = conn.execute(
+                "DELETE FROM password_reset_tokens WHERE expires_at <= ?",
+                (now,),
             )
             return int(cur.rowcount or 0)
 
