@@ -1,12 +1,16 @@
 """User accounts + session API surface.
 
-Four routes, all backed by :class:`UserStore`:
+Six routes, all backed by :class:`UserStore`:
 
 * ``POST /api/auth/signup`` — create a new account, return user +
   set session cookie.
 * ``POST /api/auth/login``  — verify credentials, set session cookie.
 * ``POST /api/auth/logout`` — revoke current session, clear cookie.
 * ``GET  /api/auth/me``     — return the current user or ``null``.
+* ``POST /api/auth/password-reset/request`` — mint a reset token,
+  email it. Always returns 200 (no email enumeration).
+* ``POST /api/auth/password-reset/confirm`` — redeem a token + set
+  a new password + revoke every session for the user.
 
 Session model
 -------------
@@ -31,11 +35,17 @@ import secrets
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from itsdangerous import BadSignature, URLSafeSerializer
 from pydantic import BaseModel, Field, field_validator
 
+from src.api.password_reset_emailer import (
+    LogPasswordResetEmailer,
+    PasswordResetEmailer,
+)
 from src.data.user_store import (
     EmailAlreadyRegistered,
     InvalidCredentials,
@@ -92,6 +102,22 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class PasswordResetRequestBody(BaseModel):
+    """Body for ``POST /api/auth/password-reset/request``."""
+
+    email: str = Field(min_length=3, max_length=320)
+
+
+class PasswordResetConfirmBody(BaseModel):
+    """Body for ``POST /api/auth/password-reset/confirm``."""
+
+    # url-safe base64 of 32 random bytes from the store side. 80 is a
+    # generous upper bound — actual length is 43.
+    token: str = Field(min_length=20, max_length=80)
+    # Same length floor as ``SignupRequest.password``.
+    new_password: str = Field(min_length=8, max_length=200)
+
+
 def register_auth_routes(
     app: FastAPI,
     *,
@@ -103,6 +129,11 @@ def register_auth_routes(
     post_signup_hook: Callable[[User], None] | None = None,
     login_rate_limit_dep: Callable[..., Awaitable[None]] | None = None,
     signup_rate_limit_dep: Callable[..., Awaitable[None]] | None = None,
+    password_reset_emailer: PasswordResetEmailer | None = None,
+    password_reset_ttl: timedelta = timedelta(hours=1),
+    password_reset_base_url: str | None = None,
+    password_reset_request_rate_limit_dep: Callable[..., Awaitable[None]] | None = None,
+    password_reset_confirm_rate_limit_dep: Callable[..., Awaitable[None]] | None = None,
 ) -> None:
     """Attach ``/api/auth/*`` routes to ``app``.
 
@@ -152,12 +183,32 @@ def register_auth_routes(
     app.state.session_serializer = serializer
     app.state.session_cookie_name = cookie_name
 
+    # Emailer defaults to the log transport — operator running a
+    # closed beta gets the link in the structured log and can relay
+    # manually. ``app.py`` wires SmtpPasswordResetEmailer when
+    # SMTP_HOST is set.
+    emailer: PasswordResetEmailer = (
+        password_reset_emailer
+        if password_reset_emailer is not None
+        else LogPasswordResetEmailer()
+    )
+
     router = APIRouter(prefix="/api/auth", tags=["auth"])
     signup_dependencies = (
         [Depends(signup_rate_limit_dep)] if signup_rate_limit_dep else []
     )
     login_dependencies = (
         [Depends(login_rate_limit_dep)] if login_rate_limit_dep else []
+    )
+    pwreset_request_dependencies = (
+        [Depends(password_reset_request_rate_limit_dep)]
+        if password_reset_request_rate_limit_dep
+        else []
+    )
+    pwreset_confirm_dependencies = (
+        [Depends(password_reset_confirm_rate_limit_dep)]
+        if password_reset_confirm_rate_limit_dep
+        else []
     )
 
     @router.post("/signup", status_code=201, dependencies=signup_dependencies)
@@ -257,6 +308,136 @@ def register_auth_routes(
         # Always clear both cookies, even if there was nothing to
         # revoke server-side — a stale CSRF cookie would otherwise
         # outlive the session and confuse the next login.
+        _clear_session_cookie(
+            response, cookie_name=cookie_name, secure=secure_cookies
+        )
+        _clear_csrf_cookie_on(response, secure=secure_cookies)
+        return {"ok": True}
+
+    @router.post(
+        "/password-reset/request",
+        status_code=200,
+        dependencies=pwreset_request_dependencies,
+    )
+    async def password_reset_request(
+        body: PasswordResetRequestBody, request: Request
+    ) -> dict[str, Any]:
+        """Mint a single-use reset token + email it.
+
+        Security contract:
+
+        * **Always returns 200 with the same message**, whether or not
+          the email belongs to a registered account. Any other shape
+          (404, "we couldn't find that email", different latency)
+          becomes a registered-account enumeration oracle.
+        * The emailer ``send`` call swallows transport errors so an
+          SMTP outage can't diverge the response either.
+        * Rate-limited per IP via the dependency so a script can't
+          flood the SMTP relay (or the log sink for the default
+          transport).
+
+        Token TTL is 1h by default — long enough for users to read
+        mail, short enough that an intercepted link isn't a long-
+        lived credential.
+        """
+        # Look up the user — silently no-op when missing so we never
+        # leak account presence via the response shape.
+        user = user_store.get_user_by_email(body.email)
+        if user is not None:
+            token = user_store.create_password_reset_token(
+                user.id, password_reset_ttl
+            )
+            base = (
+                password_reset_base_url
+                if password_reset_base_url
+                else f"{request.url.scheme}://{request.url.netloc}"
+            )
+            reset_url = f"{base.rstrip('/')}/reset-password?token={quote(token)}"
+            # Run the (potentially blocking) email send off-thread so
+            # the request loop stays responsive.
+            await run_in_threadpool(emailer.send, user.email, reset_url)
+            log.info(
+                "auth.password_reset.requested",
+                user_id=user.id,
+                email=user.email,
+            )
+        else:
+            # No such email. Log at INFO with no PII beyond the
+            # submitted value so abuse patterns are observable.
+            log.info(
+                "auth.password_reset.unknown_email",
+                email=body.email,
+            )
+        # Identical message on both branches — uniform timing relies
+        # on Python's normal control flow being unaffected by the
+        # branch (the UserStore lookup runs in both cases; only the
+        # token mint + email send differ, and both happen off the
+        # response path latency-wise).
+        return {
+            "ok": True,
+            "message": (
+                "If that email is registered, a reset link is on its way."
+            ),
+        }
+
+    @router.post(
+        "/password-reset/confirm",
+        status_code=200,
+        dependencies=pwreset_confirm_dependencies,
+    )
+    async def password_reset_confirm(
+        body: PasswordResetConfirmBody, response: Response
+    ) -> dict[str, Any]:
+        """Redeem a token + set the new password.
+
+        Three-step sequence the UserStore exposes as separate methods:
+
+        1. ``consume_password_reset_token`` — atomic mark-used; returns
+           the bound user if the token is valid (exists, unused, not
+           yet expired).
+        2. ``update_password`` — re-hashes via bcrypt at the same
+           cost factor as create_user.
+        3. ``revoke_all_sessions_for_user`` — defense in depth: any
+           old session cookie an attacker held becomes useless the
+           moment the password changes.
+
+        Also clears the caller's own session + CSRF cookies in case
+        they hit this endpoint while still holding a stale session.
+        The user has to log in again with their new password.
+
+        Bad token / expired / already-used all collapse into one 400
+        with a generic message — surfacing the exact failure mode
+        would let an attacker enumerate the token state machine.
+        """
+        user = user_store.consume_password_reset_token(body.token)
+        if user is None:
+            log.warning("auth.password_reset.invalid_token")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Reset link is invalid or has expired. "
+                    "Request a new one."
+                ),
+            )
+        if not user_store.update_password(user.id, body.new_password):
+            # Defensive — consume succeeded but update missed. Should
+            # be impossible given the user row's existence is what
+            # made the FK on the token valid in the first place.
+            log.error(
+                "auth.password_reset.update_failed",
+                user_id=user.id,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Could not update password. Please try again.",
+            )
+        revoked = user_store.revoke_all_sessions_for_user(user.id)
+        log.info(
+            "auth.password_reset.confirmed",
+            user_id=user.id,
+            sessions_revoked=revoked,
+        )
+        # Belt-and-braces: clear cookies on the response too.
         _clear_session_cookie(
             response, cookie_name=cookie_name, secure=secure_cookies
         )

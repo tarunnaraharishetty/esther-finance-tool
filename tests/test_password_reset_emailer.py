@@ -21,7 +21,6 @@ from src.api.password_reset_emailer import (
     SmtpPasswordResetEmailer,
 )
 
-
 # ---------------------------------------------------------------------------
 # LogPasswordResetEmailer
 # ---------------------------------------------------------------------------

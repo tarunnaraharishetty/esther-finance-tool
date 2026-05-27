@@ -236,3 +236,213 @@ def test_logout_when_already_anonymous_is_a_noop(
 # in create_app + register_auth_routes. Not asserted here — monkeypatching
 # a pydantic-settings class attribute requires more gymnastics than the
 # behavior is worth covering at this layer.
+
+
+# ---------------------------------------------------------------------------
+# Password reset
+# ---------------------------------------------------------------------------
+
+
+def _signup(client: TestClient, email: str = "u@e.com", pw: str = "oldpw1234") -> None:
+    res = client.post(
+        "/api/auth/signup", json={"email": email, "password": pw}
+    )
+    assert res.status_code == 201, res.text
+    client.cookies.clear()  # drop the auto-login session, reset flow starts logged out
+
+
+def _captured_reset_links(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Pull every reset URL the LogPasswordResetEmailer emitted."""
+    return [
+        getattr(rec, "reset_url", "")
+        for rec in caplog.records
+        if "auth.password_reset.link" in rec.getMessage()
+    ]
+
+
+def test_password_reset_request_returns_uniform_message_for_unknown_email(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No-email-enumeration: the request route must return the same
+    200 body whether or not the address is registered."""
+    monkeypatch.chdir(tmp_path)
+    client = _build_client(tmp_path)
+    res = client.post(
+        "/api/auth/password-reset/request",
+        json={"email": "nobody@example.com"},
+    )
+    assert res.status_code == 200
+    assert res.json() == {
+        "ok": True,
+        "message": "If that email is registered, a reset link is on its way.",
+    }
+
+
+def test_password_reset_request_for_registered_email_returns_same_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    client = _build_client(tmp_path)
+    _signup(client, "u@e.com", "oldpw1234")
+    res = client.post(
+        "/api/auth/password-reset/request",
+        json={"email": "u@e.com"},
+    )
+    assert res.status_code == 200
+    assert res.json()["message"].startswith("If that email is registered")
+
+
+def test_password_reset_end_to_end_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Happy path through the whole flow:
+
+    1. Signup with old password.
+    2. Hit /password-reset/request — emailer fires, log emitter records
+       the reset URL.
+    3. Extract the token from the recorded URL.
+    4. Hit /password-reset/confirm with the token + new password.
+    5. Old password rejected, new password accepted on login.
+    """
+    monkeypatch.chdir(tmp_path)
+    # Direct UserStore access so we can pull the token out without
+    # relying on log inspection (which the runtime supports but the
+    # TestClient log fixture doesn't always capture). The flow is
+    # otherwise unchanged.
+    store = UserStore(tmp_path / "users.db")
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, user_store=store)
+    client = TestClient(app)
+
+    # 1. Signup
+    res = client.post(
+        "/api/auth/signup", json={"email": "u@e.com", "password": "oldpw1234"}
+    )
+    assert res.status_code == 201
+    client.cookies.clear()
+
+    # 2-3. Request the reset + pull the token from the store directly
+    res = client.post(
+        "/api/auth/password-reset/request", json={"email": "u@e.com"}
+    )
+    assert res.status_code == 200
+
+    # Fetch the active token. There's no public list method, but we
+    # can introspect via consume — except consume burns the token.
+    # Instead grab it from the raw connection — fair game for a test
+    # that owns the store fixture.
+    conn = store._connect()  # test reaches into the store on purpose
+    row = conn.execute(
+        "SELECT token FROM password_reset_tokens WHERE used_at IS NULL"
+    ).fetchone()
+    assert row is not None, "expected a freshly minted token row"
+    token = row[0]
+
+    # 4. Confirm
+    res = client.post(
+        "/api/auth/password-reset/confirm",
+        json={"token": token, "new_password": "newpw5678"},
+    )
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
+
+    # 5. Old password rejected, new accepted
+    res = client.post(
+        "/api/auth/login", json={"email": "u@e.com", "password": "oldpw1234"}
+    )
+    assert res.status_code == 401
+    res = client.post(
+        "/api/auth/login", json={"email": "u@e.com", "password": "newpw5678"}
+    )
+    assert res.status_code == 200
+
+
+def test_password_reset_confirm_rejects_invalid_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any token the store can't redeem (unknown / expired / replayed)
+    collapses to one generic 400 — surfacing the exact state would
+    let an attacker enumerate the token state machine."""
+    monkeypatch.chdir(tmp_path)
+    client = _build_client(tmp_path)
+    _signup(client)
+    res = client.post(
+        "/api/auth/password-reset/confirm",
+        json={"token": "definitely-not-a-real-token-aaaaaaaaaaaaa", "new_password": "newpw5678"},
+    )
+    assert res.status_code == 400
+    assert "invalid or has expired" in res.json()["detail"]
+
+
+def test_password_reset_confirm_revokes_existing_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user who is logged in when the reset confirms must lose
+    that session — defense in depth on top of the cookie sign +
+    DB lookup gate. After confirm, /api/auth/me on the cached
+    session jar returns user=null."""
+    monkeypatch.chdir(tmp_path)
+    store = UserStore(tmp_path / "users.db")
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, user_store=store)
+    client = TestClient(app)
+
+    # Sign up → already logged in (post-signup mints a session).
+    res = client.post(
+        "/api/auth/signup",
+        json={"email": "u@e.com", "password": "oldpw1234"},
+    )
+    assert res.status_code == 201
+    # Same jar — /me works.
+    assert client.get("/api/auth/me").json()["user"] is not None
+
+    # Pull a reset token directly from the store.
+    user = store.get_user_by_email("u@e.com")
+    assert user is not None
+    from datetime import timedelta
+
+    token = store.create_password_reset_token(user.id, timedelta(hours=1))
+
+    # Confirm reset — the live session must die.
+    res = client.post(
+        "/api/auth/password-reset/confirm",
+        json={"token": token, "new_password": "newpw5678"},
+    )
+    assert res.status_code == 200
+    # Same jar (which the confirm response also cleared) — anonymous.
+    assert client.get("/api/auth/me").json()["user"] is None
+
+
+def test_password_reset_token_is_single_use_via_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirror of the UserStore single-use test, exercised through the
+    full route stack — protects the route from regressing
+    independently of the store contract."""
+    monkeypatch.chdir(tmp_path)
+    store = UserStore(tmp_path / "users.db")
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, user_store=store)
+    client = TestClient(app)
+
+    res = client.post(
+        "/api/auth/signup", json={"email": "u@e.com", "password": "oldpw1234"}
+    )
+    assert res.status_code == 201
+    user = store.get_user_by_email("u@e.com")
+    assert user is not None
+    from datetime import timedelta
+
+    token = store.create_password_reset_token(user.id, timedelta(hours=1))
+
+    first = client.post(
+        "/api/auth/password-reset/confirm",
+        json={"token": token, "new_password": "newpw5678"},
+    )
+    assert first.status_code == 200
+    # Replay same token — must 400, just like an unknown token would.
+    second = client.post(
+        "/api/auth/password-reset/confirm",
+        json={"token": token, "new_password": "differentpw9"},
+    )
+    assert second.status_code == 400
