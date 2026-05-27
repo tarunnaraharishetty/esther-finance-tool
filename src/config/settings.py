@@ -204,6 +204,13 @@ class Settings(BaseSettings):
     # CDN where ``request.url`` resolves to the wrong scheme/host.
     password_reset_base_url: str | None = None
 
+    # ---- Email verification ----
+    # Lifetime of a single verification token. 24h matches user
+    # expectations ("I'll get to that email tomorrow") — verification
+    # is less sensitive than password reset (it grants no privilege
+    # escalation; it just clears the unverified-banner).
+    email_verification_ttl_hours: int = 24
+
     # ---- Email transport (optional — falls back to log emailer) ----
     # When ``SMTP_HOST`` is unset the LogPasswordResetEmailer wins
     # and reset links land in the structured log so the operator
