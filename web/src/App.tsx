@@ -8,6 +8,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import type { NavKey } from "@/components/layout/Sidebar";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { LoginPage } from "@/pages/LoginPage";
+import { ResetPasswordPage } from "@/pages/ResetPasswordPage";
 import { WatchlistPage } from "@/pages/WatchlistPage";
 import { MoversPage } from "@/pages/MoversPage";
 import { NewsPage } from "@/pages/NewsPage";
@@ -37,6 +38,16 @@ export default function App() {
   // "logged out" to "logged in" without the loader would briefly
   // flash the LoginPage on every refresh.
   const session = useSession();
+  // Password-reset routing: the emailed link points at
+  // ``/reset-password?token=…``. We don't run a full router for one
+  // page — capture the token at mount, clear it from the URL once
+  // we've consumed it so a back-navigation doesn't replay the form.
+  const [resetToken, setResetToken] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const params = new URLSearchParams(window.location.search);
+    return params.get("token");
+  });
+  const [resetFlash, setResetFlash] = useState<string | null>(null);
   const watchlist = useUserWatchlist(session.user !== null);
   const { snapshot, status, isStale, msSinceLastEvent } = useSnapshotStream();
   const [activeSymbol, setActiveSymbol] = useState<string | null>(null);
@@ -132,7 +143,36 @@ export default function App() {
     );
   }
   if (session.user === null) {
-    return <LoginPage onLogin={session.login} onSignup={session.signup} />;
+    // Reset flow: URL has ?token=… and we're logged out — route to
+    // the redemption form. Once it succeeds we clear the token,
+    // flip on a flash banner, and fall through to the LoginPage.
+    if (resetToken !== null) {
+      return (
+        <ResetPasswordPage
+          token={resetToken}
+          onSuccess={() => {
+            setResetToken(null);
+            setResetFlash("Password updated. Please log in.");
+            // Strip the token query string so a back-navigation
+            // doesn't replay the form against a now-consumed token.
+            if (typeof window !== "undefined") {
+              window.history.replaceState(
+                null,
+                "",
+                window.location.pathname,
+              );
+            }
+          }}
+        />
+      );
+    }
+    return (
+      <LoginPage
+        onLogin={session.login}
+        onSignup={session.signup}
+        flashMessage={resetFlash}
+      />
+    );
   }
 
   return (
