@@ -191,6 +191,30 @@ class Settings(BaseSettings):
     # Cookie name. Stable across deployments; changing this would
     # invalidate every issued session.
     session_cookie_name: str = "esther_session"
+    # ---- Password reset ----
+    # Lifetime of a single password-reset token. 1h is the standard
+    # window — long enough for users to read mail and click; short
+    # enough that an intercepted token isn't a long-lived credential.
+    password_reset_ttl_hours: int = 1
+    # Base URL the reset link points at. The auth route appends
+    # ``/reset-password?token=…`` to this. When ``None``, the route
+    # synthesizes the URL from the incoming request — appropriate
+    # for single-origin Render-style deploys where API + frontend
+    # share a host. Set explicitly for split-origin or behind a
+    # CDN where ``request.url`` resolves to the wrong scheme/host.
+    password_reset_base_url: str | None = None
+
+    # ---- Email transport (optional — falls back to log emailer) ----
+    # When ``SMTP_HOST`` is unset the LogPasswordResetEmailer wins
+    # and reset links land in the structured log so the operator
+    # can relay them manually. Set the whole quintuple to use SMTP.
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: SecretStr | None = None
+    smtp_sender: str = ""
+    smtp_timeout_seconds: float = 15.0
+
     # Symbols seeded into a new user's watchlist on signup. Picked to
     # give a first-run user something to look at without making any
     # implicit recommendation (these are the most-traded names on the
