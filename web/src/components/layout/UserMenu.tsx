@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { LogOut, Trash2, User as UserIcon } from "lucide-react";
+import { CheckCircle2, KeyRound, LogOut, Trash2, User as UserIcon } from "lucide-react";
 import { type AuthUser, displayName } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
+import { ChangePasswordDialog } from "./ChangePasswordDialog";
 import { DeleteAccountDialog } from "./DeleteAccountDialog";
 
 interface Props {
@@ -26,6 +27,8 @@ export function UserMenu({ user, onLogout, onAccountDeleted }: Props) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [changeOpen, setChangeOpen] = useState(false);
+  const [changedFlash, setChangedFlash] = useState(false);
 
   const handleLogout = async (): Promise<void> => {
     if (busy) return;
@@ -96,6 +99,28 @@ export function UserMenu({ user, onLogout, onAccountDeleted }: Props) {
                 </div>
               )}
             </div>
+            {changedFlash && (
+              <div
+                data-testid="user-menu-changed-flash"
+                className="flex items-center gap-2 border-b border-border/40 bg-bull/10 px-3 py-2 text-[11px] text-bull"
+              >
+                <CheckCircle2 className="h-3 w-3 shrink-0" />
+                Password updated.
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                setChangedFlash(false);
+                setChangeOpen(true);
+              }}
+              data-testid="user-menu-change-password"
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-muted/60"
+            >
+              <KeyRound className="h-3.5 w-3.5" />
+              Change password
+            </button>
             <button
               type="button"
               onClick={() => void handleLogout()}
@@ -126,6 +151,16 @@ export function UserMenu({ user, onLogout, onAccountDeleted }: Props) {
           email={user.email}
           onClose={() => setDeleteOpen(false)}
           onSuccess={() => void handleDeleteSuccess()}
+        />
+      )}
+      {changeOpen && (
+        <ChangePasswordDialog
+          onClose={() => setChangeOpen(false)}
+          onSuccess={() => {
+            setChangeOpen(false);
+            setChangedFlash(true);
+            setOpen(true);
+          }}
         />
       )}
     </div>

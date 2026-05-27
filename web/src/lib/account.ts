@@ -64,6 +64,27 @@ export async function confirmVerifyEmail(token: string): Promise<void> {
   await validateJson(res, OkResponseSchema, "verify/confirm");
 }
 
+/** Rotate the current user's password. Server requires the current
+ *  password as re-auth. On success the server rotates the session
+ *  cookie too (other devices get logged out, current device stays
+ *  via a fresh token). */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const res = await fetch("/api/auth/password/change", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { ...csrfHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  });
+  if (!res.ok) throw await parseError(res);
+  await validateJson(res, OkResponseSchema, "password/change");
+}
+
 /** Hard-delete the current account. Requires password re-entry. */
 export async function deleteAccount(password: string): Promise<void> {
   const res = await fetch("/api/auth/account", {
