@@ -1,0 +1,144 @@
+# Render Blueprint — declares the production deployment of Esther.
+#
+# Render reads this file when you point a new Blueprint at the repo
+# (https://render.com → New → Blueprint → connect this repo). The web
+# service builds from the existing multi-stage Dockerfile and binds
+# to the $PORT Render injects.
+#
+# Manual steps after Render reads this file:
+#
+#   1. Fill in the ``sync: false`` env vars in the dashboard:
+#        - ALPACA_API_KEY            (required)
+#        - ALPACA_API_SECRET         (required)
+#        - ANTHROPIC_API_KEY         (optional; unset = template fallback)
+#        - FMP_API_KEY               (optional)
+#        - FINNHUB_API_KEY           (optional)
+#        - ALPHAVANTAGE_API_KEY      (optional)
+#        - SEC_EDGAR_USER_AGENT      (optional; "App contact@you.com")
+#   2. Click "Deploy".
+#
+# Everything else (SESSION_SECRET_KEY, TRUSTED_HOSTS, CORS_ORIGINS,
+# the prod-safety toggles) is wired automatically below so the
+# Settings model validator passes on first boot.
+
+services:
+  - type: web
+    name: esther
+    # Render's modern Docker runtime. Builds from ./Dockerfile.
+    runtime: docker
+    plan: starter
+    region: oregon
+    branch: main
+    autoDeploy: true
+    # /api/livez is the k8s-convention liveness probe — cheap, never
+    # touches fetch_snapshot, always 200 when the FastAPI app is wired.
+    healthCheckPath: /api/livez
+    # 1GB persistent disk for SQLite (users / sessions / watchlists,
+    # health log + accuracy ledger, retry queue, calibration store)
+    # plus the on-disk caches (research, analyzer, compare narrative,
+    # sector, movement, spotlight, fundamentals, OHLCV bars, news).
+    # Mounted at /app/data so the default Settings paths resolve here.
+    disk:
+      name: esther-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      # --- Runtime posture ---
+      - key: APP_ENV
+        value: prod
+      - key: LOG_LEVEL
+        value: INFO
+      - key: LOG_JSON
+        value: "true"
+
+      # --- Auth + sessions ---
+      # Render generates a fresh 256-bit value on service creation and
+      # keeps it stable across deploys. The Settings validator refuses
+      # the dev placeholder in prod, so we never ship that.
+      - key: SESSION_SECRET_KEY
+        generateValue: true
+      - key: SECURE_COOKIES
+        value: "true"
+      - key: SESSION_TTL_DAYS
+        value: "30"
+
+      # --- HTTP edge ---
+      # Render terminates TLS at its load balancer and forwards via
+      # X-Forwarded-Proto / X-Forwarded-For — we trust those headers
+      # because the front door is Render-owned, not the open internet.
+      - key: TRUST_PROXY_HEADERS
+        value: "true"
+      # TRUSTED_HOSTS is auto-resolved to the service's
+      # <service-name>.onrender.com hostname via Render's blueprint
+      # property reference. If you later attach a custom domain, edit
+      # this entry in the dashboard to include both, comma-separated.
+      - key: TRUSTED_HOSTS
+        fromService:
+          type: web
+          name: esther
+          property: host
+      # Same-origin deploy: FastAPI also serves the bundled Vite
+      # frontend from web/dist/, so the browser never makes CORS
+      # requests. The empty value lets Settings' field validator
+      # produce an empty list (blocks any accidental cross-origin
+      # callers) without breaking the production-safety validator
+      # (which only refuses the literal "*" wildcard).
+      - key: CORS_ORIGINS
+        value: ""
+
+      # --- Snapshot pipeline ---
+      # Long-form watchlist seed — keep it short on a starter plan so
+      # the first snapshot tick stays under Render's 10s request
+      # timeout while the FinBERT model warms up.
+      - key: DEFAULT_WATCHLIST_SYMBOLS
+        value: AAPL,MSFT,NVDA,GOOGL,TSLA
+
+      # --- Persistence ---
+      # All defaults already point under PROJECT_ROOT / "data", which
+      # the disk above mounts at /app/data — these are explicit so a
+      # future config refactor doesn't silently start writing
+      # somewhere else.
+      - key: USER_STORE_PATH
+        value: /app/data/users.db
+      - key: HEALTH_STORE_PATH
+        value: /app/data/health.db
+      - key: RETRY_QUEUE_PATH
+        value: /app/data/retry_queue.db
+      - key: CALIBRATION_STORE_PATH
+        value: /app/data/calibration.db
+      - key: DATABASE_URL
+        value: sqlite:////app/data/esther.db
+
+      # --- Workers ---
+      # Enable the retry worker + calibration maturation worker on
+      # prod (off-by-default in dev so local sessions don't drift).
+      - key: RETRY_QUEUE_WORKER_ENABLED
+        value: "true"
+      - key: CALIBRATION_MATURATION_ENABLED
+        value: "true"
+
+      # --- Alpaca (paper-feed only — data layer refuses live URLs) ---
+      - key: ALPACA_BASE_URL
+        value: https://paper-api.alpaca.markets
+      - key: ALPACA_DATA_FEED
+        value: iex
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_API_SECRET
+        sync: false
+
+      # --- Fundamentals providers (all optional; chain skips unset) ---
+      - key: FMP_API_KEY
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: ALPHAVANTAGE_API_KEY
+        sync: false
+      - key: SEC_EDGAR_USER_AGENT
+        sync: false
+
+      # --- AI (optional; falls back to deterministic templates) ---
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: LLM_MODEL
+        value: claude-opus-4-7
