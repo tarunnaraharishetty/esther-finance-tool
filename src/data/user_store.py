@@ -432,7 +432,8 @@ class UserStore:
         cur = conn.execute(
             """
             SELECT s.user_id, s.expires_at,
-                   u.id, u.email, u.created_at, u.last_login_at
+                   u.id, u.email, u.created_at, u.last_login_at,
+                   u.email_verified
             FROM sessions s
             JOIN users u ON u.id = s.user_id
             WHERE s.token = ?
@@ -462,6 +463,7 @@ class UserStore:
             email=row[3],
             created_at=_parse_iso(row[4]),
             last_login_at=_parse_iso(row[5]) if row[5] is not None else None,
+            email_verified=bool(row[6]),
         )
 
     def revoke_session(self, token: str) -> bool:

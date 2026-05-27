@@ -447,3 +447,260 @@ def test_password_reset_token_is_single_use_via_route(
         json={"token": token, "new_password": "differentpw9"},
     )
     assert second.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Email verification
+# ---------------------------------------------------------------------------
+
+
+def _csrf_header(client: TestClient) -> dict[str, str]:
+    token = client.cookies.get("esther_csrf")
+    return {"X-CSRF-Token": token} if token else {}
+
+
+def test_signup_returns_unverified_and_mints_verification_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh signup leaves the user unverified and creates a
+    pending verification token (we read the store directly to
+    confirm — the route's response shape doesn't include the
+    token for security reasons)."""
+    monkeypatch.chdir(tmp_path)
+    store = UserStore(tmp_path / "users.db")
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, user_store=store)
+    client = TestClient(app)
+
+    res = client.post(
+        "/api/auth/signup",
+        json={"email": "u@e.com", "password": "longenough"},
+    )
+    assert res.status_code == 201
+    assert res.json()["user"]["email_verified"] is False
+
+    # Pull the freshly minted token row to confirm the auto-send fired.
+    conn = store._connect()
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM email_verification_tokens WHERE used_at IS NULL"
+    ).fetchone()
+    assert rows[0] == 1
+
+
+def test_verify_confirm_flips_email_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: signup → pull token → confirm → /me now shows
+    email_verified=True."""
+    monkeypatch.chdir(tmp_path)
+    store = UserStore(tmp_path / "users.db")
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, user_store=store)
+    client = TestClient(app)
+
+    res = client.post(
+        "/api/auth/signup",
+        json={"email": "u@e.com", "password": "longenough"},
+    )
+    assert res.status_code == 201
+    conn = store._connect()
+    row = conn.execute(
+        "SELECT token FROM email_verification_tokens WHERE used_at IS NULL"
+    ).fetchone()
+    assert row is not None
+    token = row[0]
+
+    res = client.post("/api/auth/verify/confirm", json={"token": token})
+    assert res.status_code == 200
+    me = client.get("/api/auth/me")
+    assert me.json()["user"]["email_verified"] is True
+
+
+def test_verify_confirm_rejects_invalid_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same generic 400 as the password-reset confirm — collapses
+    unknown / expired / replayed into one branch."""
+    monkeypatch.chdir(tmp_path)
+    client = _build_client(tmp_path)
+    res = client.post(
+        "/api/auth/verify/confirm",
+        json={"token": "definitely-not-a-real-token-aaaaaaaa"},
+    )
+    assert res.status_code == 400
+    assert "invalid or has expired" in res.json()["detail"]
+
+
+def test_verify_request_resends_when_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``POST /api/auth/verify/request`` is authenticated and mints
+    a fresh token + dispatches the email when the user isn't yet
+    verified. Tokens stack (re-request use case)."""
+    monkeypatch.chdir(tmp_path)
+    store = UserStore(tmp_path / "users.db")
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, user_store=store)
+    client = TestClient(app)
+
+    client.post(
+        "/api/auth/signup",
+        json={"email": "u@e.com", "password": "longenough"},
+    )
+    # Signup auto-minted 1. /verify/request mints another.
+    res = client.post("/api/auth/verify/request", headers=_csrf_header(client))
+    assert res.status_code == 200
+    assert res.json() == {"ok": True, "already_verified": False}
+    conn = store._connect()
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM email_verification_tokens WHERE used_at IS NULL"
+    ).fetchone()
+    assert rows[0] == 2
+
+
+def test_verify_request_no_ops_when_already_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same wire shape but ``already_verified=True`` so the
+    frontend banner can call /verify/request unconditionally
+    during reconciliation."""
+    monkeypatch.chdir(tmp_path)
+    store = UserStore(tmp_path / "users.db")
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, user_store=store)
+    client = TestClient(app)
+
+    client.post(
+        "/api/auth/signup",
+        json={"email": "u@e.com", "password": "longenough"},
+    )
+    # Manually verify the user.
+    user = store.get_user_by_email("u@e.com")
+    assert user is not None
+    from datetime import timedelta
+
+    token = store.create_email_verification_token(user.id, timedelta(hours=1))
+    client.post("/api/auth/verify/confirm", json={"token": token})
+
+    res = client.post("/api/auth/verify/request", headers=_csrf_header(client))
+    assert res.status_code == 200
+    assert res.json()["already_verified"] is True
+
+
+def test_verify_request_rejects_anonymous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    client = _build_client(tmp_path)
+    res = client.post("/api/auth/verify/request")
+    assert res.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Account deletion
+# ---------------------------------------------------------------------------
+
+
+def test_delete_account_requires_correct_password(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defense against XSS-driven hijack: even with a valid session
+    cookie, the password must be re-entered. Wrong password → 403,
+    user still exists."""
+    monkeypatch.chdir(tmp_path)
+    store = UserStore(tmp_path / "users.db")
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, user_store=store)
+    client = TestClient(app)
+
+    client.post(
+        "/api/auth/signup",
+        json={"email": "u@e.com", "password": "rightpw1234"},
+    )
+    res = client.request(
+        "DELETE",
+        "/api/auth/account",
+        json={"password": "wrongguess"},
+        headers=_csrf_header(client),
+    )
+    assert res.status_code == 403
+    assert store.get_user_by_email("u@e.com") is not None
+
+
+def test_delete_account_hard_deletes_user_and_cookies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Happy path: correct password → user row gone, sessions
+    cascade gone, cookies cleared, follow-up /me returns null."""
+    monkeypatch.chdir(tmp_path)
+    store = UserStore(tmp_path / "users.db")
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, user_store=store)
+    client = TestClient(app)
+
+    client.post(
+        "/api/auth/signup",
+        json={"email": "u@e.com", "password": "rightpw1234"},
+    )
+    res = client.request(
+        "DELETE",
+        "/api/auth/account",
+        json={"password": "rightpw1234"},
+        headers=_csrf_header(client),
+    )
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
+    # User row gone.
+    assert store.get_user_by_email("u@e.com") is None
+    # /me on the (now-cleared) cookie jar returns anonymous.
+    me = client.get("/api/auth/me")
+    assert me.json()["user"] is None
+
+
+def test_delete_account_purges_watchlist_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cross-store hook must wipe per-user watchlist rows
+    (WatchlistStore has no FK to ``users(id)`` so the user-row
+    CASCADE doesn't reach them)."""
+    from src.data.watchlist_store import WatchlistStore
+
+    monkeypatch.chdir(tmp_path)
+    store = UserStore(tmp_path / "users.db")
+    wl = WatchlistStore(tmp_path / "users.db")
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, user_store=store, watchlist_store=wl)
+    client = TestClient(app)
+
+    res = client.post(
+        "/api/auth/signup",
+        json={"email": "u@e.com", "password": "rightpw1234"},
+    )
+    assert res.status_code == 201
+    user = store.get_user_by_email("u@e.com")
+    assert user is not None
+    # Signup-seed put 5 rows in the watchlist by default.
+    assert len(wl.list_for(user.id)) > 0
+
+    res = client.request(
+        "DELETE",
+        "/api/auth/account",
+        json={"password": "rightpw1234"},
+        headers=_csrf_header(client),
+    )
+    assert res.status_code == 200
+    # Watchlist rows for the now-deleted user are gone.
+    assert wl.list_for(user.id) == []
+
+
+def test_delete_account_rejects_anonymous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    client = _build_client(tmp_path)
+    res = client.request(
+        "DELETE",
+        "/api/auth/account",
+        json={"password": "anything12"},
+    )
+    assert res.status_code == 401

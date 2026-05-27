@@ -1,9 +1,10 @@
 """User accounts + session API surface.
 
-Six routes, all backed by :class:`UserStore`:
+Eight routes, all backed by :class:`UserStore`:
 
 * ``POST /api/auth/signup`` — create a new account, return user +
-  set session cookie.
+  set session cookie. Auto-dispatches a verification email (best
+  effort — signup succeeds even if SMTP is unreachable).
 * ``POST /api/auth/login``  — verify credentials, set session cookie.
 * ``POST /api/auth/logout`` — revoke current session, clear cookie.
 * ``GET  /api/auth/me``     — return the current user or ``null``.
@@ -11,6 +12,11 @@ Six routes, all backed by :class:`UserStore`:
   email it. Always returns 200 (no email enumeration).
 * ``POST /api/auth/password-reset/confirm`` — redeem a token + set
   a new password + revoke every session for the user.
+* ``POST /api/auth/verify/request`` — authenticated. Re-mint + re-
+  send a verification email to the current user. No-op (200) when
+  the user is already verified.
+* ``POST /api/auth/verify/confirm`` — public, redeem a verification
+  token. Flips ``email_verified=True`` on the user.
 
 Session model
 -------------
@@ -42,6 +48,10 @@ from fastapi.concurrency import run_in_threadpool
 from itsdangerous import BadSignature, URLSafeSerializer
 from pydantic import BaseModel, Field, field_validator
 
+from src.api.email_verification_emailer import (
+    EmailVerificationEmailer,
+    LogEmailVerificationEmailer,
+)
 from src.api.password_reset_emailer import (
     LogPasswordResetEmailer,
     PasswordResetEmailer,
@@ -118,6 +128,19 @@ class PasswordResetConfirmBody(BaseModel):
     new_password: str = Field(min_length=8, max_length=200)
 
 
+class EmailVerificationConfirmBody(BaseModel):
+    """Body for ``POST /api/auth/verify/confirm``."""
+
+    token: str = Field(min_length=20, max_length=80)
+
+
+class AccountDeleteBody(BaseModel):
+    """Body for ``DELETE /api/auth/account``. Password re-entry
+    bounds the blast radius of a stolen session cookie."""
+
+    password: str = Field(min_length=1, max_length=200)
+
+
 def register_auth_routes(
     app: FastAPI,
     *,
@@ -134,6 +157,11 @@ def register_auth_routes(
     password_reset_base_url: str | None = None,
     password_reset_request_rate_limit_dep: Callable[..., Awaitable[None]] | None = None,
     password_reset_confirm_rate_limit_dep: Callable[..., Awaitable[None]] | None = None,
+    email_verification_emailer: EmailVerificationEmailer | None = None,
+    email_verification_ttl: timedelta = timedelta(hours=24),
+    email_verification_base_url: str | None = None,
+    email_verification_request_rate_limit_dep: Callable[..., Awaitable[None]] | None = None,
+    on_account_deleted: Callable[[int], None] | None = None,
 ) -> None:
     """Attach ``/api/auth/*`` routes to ``app``.
 
@@ -192,6 +220,45 @@ def register_auth_routes(
         if password_reset_emailer is not None
         else LogPasswordResetEmailer()
     )
+    verify_emailer: EmailVerificationEmailer = (
+        email_verification_emailer
+        if email_verification_emailer is not None
+        else LogEmailVerificationEmailer()
+    )
+
+    def _build_verify_url(request: Request, token: str) -> str:
+        """Build the verification link the email points at.
+
+        Same shape as the password-reset URL: a single page on the
+        frontend (``/verify-email?token=…``) that POSTs the token
+        back via the confirm route. ``email_verification_base_url``
+        overrides the auto-derived origin when API + frontend live
+        on different hosts.
+        """
+        base = (
+            email_verification_base_url
+            if email_verification_base_url
+            else f"{request.url.scheme}://{request.url.netloc}"
+        )
+        return f"{base.rstrip('/')}/verify-email?token={quote(token)}"
+
+    async def _send_verification_for(user: User, request: Request) -> None:
+        """Mint a token + dispatch the link. Best-effort: any
+        transport failure logs but doesn't raise — signup must
+        succeed even when SMTP is down (the user can re-request
+        verification later via /verify/request)."""
+        if user.email_verified:
+            return
+        token = user_store.create_email_verification_token(
+            user.id, email_verification_ttl
+        )
+        verify_url = _build_verify_url(request, token)
+        await run_in_threadpool(verify_emailer.send, user.email, verify_url)
+        log.info(
+            "auth.email_verification.dispatched",
+            user_id=user.id,
+            email=user.email,
+        )
 
     router = APIRouter(prefix="/api/auth", tags=["auth"])
     signup_dependencies = (
@@ -210,13 +277,26 @@ def register_auth_routes(
         if password_reset_confirm_rate_limit_dep
         else []
     )
+    verify_request_dependencies = (
+        [Depends(email_verification_request_rate_limit_dep)]
+        if email_verification_request_rate_limit_dep
+        else []
+    )
 
     @router.post("/signup", status_code=201, dependencies=signup_dependencies)
-    async def signup(body: SignupRequest, response: Response) -> dict[str, Any]:
+    async def signup(
+        body: SignupRequest, request: Request, response: Response
+    ) -> dict[str, Any]:
         """Create a new account + log the user in.
 
         Returns 201 with ``{user}`` and sets the session cookie on
         the response. 409 if the email is already registered.
+
+        Side effect: dispatches a verification email to the new
+        address. Best-effort — SMTP transport errors are swallowed
+        at the emailer (the user can re-request via /verify/request
+        if the email doesn't arrive). The verification banner stays
+        up on the frontend until the user redeems the token.
         """
         try:
             user = user_store.create_user(body.email, body.password)
@@ -259,6 +339,20 @@ def register_auth_routes(
             secure=secure_cookies,
         )
         _set_csrf_cookie_on(response, secure=secure_cookies, ttl_seconds=ttl_seconds)
+        # Auto-dispatch verification email. Failures inside the
+        # emailer are already swallowed; wrap the mint+dispatch in
+        # one more try/except so a UserStore error (extremely
+        # unlikely — the user row was just created) doesn't abort
+        # the signup response either. The frontend banner + a
+        # /verify/request retry are the recovery path.
+        try:
+            await _send_verification_for(user, request)
+        except Exception as exc:
+            log.warning(
+                "auth.signup.verify_dispatch_failed",
+                user_id=user.id,
+                error=str(exc),
+            )
         log.info("auth.signup.ok", user_id=user.id, email=user.email)
         return {"user": user.to_wire()}
 
@@ -438,6 +532,134 @@ def register_auth_routes(
             sessions_revoked=revoked,
         )
         # Belt-and-braces: clear cookies on the response too.
+        _clear_session_cookie(
+            response, cookie_name=cookie_name, secure=secure_cookies
+        )
+        _clear_csrf_cookie_on(response, secure=secure_cookies)
+        return {"ok": True}
+
+    @router.post(
+        "/verify/request",
+        status_code=200,
+        dependencies=verify_request_dependencies,
+    )
+    async def verify_request(request: Request) -> dict[str, Any]:
+        """Re-send the verification email to the current user.
+
+        Authenticated route — relies on the auth gate having
+        resolved a user before this handler runs. Returns 401 if
+        unauthenticated. No-op (200) when the user is already
+        verified — same wire shape so the frontend banner can call
+        unconditionally during reconciliation.
+
+        Rate-limited to bound the email queue (real or operator-
+        manual) under accidental re-click spam.
+        """
+        user = await get_current_user(request)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        if user.email_verified:
+            return {"ok": True, "already_verified": True}
+        await _send_verification_for(user, request)
+        return {"ok": True, "already_verified": False}
+
+    @router.post("/verify/confirm", status_code=200)
+    async def verify_confirm(
+        body: EmailVerificationConfirmBody,
+    ) -> dict[str, Any]:
+        """Public route — redeem a verification token.
+
+        Same shape as the password-reset confirm: invalid / expired /
+        replayed all collapse to one generic 400. The token's
+        consume path atomically marks it used + flips the user's
+        ``email_verified`` bit (one transaction over two UPDATEs).
+
+        Idempotent on already-verified users — the consume path is
+        a no-op flip when the user is already verified, and the
+        response wire shape is identical, so a double-clicked
+        verification link doesn't show the user an error on the
+        second redeem.
+        """
+        user = user_store.consume_email_verification_token(body.token)
+        if user is None:
+            log.warning("auth.email_verification.invalid_token")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Verification link is invalid or has expired. "
+                    "Request a new one."
+                ),
+            )
+        log.info(
+            "auth.email_verification.confirmed",
+            user_id=user.id,
+            email=user.email,
+        )
+        return {"ok": True}
+
+    @router.delete("/account", status_code=200)
+    async def delete_account(
+        body: AccountDeleteBody, request: Request, response: Response
+    ) -> dict[str, Any]:
+        """Hard-delete the current account.
+
+        Auth contract:
+
+        * Requires a valid session cookie (401 if anonymous).
+        * Requires re-entry of the password in the request body
+          (403 on mismatch). Even with a stolen session cookie an
+          attacker cannot silently delete the account.
+
+        Side effects (in order):
+
+        1. ``on_account_deleted`` hook fires before the user row
+           is removed so the caller (app.py) can purge cross-store
+           data without a FK (watchlists live in WatchlistStore
+           with no FK back to ``users(id)``).
+        2. ``user_store.delete_user`` — the user row goes; FK
+           cascades wipe sessions + password-reset tokens + email-
+           verification tokens in the same statement.
+        3. Session + CSRF cookies cleared on the response so the
+           caller's browser doesn't keep stale credentials.
+
+        Idempotent at the "user is already gone" level — if the
+        cascade ran but the cookies remained, a second call hits
+        401 from the auth gate (no current user) and the client
+        moves on.
+        """
+        user = await get_current_user(request)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        if not user_store.verify_password(user.id, body.password):
+            log.warning(
+                "auth.account_delete.wrong_password",
+                user_id=user.id,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Password is incorrect.",
+            )
+        # Cross-store purge hook fires first so a hook failure
+        # leaves a recoverable state (user row still there, can
+        # retry deletion).
+        if on_account_deleted is not None:
+            try:
+                on_account_deleted(user.id)
+            except Exception as exc:
+                log.error(
+                    "auth.account_delete.cross_store_failed",
+                    user_id=user.id,
+                    error=str(exc),
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Could not finish deleting the account. "
+                        "Please try again in a moment."
+                    ),
+                ) from None
+        deleted = user_store.delete_user(user.id)
+        log.info("auth.account_delete.ok", user_id=user.id, deleted=deleted)
         _clear_session_cookie(
             response, cookie_name=cookie_name, secure=secure_cookies
         )
