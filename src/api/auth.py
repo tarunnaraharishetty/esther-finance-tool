@@ -1,6 +1,6 @@
 """User accounts + session API surface.
 
-Eight routes, all backed by :class:`UserStore`:
+Ten routes, all backed by :class:`UserStore`:
 
 * ``POST /api/auth/signup`` — create a new account, return user +
   set session cookie. Auto-dispatches a verification email (best
@@ -17,6 +17,11 @@ Eight routes, all backed by :class:`UserStore`:
   the user is already verified.
 * ``POST /api/auth/verify/confirm`` — public, redeem a verification
   token. Flips ``email_verified=True`` on the user.
+* ``POST /api/auth/password/change`` — authenticated. Verify the
+  current password, set a new one, revoke every other session for
+  the user (rotate the current one so the caller stays logged in).
+* ``DELETE /api/auth/account`` — authenticated. Re-auth via
+  password, hard-delete the user + cross-store data.
 
 Session model
 -------------
@@ -139,6 +144,18 @@ class AccountDeleteBody(BaseModel):
     bounds the blast radius of a stolen session cookie."""
 
     password: str = Field(min_length=1, max_length=200)
+
+
+class PasswordChangeBody(BaseModel):
+    """Body for ``POST /api/auth/password/change``.
+
+    The current password is required for re-auth so a hijacked
+    session cookie can't silently rotate the credential. Minimums
+    match :class:`SignupRequest`.
+    """
+
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
 
 
 def register_auth_routes(
@@ -594,6 +611,79 @@ def register_auth_routes(
             "auth.email_verification.confirmed",
             user_id=user.id,
             email=user.email,
+        )
+        return {"ok": True}
+
+    @router.post("/password/change", status_code=200)
+    async def change_password(
+        body: PasswordChangeBody, request: Request, response: Response
+    ) -> dict[str, Any]:
+        """Rotate the current user's password.
+
+        Auth contract:
+
+        * Requires a valid session cookie (401 anonymous).
+        * Requires re-entry of the current password (403 mismatch).
+          Without this, a hijacked session cookie could silently
+          rotate the credential — locking the legitimate user out.
+
+        Side effects (in order):
+
+        1. ``update_password`` — bcrypt at the same cost factor as
+           signup.
+        2. ``revoke_all_sessions_for_user`` — wipes EVERY session,
+           including the caller's. Every other device gets logged
+           out (defense in depth against compromised cookies on
+           other devices).
+        3. ``create_session`` — mint a fresh session for the
+           current device so the caller stays logged in. The new
+           token + new cookie ship back on the response.
+
+        The session rotation matters: without it, an XSS exploit
+        that previously captured the cookie would still have a
+        valid token after the password change.
+        """
+        user = await get_current_user(request)
+        if user is None:
+            raise HTTPException(
+                status_code=401, detail="Authentication required."
+            )
+        if not user_store.verify_password(user.id, body.current_password):
+            log.warning(
+                "auth.password_change.wrong_current",
+                user_id=user.id,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Current password is incorrect.",
+            )
+        if not user_store.update_password(user.id, body.new_password):
+            # Defensive — the user row's existence is what made the
+            # auth gate let us in; update missing it is a deeper bug.
+            log.error("auth.password_change.update_failed", user_id=user.id)
+            raise HTTPException(
+                status_code=500,
+                detail="Could not update password. Please try again.",
+            )
+        revoked = user_store.revoke_all_sessions_for_user(user.id)
+        new_session = user_store.create_session(user.id, ttl)
+        _set_session_cookie(
+            response,
+            serializer.dumps(new_session.token),
+            cookie_name=cookie_name,
+            ttl_seconds=ttl_seconds,
+            secure=secure_cookies,
+        )
+        # CSRF token is rotated alongside the session so an XSS
+        # exploit that captured the old one can't fire the next
+        # mutation. The cookie's max-age matches the new session.
+        _set_csrf_cookie_on(
+            response, secure=secure_cookies, ttl_seconds=ttl_seconds
+        )
+        log.info(
+            "auth.password_change.ok",
+            user_id=user.id,
+            other_sessions_revoked=max(revoked - 1, 0),
         )
         return {"ok": True}
 

@@ -704,3 +704,136 @@ def test_delete_account_rejects_anonymous(
         json={"password": "anything12"},
     )
     assert res.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Password change (logged-in flow)
+# ---------------------------------------------------------------------------
+
+
+def test_change_password_rejects_wrong_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-auth gate — wrong current password → 403, password unchanged."""
+    monkeypatch.chdir(tmp_path)
+    store = UserStore(tmp_path / "users.db")
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, user_store=store)
+    client = TestClient(app)
+
+    client.post(
+        "/api/auth/signup",
+        json={"email": "u@e.com", "password": "rightpw1234"},
+    )
+    res = client.post(
+        "/api/auth/password/change",
+        json={
+            "current_password": "wrongguess",
+            "new_password": "newpw5678",
+        },
+        headers=_csrf_header(client),
+    )
+    assert res.status_code == 403
+    # Original password still works.
+    client.cookies.clear()
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "u@e.com", "password": "rightpw1234"},
+    )
+    assert login.status_code == 200
+
+
+def test_change_password_rotates_session_and_revokes_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Happy path: password swapped, caller stays logged in via a
+    fresh session cookie, every OTHER session for the user is
+    revoked. Defense in depth against a compromised cookie on a
+    different device."""
+    monkeypatch.chdir(tmp_path)
+    store = UserStore(tmp_path / "users.db")
+    controller = MockDashboardController(watchlist=["AAPL"], seed=7)
+    app = create_app(controller, user_store=store)
+    client = TestClient(app)
+
+    res = client.post(
+        "/api/auth/signup",
+        json={"email": "u@e.com", "password": "oldpw1234"},
+    )
+    assert res.status_code == 201
+    # Stash the cookie the test client got from signup.
+    pre_cookie = client.cookies.get("esther_session")
+    assert pre_cookie is not None
+
+    # Mint a "second device" session directly on the store.
+    user = store.get_user_by_email("u@e.com")
+    assert user is not None
+    from datetime import timedelta
+
+    other = store.create_session(user.id, timedelta(days=1))
+
+    res = client.post(
+        "/api/auth/password/change",
+        json={
+            "current_password": "oldpw1234",
+            "new_password": "newpw5678",
+        },
+        headers=_csrf_header(client),
+    )
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
+
+    # The "other device" session is gone.
+    assert store.lookup_session(other.token) is None
+    # The current device's NEW cookie is different from the pre-change one.
+    post_cookie = client.cookies.get("esther_session")
+    assert post_cookie is not None
+    assert post_cookie != pre_cookie
+    # /me still resolves to the user on the same client jar — caller
+    # didn't get logged out by their own action.
+    me = client.get("/api/auth/me")
+    assert me.json()["user"] is not None
+    # Old password rejected, new password accepted.
+    client.cookies.clear()
+    bad = client.post(
+        "/api/auth/login",
+        json={"email": "u@e.com", "password": "oldpw1234"},
+    )
+    assert bad.status_code == 401
+    good = client.post(
+        "/api/auth/login",
+        json={"email": "u@e.com", "password": "newpw5678"},
+    )
+    assert good.status_code == 200
+
+
+def test_change_password_rejects_anonymous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    client = _build_client(tmp_path)
+    res = client.post(
+        "/api/auth/password/change",
+        json={"current_password": "any12345", "new_password": "newpw1234"},
+    )
+    assert res.status_code == 401
+
+
+def test_change_password_rejects_short_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pydantic field validator on ``new_password`` enforces an
+    8-char minimum. Catch the wire-level 422 so the frontend's
+    minLength=8 isn't the only line of defense."""
+    monkeypatch.chdir(tmp_path)
+    client = _build_client(tmp_path)
+    client.post(
+        "/api/auth/signup",
+        json={"email": "u@e.com", "password": "longenough"},
+    )
+    res = client.post(
+        "/api/auth/password/change",
+        json={"current_password": "longenough", "new_password": "short"},
+        headers=_csrf_header(client),
+    )
+    assert res.status_code == 422
