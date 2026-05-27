@@ -26,6 +26,7 @@ export interface AuthUser {
   email: string;
   created_at: string; // ISO-8601
   last_login_at: string | null;
+  email_verified: boolean;
 }
 
 /** Display-friendly handle derived from email (the part before @). */

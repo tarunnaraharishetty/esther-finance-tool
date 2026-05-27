@@ -20,6 +20,8 @@ interface Props {
    *  the legacy placeholder avatar. */
   authUser?: AuthUser | null;
   onLogout?: () => Promise<void>;
+  /** Invoked after the user confirms account deletion. */
+  onAccountDeleted?: () => Promise<void> | void;
 }
 
 export function TopNav({
@@ -32,6 +34,7 @@ export function TopNav({
   onOpenPalette,
   authUser,
   onLogout,
+  onAccountDeleted,
 }: Props) {
   const [query, setQuery] = useState("");
   const user = useUser();
@@ -84,7 +87,11 @@ export function TopNav({
           <Bell className="h-4 w-4" />
         </Button>
         {authUser && onLogout ? (
-          <UserMenu user={authUser} onLogout={onLogout} />
+          <UserMenu
+            user={authUser}
+            onLogout={onLogout}
+            onAccountDeleted={onAccountDeleted}
+          />
         ) : (
           <div className="flex items-center gap-2 rounded-full border border-border/60 bg-secondary/40 py-1 pl-1 pr-3 transition-colors hover:border-primary/40">
             <div className="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br from-primary to-accent shadow-glow">
